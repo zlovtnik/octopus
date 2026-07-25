@@ -14,6 +14,7 @@ import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import scala.concurrent.duration.*
 
 class TidbRepository(xa: Transactor[IO]):
   import TidbRepository.log
@@ -307,58 +308,36 @@ class TidbRepository(xa: Transactor[IO]):
         val safeLeaseSeconds = leaseSeconds.max(1)
 
         for
-          candidates <- (fr"""SELECT outbox_id
-                               FROM outbox_events
-                               WHERE destination_topic IN (""" ++ topics ++ fr""" )
-                                 AND status = 'pending'
-                                 AND next_attempt_at <= CURRENT_TIMESTAMP(6)
-                                 AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP(6))
-                                 AND attempt_count < max_attempts
-                               ORDER BY created_at, outbox_id
-                               LIMIT 32""").query[String].to[List]
-          claimedId <- claimFirstOutbox(candidates, ownerId, token, safeLeaseSeconds)
-          claimed <- claimedId.traverse { outboxId =>
+          updated <- (fr"""UPDATE outbox_events
+                            SET status = 'leased',
+                                owner_id = $ownerId,
+                                lease_token = $token,
+                                fence = fence + 1,
+                                attempt_count = attempt_count + 1,
+                                lease_expires_at = TIMESTAMPADD(SECOND, $safeLeaseSeconds, CURRENT_TIMESTAMP(6)),
+                                updated_at = CURRENT_TIMESTAMP(6)
+                            WHERE destination_topic IN (""" ++ topics ++ fr""" )
+                              AND status = 'pending'
+                              AND next_attempt_at <= CURRENT_TIMESTAMP(6)
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP(6))
+                              AND attempt_count < max_attempts
+                            ORDER BY created_at, outbox_id
+                            LIMIT 1""").update.run
+          claimed <- if updated == 1 then
             sql"""SELECT outbox_id, destination_topic, message_key, CAST(payload AS CHAR),
-                          attempt_count, max_attempts, owner_id, lease_token, fence
-                   FROM outbox_events
-                   WHERE outbox_id = $outboxId
-                     AND owner_id = $ownerId
-                     AND lease_token = $token
-                     AND status = 'leased'"""
+                         attempt_count, max_attempts, owner_id, lease_token, fence
+                  FROM outbox_events
+                  WHERE owner_id = $ownerId
+                    AND lease_token = $token
+                    AND status = 'leased'"""
               .query[(String, String, String, String, Int, Int, String, String, Long)]
               .unique
               .map { case (id, topic, key, payload, attempts, maxAttempts, owner, leaseToken, fence) =>
-                OutboxRecord(id, topic, key, payload, attempts, maxAttempts, LeaseIdentity(owner, leaseToken, fence))
+                Some(OutboxRecord(id, topic, key, payload, attempts, maxAttempts, LeaseIdentity(owner, leaseToken, fence)))
               }
-          }
+          else none[OutboxRecord].pure[ConnectionIO]
         yield claimed
     }
-
-  private def claimFirstOutbox(
-      candidates: List[String],
-      ownerId: String,
-      token: String,
-      leaseSeconds: Int
-  ): ConnectionIO[Option[String]] =
-    candidates match
-      case Nil => none[String].pure[ConnectionIO]
-      case outboxId :: remaining =>
-        sql"""UPDATE outbox_events
-                  SET status = 'leased',
-                  owner_id = $ownerId,
-                  lease_token = $token,
-                  fence = fence + 1,
-                  attempt_count = attempt_count + 1,
-                  lease_expires_at = TIMESTAMPADD(SECOND, $leaseSeconds, CURRENT_TIMESTAMP(6)),
-                  updated_at = CURRENT_TIMESTAMP(6)
-              WHERE outbox_id = $outboxId
-                AND status = 'pending'
-                AND next_attempt_at <= CURRENT_TIMESTAMP(6)
-                AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP(6))
-                AND attempt_count < max_attempts""".update.run.flatMap {
-          case 1 => outboxId.some.pure[ConnectionIO]
-          case _ => claimFirstOutbox(remaining, ownerId, token, leaseSeconds)
-        }
 
   def acknowledgeOutbox(record: OutboxRecord): IO[Either[DatabaseError, Boolean]] =
     runDb("tidb.acknowledge_outbox") {
@@ -922,7 +901,7 @@ class TidbRepository(xa: Transactor[IO]):
     }
 
   private def runDb[A](operation: String)(fa: ConnectionIO[A]): IO[Either[DatabaseError, A]] =
-    fa.transact(xa)
+    TidbRepository.retryTransient(operation)(fa.transact(xa))
       .map(Right(_))
       .handleError { cause =>
         log.error("db_error", cause, "operation" -> operation)
@@ -944,3 +923,25 @@ class TidbRepository(xa: Transactor[IO]):
 
 object TidbRepository:
   private val log = StructuredLogger(getClass)
+  private val transactionRetryMaxAttempts = 5
+  private val transactionRetryBaseDelay = 25.millis
+
+  private[tidb] def retryTransient[A](operation: String)(fa: IO[A]): IO[A] =
+    def loop(attempt: Int): IO[A] =
+      fa.handleErrorWith { cause =>
+        if attempt < transactionRetryMaxAttempts &&
+            TidbErrorClass.classify(cause) == TidbErrorClass.Retryable
+        then
+          val delay = transactionRetryBaseDelay * (1L << (attempt - 1))
+          IO(log.warn(
+            "tidb_transaction_retry",
+            "status" -> "retrying",
+            "operation" -> operation,
+            "attempt" -> s"$attempt/$transactionRetryMaxAttempts",
+            "delay_ms" -> delay.toMillis.toString,
+            "error" -> Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
+          )) *> IO.sleep(delay) *> loop(attempt + 1)
+        else IO.raiseError(cause)
+      }
+
+    loop(1)

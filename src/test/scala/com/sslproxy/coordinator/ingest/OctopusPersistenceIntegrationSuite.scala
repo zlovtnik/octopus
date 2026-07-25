@@ -1,6 +1,8 @@
 package com.sslproxy.coordinator.ingest
 
 import cats.effect.IO
+import cats.effect.implicits.*
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.TiDbConfig
 import com.sslproxy.coordinator.domain.{
   BrokerRecordMetadata,
@@ -222,6 +224,35 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   test("startup schema preflight accepts canonical payload_ref column types"):
     requireDocker()
     new TidbSchemaPreflight(schemaTransactor, schemaConfig).validate()
+
+  test("concurrent outbox claims lease each eligible row exactly once"):
+    requireDocker()
+    val topic = "test.concurrent.claim"
+    val outboxIds = (1 to 12).toList.map { index =>
+      java.util.UUID.nameUUIDFromBytes(s"$topic:$index".getBytes(StandardCharsets.UTF_8)).toString
+    }
+
+    val insertRows = outboxIds.zipWithIndex.traverse_ { case (outboxId, index) =>
+      sql"""INSERT INTO outbox_events (
+              outbox_id, source_type, source_id, event_type,
+              destination_topic, message_key, payload, status,
+              attempt_count, max_attempts, next_attempt_at, created_at, updated_at
+            ) VALUES (
+              $outboxId, 'test', $outboxId, 'test.concurrent.claim',
+              $topic, ${s"message-$index"}, '{"test":true}', 'pending',
+              0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+            )""".update.run.void
+    }
+
+    for
+      _ <- insertRows.transact(xa)
+      claims <- outboxIds.indices.toList.parTraverseN(4) { index =>
+        repository.claimOutbox(s"concurrent-owner-$index", List(topic), leaseSeconds = 60)
+      }
+      records = claims.map(requireRight).flatten
+    yield
+      assertEquals(records.size, outboxIds.size)
+      assertEquals(records.map(_.outboxId).toSet, outboxIds.toSet)
 
   test("column type preflight reports wrong and missing payload_ref columns"):
     requireDocker()

@@ -640,6 +640,52 @@ final class TidbTransactor private (
       finally stmt.close()
     }
 
+  def preflightCheckColumnTypes(
+      requiredColumns: List[((String, String), String)]
+  ): IO[List[String]] =
+    if requiredColumns.isEmpty then IO.pure(List.empty)
+    else withConnection { conn =>
+      val predicates = requiredColumns.map(_ => "(TABLE_NAME = ? AND COLUMN_NAME = ?)").mkString(" OR ")
+      val sql = s"""
+        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND ($predicates)
+      """.stripMargin.trim
+
+      val stmt = conn.prepareStatement(sql)
+      try
+        stmt.setString(1, config.database)
+        requiredColumns.zipWithIndex.foreach { case (((table, column), _), index) =>
+          stmt.setString(index * 2 + 2, table)
+          stmt.setString(index * 2 + 3, column)
+        }
+        val rs = stmt.executeQuery()
+        val found = scala.collection.mutable.Map.empty[(String, String), String]
+        while rs.next() do
+          val key = (
+            rs.getString("TABLE_NAME").toLowerCase(java.util.Locale.ROOT),
+            rs.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT)
+          )
+          found += key -> rs.getString("DATA_TYPE").toLowerCase(java.util.Locale.ROOT)
+
+        requiredColumns.collect {
+          case ((table, column), expected)
+              if found.get((
+                table.toLowerCase(java.util.Locale.ROOT),
+                column.toLowerCase(java.util.Locale.ROOT)
+              )).forall(_ != expected.toLowerCase(java.util.Locale.ROOT)) =>
+            val actual = found.getOrElse(
+              (
+                table.toLowerCase(java.util.Locale.ROOT),
+                column.toLowerCase(java.util.Locale.ROOT)
+              ),
+              "missing"
+            )
+            s"$table.$column (expected $expected, found $actual)"
+        }
+      finally stmt.close()
+    }
+
   def close(): IO[Unit] =
     IO.blocking {
       try ds.close()

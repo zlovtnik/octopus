@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.ingest
 
 import cats.effect.IO
+import com.sslproxy.coordinator.config.TiDbConfig
 import com.sslproxy.coordinator.domain.{
   BrokerRecordMetadata,
   DatabaseError,
@@ -8,7 +9,7 @@ import com.sslproxy.coordinator.domain.{
   IngestionDisposition,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.tidb.{TidbRepository, TidbSchemaPreflight, TidbTransactor}
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
@@ -62,6 +63,19 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
   private lazy val repository = new TidbRepository(xa)
+  private lazy val schemaConfig = TiDbConfig(
+    host = mysql.getHost,
+    port = mysql.getFirstMappedPort.intValue(),
+    database = mysql.getDatabaseName,
+    user = mysql.getUsername,
+    password = mysql.getPassword,
+    poolSize = 4,
+    connectionTimeoutMs = 5000L,
+    statementTimeoutSecs = 30,
+    enabled = true,
+    warnOnly = false
+  )
+  private lazy val schemaTransactor = TidbTransactor.fromDataSource(dataSource, schemaConfig)
   private lazy val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
 
   override def beforeAll(): Unit =
@@ -204,6 +218,25 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
             )
           )
         }
+
+  test("startup schema preflight accepts canonical payload_ref column types"):
+    requireDocker()
+    new TidbSchemaPreflight(schemaTransactor, schemaConfig).validate()
+
+  test("column type preflight reports wrong and missing payload_ref columns"):
+    requireDocker()
+    schemaTransactor.preflightCheckColumnTypes(List(
+      ("sync_events" -> "payload_ref") -> "longtext",
+      ("sync_events" -> "missing_payload_ref") -> "mediumtext"
+    )).map { invalid =>
+      assertEquals(
+        invalid,
+        List(
+          "sync_events.payload_ref (expected longtext, found mediumtext)",
+          "sync_events.missing_payload_ref (expected mediumtext, found missing)"
+        )
+      )
+    }
 
   private def translatedAudit(rawJson: String, offset: Long): ScanRequestRecord =
     PayloadAuditConsumer.translateRecord(

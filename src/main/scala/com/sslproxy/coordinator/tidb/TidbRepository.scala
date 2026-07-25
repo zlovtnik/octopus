@@ -363,6 +363,7 @@ class TidbRepository(xa: Transactor[IO]):
   def acknowledgeOutbox(record: OutboxRecord): IO[Either[DatabaseError, Boolean]] =
     runDb("tidb.acknowledge_outbox") {
       for
+        loadBatchId <- validatedLoadBatchId(record)
         updated <- sql"""UPDATE outbox_events
                          SET status = 'published',
                              published_at = CURRENT_TIMESTAMP(6),
@@ -385,23 +386,45 @@ class TidbRepository(xa: Transactor[IO]):
                 ) ON DUPLICATE KEY UPDATE status = 'published', error_text = NULL,
                     attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
         else ().pure[ConnectionIO]
-        _ <- if updated == 1 && record.destinationTopic == "sync.oracle.load" then
+        _ <- if updated == 1 then loadBatchId.traverse_ { batchId =>
           sql"""UPDATE sync_batches
                 SET status = 'dispatched',
                     attempt_count = attempt_count + 1,
                     outbox_id = ${record.outboxId},
                     updated_at = CURRENT_TIMESTAMP(6)
-                WHERE batch_id = JSON_UNQUOTE(JSON_EXTRACT(${record.payload}, '$$.batch_id'))
+                WHERE batch_id = $batchId
                   AND status IN ('pending', 'dispatched')""".update.run.void *>
             sql"""UPDATE sync_jobs j
                   JOIN sync_batches b ON b.job_id = j.job_id
                   SET j.status = 'running',
                       j.started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP(6))
-                  WHERE b.batch_id = JSON_UNQUOTE(JSON_EXTRACT(${record.payload}, '$$.batch_id'))
+                  WHERE b.batch_id = $batchId
                     AND j.status IN ('pending', 'running')""".update.run.void
-        else ().pure[ConnectionIO]
+        } else ().pure[ConnectionIO]
       yield updated == 1
     }
+
+  private def validatedLoadBatchId(record: OutboxRecord): ConnectionIO[Option[String]] =
+    if record.destinationTopic != "sync.oracle.load" then none[String].pure[ConnectionIO]
+    else
+      val parsed =
+        circeParser.parse(record.payload)
+          .leftMap(error => IllegalArgumentException("load outbox payload must be valid JSON", error))
+          .flatMap(
+            _.hcursor.get[String]("batch_id")
+              .leftMap(error => IllegalArgumentException("load outbox payload must contain a string batch_id", error))
+          )
+          .flatMap { value =>
+            Either.catchNonFatal(UUID.fromString(value))
+              .leftMap(error => IllegalArgumentException("load outbox batch_id must be a UUID", error))
+              .filterOrElse(
+                _.toString.equalsIgnoreCase(value),
+                IllegalArgumentException("load outbox batch_id must use canonical UUID format")
+              )
+              .map(_.toString)
+          }
+
+      parsed.fold(FC.raiseError, batchId => batchId.some.pure[ConnectionIO])
 
   def failOutbox(
       record: OutboxRecord,

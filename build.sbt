@@ -103,6 +103,7 @@ lazy val root = (project in file("."))
     Compile / mainClass := Some("com.sslproxy.coordinator.Main"),
     assembly / assemblyJarName := "octopus.jar",
     assembly / mainClass := Some("com.sslproxy.coordinator.Main"),
+    Test / javaOptions += "-Dapi.version=1.44",
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat
       case PathList("META-INF", xs @ _*) => MergeStrategy.discard

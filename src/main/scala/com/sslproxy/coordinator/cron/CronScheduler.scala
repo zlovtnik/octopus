@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.cron
 
 import cats.effect.IO
-import cats.effect.implicits.*
 import cats.effect.kernel.Ref
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
@@ -50,7 +49,9 @@ class CronScheduler(
     val backpressureStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
-        backpressureService.checkAndAct.void.handleErrorWith { err =>
+        dbSemaphore.permit.use { _ =>
+          backpressureService.checkAndAct.void
+        }.handleErrorWith { err =>
           IO(log.error("cron_backpressure", err, "status" -> "failed"))
         }
       }
@@ -58,7 +59,7 @@ class CronScheduler(
     val ingestStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
-        processIngest().handleErrorWith { err =>
+        dbSemaphore.permit.use(_ => processIngest()).handleErrorWith { err =>
           IO(log.error("cron_ingest", err, "status" -> "failed"))
         }
       }
@@ -66,7 +67,7 @@ class CronScheduler(
     val recoverAndDispatchStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
-        (recoverStaleBatches() >> dispatchBatches()).handleErrorWith { err =>
+        (dbSemaphore.permit.use(_ => recoverStaleBatches()) >> dispatchBatches()).handleErrorWith { err =>
           IO(log.error("cron_dispatch", err, "status" -> "failed"))
         }
       }
@@ -74,7 +75,7 @@ class CronScheduler(
     val shadowAuditStream = Stream
       .awakeEvery[IO](10.seconds)
       .evalMap { _ =>
-        shadowAudit().handleErrorWith { err =>
+        dbSemaphore.permit.use(_ => shadowAudit()).handleErrorWith { err =>
           IO(log.error("cron_shadow_audit", err, "status" -> "failed"))
         }
       }
@@ -145,14 +146,13 @@ class CronScheduler(
     }
 
   private def dispatchBatches(): IO[Unit] =
-    dbSemaphore.available.flatMap { available =>
-      val concurrency = (cfg.dispatchBatchSize min available.toInt).max(1)
-      (1 to cfg.dispatchBatchSize).toList.parTraverseN(concurrency) { _ =>
-        dbSemaphore.permit.use { _ =>
-          batchDispatchService.dispatchNext().void
-        }
-      }.void
-    }
+    // Ordered outbox UPDATE claims contend on the same leading row/range.
+    // Drain sequentially so claim transactions cannot occupy the whole pool.
+    CronScheduler.drainBatch(cfg.dispatchBatchSize) { () =>
+      dbSemaphore.permit.use { _ =>
+        batchDispatchService.dispatchNext()
+      }
+    }.void
 
   private def shadowAudit(): IO[Unit] =
     val intervalMs = 10_000L
@@ -177,3 +177,16 @@ class CronScheduler(
 
 object CronScheduler:
   private val log = StructuredLogger(getClass)
+
+  private[cron] def drainBatch(
+      maxDispatches: Int
+  )(dispatchNext: () => IO[Boolean]): IO[Int] =
+    def loop(remaining: Int, dispatched: Int): IO[Int] =
+      if remaining <= 0 then IO.pure(dispatched)
+      else
+        dispatchNext().flatMap {
+          case true  => loop(remaining - 1, dispatched + 1)
+          case false => IO.pure(dispatched)
+        }
+
+    loop(maxDispatches.max(0), 0)

@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.ingest
 
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
@@ -26,7 +27,8 @@ object PayloadAuditConsumer:
       cfg: KafkaCfg,
       repo: TidbRepository,
       metrics: CoordinatorMetrics,
-      dlqProducer: KafkaProducer[IO, String, String]
+      dlqProducer: KafkaProducer[IO, String, String],
+      dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
@@ -48,7 +50,7 @@ object PayloadAuditConsumer:
         Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
           consumer.stream
             .map(committable => (translateRecord(committable.record), committable.offset))
-            .through(batchWrite(repo, dlqProducer, cfg, metrics))
+            .through(batchWrite(repo, dlqProducer, cfg, metrics, dbSemaphore))
             .through(commitBatch)
       }
 
@@ -94,7 +96,8 @@ object PayloadAuditConsumer:
       repo: TidbRepository,
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
-      metrics: CoordinatorMetrics
+      metrics: CoordinatorMetrics,
+      dbSemaphore: Semaphore[IO]
   ): fs2.Pipe[IO, (Either[PayloadAuditError, ResolvedScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
     _.groupWithin(cfg.maxPollRecords, 1.second)
       .evalTap { chunk =>
@@ -106,7 +109,7 @@ object PayloadAuditConsumer:
         }
 
         val writeAction = if validRecords.nonEmpty then
-          repo.recordScanRequests(validRecords).flatMap {
+          dbSemaphore.permit.use(_ => repo.recordScanRequests(validRecords)).flatMap {
             case Right(count) =>
               IO(metrics.recordPayloadAuditIngested(count)) *>
                 IO(metrics.recordSyncEventHydrated(count.toLong))

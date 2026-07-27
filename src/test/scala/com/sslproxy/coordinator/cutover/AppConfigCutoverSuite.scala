@@ -17,7 +17,8 @@ class AppConfigCutoverSuite extends FunSuite:
     val baseline = AppConfig.load
     val enabled = baseline.copy(
       tidb = enabledTiDb(baseline.tidb),
-      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true)
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = baseline.cutover.copy(devBypass = false)
     )
 
     AppConfig.validate(enabled) match

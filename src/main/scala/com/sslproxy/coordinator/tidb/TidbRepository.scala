@@ -393,28 +393,32 @@ class TidbRepository(xa: Transactor[IO]):
       eventPayloadSha256: String,
       eventKind: Option[String]
   ): ConnectionIO[Boolean] =
-
-            updated <- sql"""UPDATE sync_events
-                             SET payload = $payloadJson,
-                                 payload_sha256 = $eventPayloadSha256,
-                                 event_kind = COALESCE($eventKind, event_kind),
-                                 updated_at = CURRENT_TIMESTAMP(6)
-                             WHERE dedupe_key = $key
-                               AND stream_name = $stream
-                               AND payload_archived = 0
-                               AND (payload IS NULL OR payload_sha256 = $eventPayloadSha256)
-                               AND NOT EXISTS (
-                                 SELECT 1
-                                 FROM sync_event_tombstones tombstone
-                                 WHERE tombstone.dedupe_key = sync_events.dedupe_key
-                                   AND tombstone.stream_name = sync_events.stream_name
-                                   AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
-                               )""".update.run
-            _ <- if updated > 0 && stream == "wireless.audit" then
-              hydrateWirelessProjection(key)
-            else 0.pure[ConnectionIO]
-          yield updated > 0
-      }
+    circeParser.parse(payloadJson) match
+      case Left(error) => FC.raiseError(error)
+      case Right(Json.Null) =>
+        FC.raiseError(IllegalArgumentException("resolved scan event payload must not be JSON null"))
+      case Right(_) =>
+        for
+          updated <- sql"""UPDATE sync_events
+                           SET payload = $payloadJson,
+                               payload_sha256 = $eventPayloadSha256,
+                               event_kind = COALESCE($eventKind, event_kind),
+                               updated_at = CURRENT_TIMESTAMP(6)
+                           WHERE dedupe_key = $key
+                             AND stream_name = $stream
+                             AND payload_archived = 0
+                             AND (payload IS NULL OR payload_sha256 = $eventPayloadSha256)
+                             AND NOT EXISTS (
+                               SELECT 1
+                               FROM sync_event_tombstones tombstone
+                               WHERE tombstone.dedupe_key = sync_events.dedupe_key
+                                 AND tombstone.stream_name = sync_events.stream_name
+                                 AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
+                             )""".update.run
+          _ <- if updated > 0 && stream == "wireless.audit" then
+            hydrateWirelessProjection(key)
+          else 0.pure[ConnectionIO]
+        yield updated > 0
 
   private def hydrateWirelessProjection(dedupeKey: String): ConnectionIO[Int] =
     val project =

@@ -88,13 +88,13 @@ final class TidbTransactor private (
       stmt.addBatch()
       count += 1
       if count % batchSize == 0 then
-        totalAffected += sumBatchResults(stmt.executeBatch(), batchSize)
+        totalAffected += sumBatchResults(stmt.executeBatch())
     val remainder = (count % batchSize).toInt
     if remainder != 0 then
-      totalAffected += sumBatchResults(stmt.executeBatch(), remainder)
+      totalAffected += sumBatchResults(stmt.executeBatch())
     totalAffected
 
-  private def sumBatchResults(results: Array[Int], chunkSize: Int): Long =
+  private def sumBatchResults(results: Array[Int]): Long =
     import java.sql.Statement
     if results.isEmpty then 0L
     else results.map {

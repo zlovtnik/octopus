@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.ingest
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.domain.{PayloadAudit, ScanRequestRecord}
+import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.TidbRepository
@@ -54,7 +54,7 @@ object PayloadAuditConsumer:
 
   private[ingest] def translateRecord(
       record: ConsumerRecord[String, String]
-  ): Either[PayloadAuditError, ScanRequestRecord] =
+  ): Either[PayloadAuditError, ResolvedScanRequestRecord] =
     val rawJson = record.value
     if rawJson == null || rawJson.isEmpty then
       Left(PayloadAuditError.EmptyMessage)
@@ -79,14 +79,23 @@ object PayloadAuditConsumer:
           log.trace("payload_audit_ingest", "status" -> "received",
             "payload_bytes" -> payloadBytes.length.toString)
 
-          Right(ScanRequestRecord(requestJson, rawJson, payloadSha256, StreamName, dedupeKey, audit.observedAt))
+          val source = ScanRequestRecord(
+            requestJson = requestJson,
+            sourceRecordSha256 = payloadSha256,
+            streamName = StreamName,
+            dedupeKey = dedupeKey,
+            observedAt = audit.observedAt,
+            payloadRef = payloadRef
+          )
+          ResolvedScanRequestRecord.from(source, rawJson)
+            .leftMap(error => PayloadAuditError.InvalidPayload(rawJson, error.getMessage))
 
   private def batchWrite(
       repo: TidbRepository,
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
       metrics: CoordinatorMetrics
-  ): fs2.Pipe[IO, (Either[PayloadAuditError, ScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
+  ): fs2.Pipe[IO, (Either[PayloadAuditError, ResolvedScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
     _.groupWithin(cfg.maxPollRecords, 1.second)
       .evalTap { chunk =>
         val validRecords = chunk.collect { case (Right(r), _) => r }.toList
@@ -99,7 +108,8 @@ object PayloadAuditConsumer:
         val writeAction = if validRecords.nonEmpty then
           repo.recordScanRequests(validRecords).flatMap {
             case Right(count) =>
-              IO(metrics.recordPayloadAuditIngested(count))
+              IO(metrics.recordPayloadAuditIngested(count)) *>
+                IO(metrics.recordSyncEventHydrated(count.toLong))
             case Left(dbErr) =>
               IO(log.error("payload_audit_ingest", "status" -> "failed",
                 "operation" -> dbErr.operation, "error" -> dbErr.message)) *>

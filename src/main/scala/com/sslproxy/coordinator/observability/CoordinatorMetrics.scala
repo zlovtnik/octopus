@@ -46,6 +46,15 @@ class CoordinatorMetrics(registry: MeterRegistry):
     .description("Total payload audit records sent to DLQ")
     .register(registry)
 
+  private val syncEventsHydratedCounter: Counter = Counter.builder("coordinator.sync.events.hydrated.total")
+    .description("Total sync event payloads hydrated into the durable ledger")
+    .register(registry)
+
+  private val syncEventsBackfillFailedCounter: Counter =
+    Counter.builder("coordinator.sync.events.backfill.failed.total")
+      .description("Total sync event payloads that failed historical hydration")
+      .register(registry)
+
   Gauge.builder("coordinator.pending.ledger.count", pendingLedgerGauge, (value: AtomicLong) => value.doubleValue())
     .description("Number of pending ledger entries")
     .register(registry)
@@ -85,6 +94,13 @@ class CoordinatorMetrics(registry: MeterRegistry):
 
   def recordPayloadAuditDlq(): Unit =
     payloadAuditDlqCounter.increment()
+
+  def recordSyncEventHydrated(count: Long = 1L): Unit =
+    if count > 0 then syncEventsHydratedCounter.increment(count.toDouble)
+
+  def recordSyncEventHydrationBackfill(hydrated: Long, failed: Long): Unit =
+    recordSyncEventHydrated(hydrated)
+    if failed > 0 then syncEventsBackfillFailedCounter.increment(failed.toDouble)
 
   def recordTickFailure(): Unit = ()
 

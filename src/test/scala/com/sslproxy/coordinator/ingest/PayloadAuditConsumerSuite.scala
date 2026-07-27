@@ -79,6 +79,8 @@ class PayloadAuditConsumerSuite extends FunSuite:
     val record = result.toOption.get
     assertEquals(circeDecode[Json](record.requestJson).toOption.get, circeDecode[Json](expectedRequest).toOption.get)
     assertEquals(record.payloadJson, json)
+    assertEquals(record.sourceRecordSha256, sha256)
+    assertEquals(record.eventPayloadSha256, sha256)
 
   test("empty message is treated as empty"):
     val result = translateRecord(
@@ -93,5 +95,4 @@ class PayloadAuditConsumerSuite extends FunSuite:
     )
     assert(result.isLeft)
     assertEquals(result.swap.toOption.get, PayloadAuditError.EmptyMessage)
-
 

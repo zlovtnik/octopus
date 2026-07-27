@@ -97,11 +97,11 @@ final class TidbTransactor private (
   private def sumBatchResults(results: Array[Int], chunkSize: Int): Long =
     import java.sql.Statement
     if results.isEmpty then 0L
-    else if results.forall(_ == Statement.SUCCESS_NO_INFO) then chunkSize.toLong
     else results.map {
-      case Statement.EXECUTE_FAILED => 0L
-      case n if n >= 0 => n.toLong
-      case _ => 0L
+      case Statement.EXECUTE_FAILED   => 0L
+      case Statement.SUCCESS_NO_INFO  => 1L
+      case n if n >= 0                => n.toLong
+      case _                          => 0L
     }.sum
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
@@ -548,7 +548,10 @@ final class TidbTransactor private (
       case null => None
       case None => None
       case Some(inner) => unwrapJsonValue(inner)
-      case n: java.lang.Number => Some(Json.fromLong(n.longValue))
+      case n: (java.lang.Byte | java.lang.Short | java.lang.Integer | java.lang.Long) =>
+        Some(Json.fromLong(n.longValue))
+      case n: java.lang.Number =>
+        Some(Json.fromDoubleOrString(n.doubleValue))
       case s: String => Some(Json.fromString(s))
       case b: Boolean => Some(Json.fromBoolean(b))
       case other => Some(Json.fromString(other.toString))

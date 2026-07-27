@@ -10,7 +10,7 @@ import com.sslproxy.coordinator.cron.CronScheduler
 import com.sslproxy.coordinator.cutover.CutoverArtifactLoader
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
-import com.sslproxy.coordinator.ingest.PayloadAuditConsumer
+import com.sslproxy.coordinator.ingest.{PayloadAuditConsumer, SyncEventHydrationService}
 import com.sslproxy.coordinator.kafka.{KafkaComponents, ScanRequestStream, TidbLoadStream, TidbResultStream, WirelessConsumerService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.sink.*
@@ -70,6 +70,13 @@ object Main extends IOApp.Simple:
                   Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
                     val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
                     val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+                    val hydrationService = new SyncEventHydrationService(
+                      tiDbRepo,
+                      payloadResolver,
+                      metrics,
+                      cfg.cron.scanFetchCount,
+                      dbSemaphore
+                    )
 
                     val backpressureService = new BackpressureService(
                       cfg.backpressure, cfg.cron.ingestBatchSize,
@@ -116,6 +123,13 @@ object Main extends IOApp.Simple:
                       val baseStreams =
                         cronScheduler.mainLoop
                           .merge(cronScheduler.schemaRefresher)
+                          .merge(hydrationService.runOnce.handleErrorWith { error =>
+                            Stream.eval(IO(log.error(
+                              "sync_event_hydration_backfill",
+                              error,
+                              "status" -> "failed"
+                            )))
+                          })
                           .merge(payloadAuditStream)
                           .merge(wirelessStreams)
 
@@ -128,7 +142,14 @@ object Main extends IOApp.Simple:
 
                       val consumerStreams = artifactOpt match
                         case Some(artifact) =>
-                          ScanRequestStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore)
+                          ScanRequestStream.run(
+                            cfg.kafka,
+                            artifact,
+                            tiDbRepo,
+                            payloadResolver,
+                            metrics,
+                            dbSemaphore
+                          )
                             .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, dbSemaphore))
                             .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore))
                         case None =>

@@ -9,9 +9,16 @@ import com.sslproxy.coordinator.domain.{
   DatabaseError,
   IngestionDecision,
   IngestionDisposition,
+  ResolvedScanRequestRecord,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.tidb.{TidbRepository, TidbSchemaPreflight, TidbTransactor}
+import com.sslproxy.coordinator.tidb.{
+  TidbPayloadResolver,
+  TidbRepository,
+  TidbSchemaPreflight,
+  TidbTransactor
+}
+import com.sslproxy.coordinator.util.Sha256Utils
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
@@ -24,6 +31,7 @@ import org.testcontainers.utility.DockerImageName
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import java.util.Base64
 import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
 import scala.jdk.CollectionConverters.*
@@ -94,6 +102,186 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       mysql.stop()
     super.afterAll()
 
+  test("wireless scan ingestion hydrates payload hashes and projected columns"):
+    requireDocker()
+    val payload =
+      """{
+        |"schema_version":2,
+        |"event_type":"wifi_data_frame",
+        |"observed_at":"2026-07-27T12:00:00Z",
+        |"sensor_id":"sensor-projection",
+        |"location_id":"lab",
+        |"channel":36,
+        |"frame_type":"data",
+        |"frame_subtype":"qos_data",
+        |"source_mac":"AA:BB:CC:DD:EE:01",
+        |"destination_mac":"AA:BB:CC:DD:EE:02",
+        |"bssid":"AA:BB:CC:DD:EE:03",
+        |"ssid":"test-network",
+        |"signal_dbm":-42,
+        |"noise_dbm":null,
+        |"frame_control_flags":0,
+        |"more_data":false,
+        |"retry":false,
+        |"power_save":false,
+        |"protected":true,
+        |"security_flags":7,
+        |"risk_score":0.6,
+        |"tags":["wifi","network:ipv4"],
+        |"wps_manufacturer":"Example Devices",
+        |"device_fingerprint":"device-fingerprint",
+        |"handshake_captured":false,
+        |"username":"test-user",
+        |"identity_source":"observed_identity",
+        |"mac":{"fragment_number":3},
+        |"rf":{"frequency_mhz":5180,"channel_flags":{"raw":256},"data_rate_kbps":54000,
+        |      "antenna_id":1,"tsft":123456,"raw_len":512,"signal_status":"present"},
+        |"qos":{"tid":5,"eosp":false,"ack_policy":1,"ack_policy_label":"no_ack","amsdu":true},
+        |"llc_snap":{"oui":"000000","ethertype":2048,"ethertype_name":"ipv4"},
+        |"network":{"src_ip":"192.0.2.10","dst_ip":"198.51.100.20","ttl":64,
+        |           "protocol":17,"protocol_name":"udp"},
+        |"transport":{"protocol":"udp","src_port":5353,"dst_port":1900,"length":128,"checksum":99},
+        |"application":{"protocol":"ssdp","ssdp":{"message_type":"M-SEARCH","st":"ssdp:all","mx":"2","usn":"uuid:test"},
+        |               "dns":{"query_names":["example.test"],"answer_names":[]}},
+        |"correlation":{"session_key":"session-key","retransmit_key":"retransmit-key",
+        |               "frame_fingerprint":"frame-fingerprint","payload_visibility":"plaintext",
+        |               "tsft_delta_us":10,"wall_clock_delta_ms":2},
+        |"anomalies":{"large_frame":false,"mixed_encryption":null,
+        |             "dedupe_or_replay_suspect":false,"reasons":[]}
+        |}""".stripMargin.replaceAll("\\s+", "")
+    val resolved = resolvedWireless(payload)
+    val metadata = BrokerRecordMetadata(
+      topic = "sync.scan.request",
+      partition = 0,
+      offset = 41L,
+      consumerGroup = "octopus-scan-tidb-v1",
+      groupVersion = 1,
+      artifactSha256 = ArtifactSha256,
+      messageKey = None,
+      payloadSha256 = resolved.sourceRecordSha256
+    )
+
+    for
+      decision <- repository.recordScanRequestWithEvidence(resolved, metadata)
+        .map(requireRight)
+      _ = assertEquals(decision.disposition, IngestionDisposition.Processed)
+      hashes <- sql"""SELECT payload_sha256, payload IS NOT NULL
+                     FROM sync_events
+                     WHERE dedupe_key = ${resolved.dedupeKey}
+                       AND stream_name = 'wireless.audit'"""
+        .query[(String, Int)].unique.transact(xa)
+      evidenceHash <- sql"""SELECT payload_sha256
+                            FROM ingestion_evidence
+                            WHERE topic = 'sync.scan.request'
+                              AND partition_id = 0
+                              AND record_offset = 41
+                              AND group_id = 'octopus-scan-tidb-v1'"""
+        .query[String].unique.transact(xa)
+      projectionJson <- sql"""SELECT JSON_OBJECT(
+                                'event_type', event_type,
+                                'sensor_id', sensor_id,
+                                'source_mac', source_mac,
+                                'destination_bssid', destination_bssid,
+                                'signal_dbm', signal_dbm,
+                                'noise_dbm', noise_dbm,
+                                'frequency_mhz', frequency_mhz,
+                                'channel_flags', channel_flags,
+                                'qos_tid', qos_tid,
+                                'qos_eosp', qos_eosp,
+                                'src_ip', src_ip,
+                                'dst_port', dst_port,
+                                'app_protocol', app_protocol,
+                                'session_key', session_key,
+                                'frame_fingerprint', frame_fingerprint,
+                                'retry', retry,
+                                'protected', protected,
+                                'risk_score', risk_score,
+                                'identity_source', identity_source,
+                                'wireless_search_text', wireless_search_text
+                              )
+                              FROM sync_events
+                              WHERE dedupe_key = ${resolved.dedupeKey}
+                                AND stream_name = 'wireless.audit'"""
+        .query[String].unique.transact(xa)
+      projection = circeParser.parse(projectionJson).fold(throw _, identity).hcursor
+    yield
+      assertEquals(hashes, (resolved.eventPayloadSha256, 1))
+      assertEquals(evidenceHash, resolved.sourceRecordSha256)
+      assertEquals(projection.get[String]("event_type"), Right("wifi_data_frame"))
+      assertEquals(projection.get[String]("sensor_id"), Right("sensor-projection"))
+      assertEquals(projection.get[String]("source_mac"), Right("aa:bb:cc:dd:ee:01"))
+      assertEquals(projection.get[String]("destination_bssid"), Right("aa:bb:cc:dd:ee:02"))
+      assertEquals(projection.get[Int]("signal_dbm"), Right(-42))
+      assertEquals(projection.get[Option[Int]]("noise_dbm"), Right(None))
+      assertEquals(projection.get[Int]("frequency_mhz"), Right(5180))
+      assertEquals(projection.get[Int]("channel_flags"), Right(256))
+      assertEquals(projection.get[Int]("qos_tid"), Right(5))
+      assertEquals(projection.get[Int]("qos_eosp"), Right(0))
+      assertEquals(projection.get[String]("src_ip"), Right("192.0.2.10"))
+      assertEquals(projection.get[Int]("dst_port"), Right(1900))
+      assertEquals(projection.get[String]("app_protocol"), Right("ssdp"))
+      assertEquals(projection.get[String]("session_key"), Right("session-key"))
+      assertEquals(projection.get[String]("frame_fingerprint"), Right("frame-fingerprint"))
+      assertEquals(projection.get[Int]("retry"), Right(0))
+      assertEquals(projection.get[Int]("protected"), Right(1))
+      assertEquals(projection.get[Double]("risk_score"), Right(0.6))
+      assertEquals(projection.get[String]("identity_source"), Right("observed_identity"))
+      assert(projection.get[String]("wireless_search_text").toOption.exists(_.contains("sensor-projection")))
+
+  test("historical hydration repairs sparse rows and skips archived payloads"):
+    requireDocker()
+    val payload =
+      """{"schema_version":2,"event_type":"wifi_management_frame","observed_at":"2026-07-27T12:01:00Z","sensor_id":"backfill-sensor","location_id":"lab","channel":6,"frame_type":"management","frame_subtype":"beacon","source_mac":"AA:BB:CC:DD:EE:10","raw_len":128,"retry":false,"more_data":false,"power_save":false,"protected":false,"security_flags":0,"tags":[]}"""
+    val payloadHash = Sha256Utils.sha256Hex(payload)
+    val payloadRef = inlineRef(payload)
+    val archivedHash = "f" * 64
+    val tombstonedHash = "e" * 64
+
+    for
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   status, producer, payload_archived
+                 ) VALUES (
+                   $payloadHash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:00'),
+                   $payloadRef, ${"0" * 64}, 'completed', 'ssl-proxy', 0
+                 )""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   status, producer, payload_archived
+                 ) VALUES (
+                   $archivedHash, 'proxy.events', TIMESTAMP('2026-07-27 12:02:00'),
+                   $payloadRef, ${"1" * 64}, 'completed', 'ssl-proxy', 1
+                 )""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   status, producer, payload_archived
+                 ) VALUES (
+                   $tombstonedHash, 'proxy.events', TIMESTAMP('2026-07-27 12:03:00'),
+                   $payloadRef, ${"2" * 64}, 'completed', 'ssl-proxy', 0
+                 )""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_event_tombstones (
+                   dedupe_key, stream_name, payload_sha256, observed_at, expires_at
+                 ) VALUES (
+                   $tombstonedHash, 'proxy.events', ${"2" * 64},
+                   TIMESTAMP('2026-07-27 12:03:00'),
+                   TIMESTAMPADD(DAY, 1, CURRENT_TIMESTAMP(6))
+                 )""".update.run.transact(xa)
+      candidates <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
+      candidate = candidates.find(_.dedupeKey == payloadHash)
+        .getOrElse(fail("expected sparse wireless row in hydration page"))
+      _ = assert(!candidates.exists(_.dedupeKey == archivedHash))
+      _ = assert(!candidates.exists(_.dedupeKey == tombstonedHash))
+      _ <- repository.hydrateExistingSyncEvent(candidate, payload).map(requireRight)
+      state <- sql"""SELECT payload_sha256, payload IS NOT NULL, event_type, sensor_id, retry
+                     FROM sync_events
+                     WHERE dedupe_key = $payloadHash
+                       AND stream_name = 'wireless.audit'"""
+        .query[(String, Int, String, String, Int)].unique.transact(xa)
+      remaining <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
+    yield
+      assertEquals(state, (payloadHash, 1, "wifi_management_frame", "backfill-sensor", 0))
+      assert(!remaining.exists(_.dedupeKey == payloadHash))
+
   test("load acknowledgement binds batch_id without a JSON collation comparison"):
     requireDocker()
     val rawJson =
@@ -123,7 +311,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .transact(xa)
     yield assertEquals(state, ("published", "dispatched", 1, "running", 1L))
 
-  test("invalid load batch_id aborts acknowledgement before any durable mutation"):
+  test("invalid load batch_id is parked after publication without dispatching its batch"):
     requireDocker()
     val rawJson =
       """{"observed_at":"2026-07-25T20:01:00Z","host":"invalid-batch.example"}"""
@@ -140,21 +328,28 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       acknowledged <- repository.acknowledgeOutbox(
         claimed.copy(payload = """{"batch_id":"not-a-uuid"}""")
       )
-      _ = acknowledged match
-        case Left(_: DatabaseError.Permanent) => ()
-        case other => fail(s"expected a permanent validation failure, found $other")
-      state <- sql"""SELECT o.status, b.status, j.status,
+      _ = assertEquals(acknowledged, Right(true))
+      state <- sql"""SELECT o.status, o.published_at IS NOT NULL, o.last_error,
+                            b.status, j.status,
                             (SELECT COUNT(*) FROM outbox_publish_attempts a
-                             WHERE a.outbox_id = o.outbox_id)
+                             WHERE a.outbox_id = o.outbox_id
+                               AND a.status = 'failed')
                      FROM outbox_events o
-                     JOIN sync_batches b ON b.batch_id = ${decision.batchId}
+                     JOIN sync_batches b ON b.outbox_id = o.outbox_id
+                                        AND b.batch_id = ${decision.batchId}
                      JOIN sync_jobs j ON j.job_id = b.job_id
                      WHERE o.outbox_id = ${claimed.outboxId}
-                     LIMIT 1"""
-        .query[(String, String, String, Long)]
+                     """
+        .query[(String, Int, String, String, String, Long)]
         .unique
         .transact(xa)
-    yield assertEquals(state, ("leased", "pending", "pending", 0L))
+    yield
+      assertEquals(state._1, "failed")
+      assertEquals(state._2, 1)
+      assert(state._3.contains("load outbox batch_id must be a UUID"))
+      assertEquals(state._4, "pending")
+      assertEquals(state._5, "pending")
+      assertEquals(state._6, 1L)
 
   test("maximum accepted payload audit persists a payload_ref beyond the TEXT limit"):
     requireDocker()
@@ -269,12 +464,31 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       )
     }
 
-  private def translatedAudit(rawJson: String, offset: Long): ScanRequestRecord =
+  private def resolvedWireless(payload: String): ResolvedScanRequestRecord =
+    val payloadSha256 = Sha256Utils.sha256Hex(payload)
+    val requestJson = io.circe.Json.obj(
+      "stream_name" -> io.circe.Json.fromString("wireless.audit"),
+      "dedupe_key" -> io.circe.Json.fromString(payloadSha256),
+      "payload_ref" -> io.circe.Json.fromString(inlineRef(payload)),
+      "observed_at" -> io.circe.Json.fromString(
+        circeParser.parse(payload).toOption
+          .flatMap(_.hcursor.get[String]("observed_at").toOption)
+          .getOrElse(fail("wireless payload requires observed_at"))
+      )
+    ).noSpaces
+    val source = ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
+    new TidbPayloadResolver("/unused").resolve(source)
+
+  private def inlineRef(payload: String): String =
+    "inline://json/" + Base64.getUrlEncoder.withoutPadding
+      .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
+
+  private def translatedAudit(rawJson: String, offset: Long): ResolvedScanRequestRecord =
     PayloadAuditConsumer.translateRecord(
       ConsumerRecord[String, String]("proxy.payload_audit", 0, offset, null, rawJson)
     ).fold(error => fail(s"expected valid payload audit, found $error"), identity)
 
-  private def persist(record: ScanRequestRecord, offset: Long): IO[IngestionDecision] =
+  private def persist(record: ResolvedScanRequestRecord, offset: Long): IO[IngestionDecision] =
     val metadata = BrokerRecordMetadata(
       topic = "proxy.payload_audit",
       partition = 0,
@@ -283,7 +497,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       groupVersion = 1,
       artifactSha256 = ArtifactSha256,
       messageKey = None,
-      payloadSha256 = record.payloadSha256
+      payloadSha256 = record.sourceRecordSha256
     )
 
     repository.recordScanRequestWithEvidence(record, metadata).map { result =>

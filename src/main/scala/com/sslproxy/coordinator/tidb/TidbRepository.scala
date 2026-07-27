@@ -5,12 +5,13 @@ import cats.effect.implicits.*
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.cutover.CutoffKey
-import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ScanRequestRecord, SyncLoad}
+import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord, SyncLoad}
 import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
 import io.circe.syntax.*
 import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.util.Sha256Utils
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -149,7 +150,7 @@ class TidbRepository(xa: Transactor[IO]):
         yield processed.toLong
     }
 
-  def recordScanRequests(records: List[ScanRequestRecord]): IO[Either[DatabaseError, Int]] =
+  def recordScanRequests(records: List[ResolvedScanRequestRecord]): IO[Either[DatabaseError, Int]] =
     if records.isEmpty then IO.pure(Right(0))
     else
       runDb("tidb.record_scan_request") {
@@ -159,25 +160,99 @@ class TidbRepository(xa: Transactor[IO]):
       }
 
   def recordScanRequestWithEvidence(
-      record: ScanRequestRecord,
+      record: ResolvedScanRequestRecord,
       metadata: BrokerRecordMetadata
   ): IO[Either[DatabaseError, IngestionDecision]] =
     runDb("tidb.record_scan_request_with_evidence") {
       ingestScanRequest(record, Some(metadata))
     }
 
+  def findSyncEventsNeedingHydration(
+      after: Option[SyncEventHydrationCandidate],
+      limit: Int
+  ): IO[Either[DatabaseError, List[SyncEventHydrationCandidate]]] =
+    runDb("tidb.find_sync_events_needing_hydration") {
+      val cursorClause = after.fold(Fragment.empty) { cursor =>
+        fr"""AND (
+              e.observed_at > ${cursor.observedAt}
+              OR (e.observed_at = ${cursor.observedAt} AND e.stream_name > ${cursor.streamName})
+              OR (e.observed_at = ${cursor.observedAt}
+                  AND e.stream_name = ${cursor.streamName}
+                  AND e.dedupe_key > ${cursor.dedupeKey})
+            )"""
+      }
+      (fr"""SELECT e.dedupe_key, e.stream_name, e.observed_at, e.payload_ref,
+                   CAST(e.payload AS CHAR)
+            FROM sync_events e
+            WHERE e.payload_archived = 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sync_event_tombstones tombstone
+                WHERE tombstone.dedupe_key = e.dedupe_key
+                  AND tombstone.stream_name = e.stream_name
+                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
+              )
+              AND (
+                e.payload IS NULL
+                OR (
+                  e.stream_name = 'wireless.audit'
+                  AND (
+                    e.event_type IS NULL
+                    OR e.schema_version IS NULL
+                    OR e.sensor_id IS NULL
+                    OR e.wireless_search_text IS NULL
+                  )
+                )
+              )""" ++ cursorClause ++
+        fr"""ORDER BY e.observed_at, e.stream_name, e.dedupe_key
+            LIMIT ${limit.max(1)}""")
+        .query[(String, String, java.sql.Timestamp, String, Option[String])]
+        .to[List]
+        .map(_.map(SyncEventHydrationCandidate.apply.tupled))
+    }
+
+  def hydrateExistingSyncEvent(
+      candidate: SyncEventHydrationCandidate,
+      payloadJson: String
+  ): IO[Either[DatabaseError, Boolean]] =
+    val parsed = circeParser.parse(payloadJson)
+    val eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
+    val eventKind = parsed.toOption.flatMap { value =>
+      value.hcursor.get[String]("event_type").toOption.filter(_.nonEmpty)
+        .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
+    }
+
+    runDb("tidb.hydrate_existing_sync_event") {
+      parsed match
+        case Left(error) => FC.raiseError(error)
+        case Right(Json.Null) =>
+          FC.raiseError(IllegalArgumentException("resolved backfill payload must not be JSON null"))
+        case Right(_) if candidate.streamName == "wireless.audit" &&
+            candidate.dedupeKey != eventPayloadSha256 =>
+          FC.raiseError(IllegalArgumentException(
+            "wireless.audit backfill dedupe_key does not match the resolved event payload hash"
+          ))
+        case Right(_) =>
+          hydrateSyncEvent(
+            candidate.streamName,
+            candidate.dedupeKey,
+            payloadJson,
+            eventPayloadSha256,
+            eventKind
+          )
+    }
+
   private def ingestScanRequest(
-      record: ScanRequestRecord,
+      record: ResolvedScanRequestRecord,
       metadata: Option[BrokerRecordMetadata]
   ): ConnectionIO[IngestionDecision] =
-    val payloadRef = Option(record.payloadRef).filter(_.nonEmpty).orElse(
-      circeParser.parse(record.requestJson).toOption.flatMap(_.hcursor.get[String]("payload_ref").toOption)
-    ).getOrElse("")
-    val eventKind = Option(record.payloadJson).filter(_.nonEmpty)
-      .flatMap(value => circeParser.parse(value).toOption)
-      .flatMap(_.hcursor.get[String]("type").toOption)
+    val payloadRef = record.payloadRef
+    val eventKind = circeParser.parse(record.payloadJson).toOption.flatMap { value =>
+      value.hcursor.get[String]("event_type").toOption.filter(_.nonEmpty)
+        .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
+    }
     val observedAt = Option(record.observedAt).filter(_.nonEmpty).flatMap(parseTs)
-    val payload = Option(record.payloadJson).filter(_.nonEmpty)
+    val payload = Option(record.payloadJson)
     val jobId = stableUuid(s"job:${record.streamName}:${record.dedupeKey}")
     val batchId = stableUuid(s"batch:${record.streamName}:${record.dedupeKey}")
     val loadMessageKey = s"$batchId:1"
@@ -188,8 +263,10 @@ class TidbRepository(xa: Transactor[IO]):
       else if record.dedupeKey.isBlank then FC.raiseError(IllegalArgumentException("scan request dedupe_key must not be empty"))
       else if payloadRef.isBlank then FC.raiseError(IllegalArgumentException("scan request payload_ref must not be empty"))
       else if observedAt.isEmpty then FC.raiseError(IllegalArgumentException("scan request observed_at must be RFC3339"))
-      else if metadata.exists(_.payloadSha256 != record.payloadSha256) then
+      else if metadata.exists(_.payloadSha256 != record.sourceRecordSha256) then
         FC.raiseError(IllegalArgumentException("scan request raw payload hash does not match decoded payload hash"))
+      else if record.streamName == "wireless.audit" && record.dedupeKey != record.eventPayloadSha256 then
+        FC.raiseError(IllegalArgumentException("wireless.audit dedupe_key must match the resolved event payload hash"))
       else ().pure[ConnectionIO]
 
     def existingEvidence(meta: BrokerRecordMetadata): ConnectionIO[Option[(String, String, String)]] =
@@ -204,7 +281,7 @@ class TidbRepository(xa: Transactor[IO]):
 
     def verifyExisting(meta: BrokerRecordMetadata, existing: (String, String, String)): ConnectionIO[Unit] =
       val (payloadSha, cutoverSha, dedupeKey) = existing
-      if payloadSha != record.payloadSha256 || cutoverSha != meta.artifactSha256 || dedupeKey != record.dedupeKey then
+      if payloadSha != record.sourceRecordSha256 || cutoverSha != meta.artifactSha256 || dedupeKey != record.dedupeKey then
         FC.raiseError(IllegalStateException(
           s"broker coordinate ${meta.topic}/${meta.partition}/${meta.offset}/${meta.consumerGroup} changed after ingestion"
         ))
@@ -217,7 +294,7 @@ class TidbRepository(xa: Transactor[IO]):
               dedupe_key, first_seen_at, updated_at
             ) VALUES (
               ${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.consumerGroup}, ${meta.groupVersion},
-              ${meta.artifactSha256}, ${meta.messageKey}, ${record.payloadSha256}, ${disposition.databaseValue},
+              ${meta.artifactSha256}, ${meta.messageKey}, ${record.sourceRecordSha256}, ${disposition.databaseValue},
               ${record.dedupeKey}, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
             )""".update.run.void *>
         advanceConsumerOffset(meta)
@@ -241,9 +318,10 @@ class TidbRepository(xa: Transactor[IO]):
                                    producer, event_kind, created_at, updated_at
                                  ) VALUES (
                                    ${record.dedupeKey}, ${record.streamName}, ${observedAt.orNull}, $payloadRef, $payload,
-                                   ${record.payloadSha256}, 'batched', 1, NULL,
+                                   ${record.eventPayloadSha256}, 'batched', 1, NULL,
                                    'ssl-proxy', $eventKind, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
                                  )""".update.run
+              _ <- hydrateSyncEvent(record, eventKind)
               _ <- sql"""INSERT INTO sync_jobs (
                             job_id, stream_name, dedupe_key, status, attempt_count, created_at
                           ) VALUES (
@@ -288,12 +366,358 @@ class TidbRepository(xa: Transactor[IO]):
       case Some(meta) =>
         existingEvidence(meta).flatMap {
           case Some(existing) =>
-            verifyExisting(meta, existing).as(
-              IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId)
-            )
+            verifyExisting(meta, existing) *>
+              hydrateSyncEvent(record, eventKind).as(
+                IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId)
+              )
           case None =>
             createState.flatTap(decision => persistEvidence(meta, decision.disposition))
         })
+
+  private def hydrateSyncEvent(
+      record: ResolvedScanRequestRecord,
+      eventKind: Option[String]
+  ): ConnectionIO[Boolean] =
+    hydrateSyncEvent(
+      record.streamName,
+      record.dedupeKey,
+      record.payloadJson,
+      record.eventPayloadSha256,
+      eventKind
+    )
+
+  private def hydrateSyncEvent(
+      stream: String,
+      key: String,
+      payloadJson: String,
+      eventPayloadSha256: String,
+      eventKind: Option[String]
+  ): ConnectionIO[Boolean] =
+
+            updated <- sql"""UPDATE sync_events
+                             SET payload = $payloadJson,
+                                 payload_sha256 = $eventPayloadSha256,
+                                 event_kind = COALESCE($eventKind, event_kind),
+                                 updated_at = CURRENT_TIMESTAMP(6)
+                             WHERE dedupe_key = $key
+                               AND stream_name = $stream
+                               AND payload_archived = 0
+                               AND (payload IS NULL OR payload_sha256 = $eventPayloadSha256)
+                               AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM sync_event_tombstones tombstone
+                                 WHERE tombstone.dedupe_key = sync_events.dedupe_key
+                                   AND tombstone.stream_name = sync_events.stream_name
+                                   AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
+                               )""".update.run
+            _ <- if updated > 0 && stream == "wireless.audit" then
+              hydrateWirelessProjection(key)
+            else 0.pure[ConnectionIO]
+          yield updated > 0
+      }
+
+  private def hydrateWirelessProjection(dedupeKey: String): ConnectionIO[Int] =
+    val project =
+      sql"""UPDATE sync_events
+            SET
+              sensor_id = NULLIF(payload->>'$$.sensor_id', ''),
+              location_id = NULLIF(payload->>'$$.location_id', ''),
+              username = NULLIF(payload->>'$$.username', ''),
+              event_type = COALESCE(
+                NULLIF(payload->>'$$.event_type', ''),
+                NULLIF(payload->>'$$.type', '')
+              ),
+              schema_version = CAST(NULLIF(payload->>'$$.schema_version', '') AS SIGNED),
+              frame_type = COALESCE(
+                NULLIF(payload->>'$$.frame_type', ''),
+                NULLIF(payload->>'$$.mac.frame_type', '')
+              ),
+              frame_subtype = COALESCE(
+                NULLIF(payload->>'$$.frame_subtype', ''),
+                NULLIF(payload->>'$$.mac.frame_subtype', '')
+              ),
+              source_mac = LOWER(COALESCE(
+                NULLIF(payload->>'$$.source_mac', ''),
+                NULLIF(payload->>'$$.mac.source_mac', '')
+              )),
+              transmitter_mac = LOWER(COALESCE(
+                NULLIF(payload->>'$$.transmitter_mac', ''),
+                NULLIF(payload->>'$$.mac.transmitter_mac', '')
+              )),
+              receiver_mac = LOWER(COALESCE(
+                NULLIF(payload->>'$$.receiver_mac', ''),
+                NULLIF(payload->>'$$.mac.receiver_mac', '')
+              )),
+              bssid = LOWER(COALESCE(
+                NULLIF(payload->>'$$.bssid', ''),
+                NULLIF(payload->>'$$.mac.bssid', '')
+              )),
+              destination_bssid = LOWER(COALESCE(
+                NULLIF(payload->>'$$.destination_bssid', ''),
+                NULLIF(payload->>'$$.destination_mac', ''),
+                NULLIF(payload->>'$$.mac.destination_mac', ''),
+                NULLIF(payload->>'$$.mac.bssid', '')
+              )),
+              ssid = NULLIF(payload->>'$$.ssid', ''),
+              signal_dbm = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.signal_dbm', ''),
+                NULLIF(payload->>'$$.rf.signal_dbm', '')
+              ), '') AS SIGNED),
+              noise_dbm = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.noise_dbm', ''),
+                NULLIF(payload->>'$$.rf.noise_dbm', '')
+              ), '') AS SIGNED),
+              frequency_mhz = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.frequency_mhz', ''),
+                NULLIF(payload->>'$$.rf.frequency_mhz', '')
+              ), '') AS SIGNED),
+              channel_flags = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.channel_flags', ''),
+                NULLIF(payload->>'$$.rf.channel_flags.raw', '')
+              ), '') AS SIGNED),
+              data_rate_kbps = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.data_rate_kbps', ''),
+                NULLIF(payload->>'$$.rf.data_rate_kbps', '')
+              ), '') AS SIGNED),
+              antenna_id = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.antenna_id', ''),
+                NULLIF(payload->>'$$.rf.antenna_id', '')
+              ), '') AS SIGNED),
+              tsft = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.tsft', ''),
+                NULLIF(payload->>'$$.rf.tsft', '')
+              ), '') AS SIGNED),
+              fragment_number = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.fragment_number', ''),
+                NULLIF(payload->>'$$.mac.fragment_number', '')
+              ), '') AS SIGNED),
+              channel_number = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.channel_number', ''),
+                NULLIF(payload->>'$$.channel', ''),
+                NULLIF(payload->>'$$.rf.channel_number', '')
+              ), '') AS SIGNED),
+              signal_status = COALESCE(
+                NULLIF(payload->>'$$.signal_status', ''),
+                NULLIF(payload->>'$$.rf.signal_status', '')
+              ),
+              adjacent_mac_hint = LOWER(COALESCE(
+                NULLIF(payload->>'$$.adjacent_mac_hint', ''),
+                NULLIF(payload->>'$$.mac.adjacent_mac_hint', '')
+              )),
+              qos_tid = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.qos_tid', ''),
+                NULLIF(payload->>'$$.qos.tid', '')
+              ), '') AS SIGNED),
+              qos_eosp = CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.qos_eosp', ''),
+                NULLIF(payload->>'$$.qos.eosp', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
+              qos_ack_policy = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.qos_ack_policy', ''),
+                NULLIF(payload->>'$$.qos.ack_policy', '')
+              ), '') AS SIGNED),
+              qos_ack_policy_label = COALESCE(
+                NULLIF(payload->>'$$.qos_ack_policy_label', ''),
+                NULLIF(payload->>'$$.qos.ack_policy_label', '')
+              ),
+              qos_amsdu = CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.qos_amsdu', ''),
+                NULLIF(payload->>'$$.qos.amsdu', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
+              llc_oui = COALESCE(
+                NULLIF(payload->>'$$.llc_oui', ''),
+                NULLIF(payload->>'$$.llc_snap.oui', '')
+              ),
+              ethertype = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.ethertype', ''),
+                NULLIF(payload->>'$$.llc_snap.ethertype', '')
+              ), '') AS SIGNED),
+              ethertype_name = COALESCE(
+                NULLIF(payload->>'$$.ethertype_name', ''),
+                NULLIF(payload->>'$$.llc_snap.ethertype_name', '')
+              ),
+              src_ip = COALESCE(
+                NULLIF(payload->>'$$.src_ip', ''),
+                NULLIF(payload->>'$$.network.src_ip', '')
+              ),
+              dst_ip = COALESCE(
+                NULLIF(payload->>'$$.dst_ip', ''),
+                NULLIF(payload->>'$$.network.dst_ip', '')
+              ),
+              ip_ttl = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.ip_ttl', ''),
+                NULLIF(payload->>'$$.network.ttl', '')
+              ), '') AS SIGNED),
+              ip_protocol = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.ip_protocol', ''),
+                NULLIF(payload->>'$$.network.protocol', '')
+              ), '') AS SIGNED),
+              ip_protocol_name = COALESCE(
+                NULLIF(payload->>'$$.ip_protocol_name', ''),
+                NULLIF(payload->>'$$.network.protocol_name', '')
+              ),
+              src_port = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.src_port', ''),
+                NULLIF(payload->>'$$.transport.src_port', '')
+              ), '') AS SIGNED),
+              dst_port = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.dst_port', ''),
+                NULLIF(payload->>'$$.transport.dst_port', '')
+              ), '') AS SIGNED),
+              transport_protocol = COALESCE(
+                NULLIF(payload->>'$$.transport_protocol', ''),
+                NULLIF(payload->>'$$.transport.protocol', '')
+              ),
+              transport_length = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.transport_length', ''),
+                NULLIF(payload->>'$$.transport.length', '')
+              ), '') AS SIGNED),
+              transport_checksum = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.transport_checksum', ''),
+                NULLIF(payload->>'$$.transport.checksum', '')
+              ), '') AS SIGNED),
+              app_protocol = COALESCE(
+                NULLIF(payload->>'$$.app_protocol', ''),
+                NULLIF(payload->>'$$.application.protocol', '')
+              ),
+              ssdp_message_type = COALESCE(
+                NULLIF(payload->>'$$.ssdp_message_type', ''),
+                NULLIF(payload->>'$$.application.ssdp.message_type', '')
+              ),
+              ssdp_st = COALESCE(
+                NULLIF(payload->>'$$.ssdp_st', ''),
+                NULLIF(payload->>'$$.application.ssdp.st', '')
+              ),
+              ssdp_mx = COALESCE(
+                NULLIF(payload->>'$$.ssdp_mx', ''),
+                NULLIF(payload->>'$$.application.ssdp.mx', '')
+              ),
+              ssdp_usn = COALESCE(
+                NULLIF(payload->>'$$.ssdp_usn', ''),
+                NULLIF(payload->>'$$.application.ssdp.usn', '')
+              ),
+              dhcp_requested_ip = COALESCE(
+                NULLIF(payload->>'$$.dhcp_requested_ip', ''),
+                NULLIF(payload->>'$$.application.dhcp.requested_ip', '')
+              ),
+              dhcp_hostname = COALESCE(
+                NULLIF(payload->>'$$.dhcp_hostname', ''),
+                NULLIF(payload->>'$$.application.dhcp.hostname', '')
+              ),
+              dhcp_vendor_class = COALESCE(
+                NULLIF(payload->>'$$.dhcp_vendor_class', ''),
+                NULLIF(payload->>'$$.application.dhcp.vendor_class', '')
+              ),
+              dns_query_name = COALESCE(
+                NULLIF(payload->>'$$.dns_query_name', ''),
+                NULLIF(payload->>'$$.application.dns.query_names[0]', '')
+              ),
+              mdns_name = COALESCE(
+                NULLIF(payload->>'$$.mdns_name', ''),
+                NULLIF(payload->>'$$.application.mdns.query_names[0]', '')
+              ),
+              session_key = COALESCE(
+                NULLIF(payload->>'$$.session_key', ''),
+                NULLIF(payload->>'$$.correlation.session_key', '')
+              ),
+              retransmit_key = COALESCE(
+                NULLIF(payload->>'$$.retransmit_key', ''),
+                NULLIF(payload->>'$$.correlation.retransmit_key', '')
+              ),
+              frame_fingerprint = COALESCE(
+                NULLIF(payload->>'$$.frame_fingerprint', ''),
+                NULLIF(payload->>'$$.correlation.frame_fingerprint', '')
+              ),
+              payload_visibility = COALESCE(
+                NULLIF(payload->>'$$.payload_visibility', ''),
+                NULLIF(payload->>'$$.correlation.payload_visibility', '')
+              ),
+              tsft_delta_us = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.tsft_delta_us', ''),
+                NULLIF(payload->>'$$.correlation.tsft_delta_us', '')
+              ), '') AS SIGNED),
+              wall_clock_delta_ms = CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.wall_clock_delta_ms', ''),
+                NULLIF(payload->>'$$.correlation.wall_clock_delta_ms', '')
+              ), '') AS SIGNED),
+              large_frame = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.large_frame', ''),
+                NULLIF(payload->>'$$.anomalies.large_frame', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              mixed_encryption = CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.mixed_encryption', ''),
+                NULLIF(payload->>'$$.anomalies.mixed_encryption', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
+              dedupe_or_replay_suspect = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.dedupe_or_replay_suspect', ''),
+                NULLIF(payload->>'$$.anomalies.dedupe_or_replay_suspect', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              raw_len = COALESCE(CAST(NULLIF(COALESCE(
+                NULLIF(payload->>'$$.raw_len', ''),
+                NULLIF(payload->>'$$.rf.raw_len', '')
+              ), '') AS SIGNED), 0),
+              frame_control_flags = COALESCE(CAST(NULLIF(payload->>'$$.frame_control_flags', '') AS SIGNED), 0),
+              more_data = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.more_data', ''),
+                NULLIF(payload->>'$$.mac.more_data', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              retry = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.retry', ''),
+                NULLIF(payload->>'$$.mac.retry', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              power_save = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.power_save', ''),
+                NULLIF(payload->>'$$.mac.power_save', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              protected = COALESCE(CASE LOWER(COALESCE(
+                NULLIF(payload->>'$$.protected', ''),
+                NULLIF(payload->>'$$.mac.protected', '')
+              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              security_flags = COALESCE(CAST(NULLIF(payload->>'$$.security_flags', '') AS SIGNED), 0),
+              risk_score = CAST(NULLIF(payload->>'$$.risk_score', '') AS DOUBLE),
+              identity_source = NULLIF(payload->>'$$.identity_source', ''),
+              tags = CASE
+                WHEN JSON_TYPE(JSON_EXTRACT(payload, '$$.tags')) = 'ARRAY'
+                THEN JSON_EXTRACT(payload, '$$.tags')
+                ELSE NULL
+              END,
+              wps_device_name = NULLIF(payload->>'$$.wps_device_name', ''),
+              wps_manufacturer = NULLIF(payload->>'$$.wps_manufacturer', ''),
+              wps_model_name = NULLIF(payload->>'$$.wps_model_name', ''),
+              device_fingerprint = NULLIF(payload->>'$$.device_fingerprint', ''),
+              handshake_captured = COALESCE(CASE LOWER(NULLIF(payload->>'$$.handshake_captured', ''))
+                WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              updated_at = CURRENT_TIMESTAMP(6)
+            WHERE dedupe_key = $dedupeKey
+              AND stream_name = 'wireless.audit'
+              AND payload_archived = 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sync_event_tombstones tombstone
+                WHERE tombstone.dedupe_key = sync_events.dedupe_key
+                  AND tombstone.stream_name = sync_events.stream_name
+                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
+              )
+              AND payload IS NOT NULL""".update.run
+
+    project *>
+      sql"""UPDATE sync_events
+            SET wireless_search_text = NULLIF(LOWER(CONCAT_WS(
+                  ' ', sensor_id, source_mac, bssid, destination_bssid, ssid,
+                  wps_device_name, wps_manufacturer, wps_model_name,
+                  device_fingerprint, app_protocol, src_ip, dst_ip, username
+                )), '')
+            WHERE dedupe_key = $dedupeKey
+              AND stream_name = 'wireless.audit'
+              AND payload_archived = 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sync_event_tombstones tombstone
+                WHERE tombstone.dedupe_key = sync_events.dedupe_key
+                  AND tombstone.stream_name = sync_events.stream_name
+                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
+              )
+              AND payload IS NOT NULL""".update.run
 
   def claimOutbox(
       ownerId: String,
@@ -341,47 +765,86 @@ class TidbRepository(xa: Transactor[IO]):
 
   def acknowledgeOutbox(record: OutboxRecord): IO[Either[DatabaseError, Boolean]] =
     runDb("tidb.acknowledge_outbox") {
-      for
-        loadBatchId <- validatedLoadBatchId(record)
-        updated <- sql"""UPDATE outbox_events
-                         SET status = 'published',
-                             published_at = CURRENT_TIMESTAMP(6),
-                             owner_id = NULL,
-                             lease_token = NULL,
-                             lease_expires_at = NULL,
-                             last_error = NULL,
-                             updated_at = CURRENT_TIMESTAMP(6)
-                         WHERE outbox_id = ${record.outboxId}
-                           AND status = 'leased'
-                           AND owner_id = ${record.lease.ownerId}
-                           AND lease_token = ${record.lease.token}
-                           AND fence = ${record.lease.fence}
-                           AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
-        _ <- if updated == 1 then
-          sql"""INSERT INTO outbox_publish_attempts (
-                  outbox_id, attempt_no, status, error_text, attempted_at
-                ) VALUES (
-                  ${record.outboxId}, ${record.attemptCount}, 'published', NULL, CURRENT_TIMESTAMP(6)
-                ) ON DUPLICATE KEY UPDATE status = 'published', error_text = NULL,
-                    attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
-        else ().pure[ConnectionIO]
-        _ <- if updated == 1 then loadBatchId.traverse_ { batchId =>
-          sql"""UPDATE sync_batches
-                SET status = 'dispatched',
-                    attempt_count = attempt_count + 1,
-                    outbox_id = ${record.outboxId},
-                    updated_at = CURRENT_TIMESTAMP(6)
-                WHERE batch_id = $batchId
-                  AND status IN ('pending', 'dispatched')""".update.run.void *>
-            sql"""UPDATE sync_jobs j
-                  JOIN sync_batches b ON b.job_id = j.job_id
-                  SET j.status = 'running',
-                      j.started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP(6))
-                  WHERE b.batch_id = $batchId
-                    AND j.status IN ('pending', 'running')""".update.run.void
-        } else ().pure[ConnectionIO]
-      yield updated == 1
+      validatedLoadBatchId(record).attempt.flatMap {
+        case Right(loadBatchId) => acknowledgeValidatedOutbox(record, loadBatchId)
+        case Left(error: IllegalArgumentException) => parkMalformedLoadOutbox(record, error)
+        case Left(error) => FC.raiseError(error)
+      }
     }
+
+  private def acknowledgeValidatedOutbox(
+      record: OutboxRecord,
+      loadBatchId: Option[String]
+  ): ConnectionIO[Boolean] =
+    for
+      updated <- sql"""UPDATE outbox_events
+                       SET status = 'published',
+                           published_at = CURRENT_TIMESTAMP(6),
+                           owner_id = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL,
+                           last_error = NULL,
+                           updated_at = CURRENT_TIMESTAMP(6)
+                       WHERE outbox_id = ${record.outboxId}
+                         AND status = 'leased'
+                         AND owner_id = ${record.lease.ownerId}
+                         AND lease_token = ${record.lease.token}
+                         AND fence = ${record.lease.fence}
+                         AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
+      _ <- if updated == 1 then
+        sql"""INSERT INTO outbox_publish_attempts (
+                outbox_id, attempt_no, status, error_text, attempted_at
+              ) VALUES (
+                ${record.outboxId}, ${record.attemptCount}, 'published', NULL, CURRENT_TIMESTAMP(6)
+              ) ON DUPLICATE KEY UPDATE status = 'published', error_text = NULL,
+                  attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
+      else ().pure[ConnectionIO]
+      _ <- if updated == 1 then loadBatchId.traverse_ { batchId =>
+        sql"""UPDATE sync_batches
+              SET status = 'dispatched',
+                  attempt_count = attempt_count + 1,
+                  outbox_id = ${record.outboxId},
+                  updated_at = CURRENT_TIMESTAMP(6)
+              WHERE batch_id = $batchId
+                AND status IN ('pending', 'dispatched')""".update.run.void *>
+          sql"""UPDATE sync_jobs j
+                JOIN sync_batches b ON b.job_id = j.job_id
+                SET j.status = 'running',
+                    j.started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP(6))
+                WHERE b.batch_id = $batchId
+                  AND j.status IN ('pending', 'running')""".update.run.void
+      } else ().pure[ConnectionIO]
+    yield updated == 1
+
+  private def parkMalformedLoadOutbox(
+      record: OutboxRecord,
+      error: IllegalArgumentException
+  ): ConnectionIO[Boolean] =
+    val errorText = s"published load outbox payload was malformed: ${error.getMessage}"
+    for
+      updated <- sql"""UPDATE outbox_events
+                       SET status = 'failed',
+                           published_at = CURRENT_TIMESTAMP(6),
+                           owner_id = NULL,
+                           lease_token = NULL,
+                           lease_expires_at = NULL,
+                           last_error = $errorText,
+                           updated_at = CURRENT_TIMESTAMP(6)
+                       WHERE outbox_id = ${record.outboxId}
+                         AND status = 'leased'
+                         AND owner_id = ${record.lease.ownerId}
+                         AND lease_token = ${record.lease.token}
+                         AND fence = ${record.lease.fence}
+                         AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
+      _ <- if updated == 1 then
+        sql"""INSERT INTO outbox_publish_attempts (
+                outbox_id, attempt_no, status, error_text, attempted_at
+              ) VALUES (
+                ${record.outboxId}, ${record.attemptCount}, 'failed', $errorText, CURRENT_TIMESTAMP(6)
+              ) ON DUPLICATE KEY UPDATE status = 'failed', error_text = VALUES(error_text),
+                  attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
+      else ().pure[ConnectionIO]
+    yield updated == 1
 
   private def validatedLoadBatchId(record: OutboxRecord): ConnectionIO[Option[String]] =
     if record.destinationTopic != "sync.oracle.load" then none[String].pure[ConnectionIO]

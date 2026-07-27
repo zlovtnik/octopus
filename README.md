@@ -180,7 +180,7 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `SYNC_STREAM_NAMES` | (see reference.conf) | Comma-separated list of all stream names |
 | `SYNC_TIDB_STREAM_NAMES` | (see reference.conf) | Stream names dispatched to TiDB |
 | `SYNC_REDPANDA_BOOTSTRAP_SERVERS` | `localhost:9092` | Redpanda/Kafka bootstrap servers |
-| `TIDB_ENABLED` | `false` | Enable the required TiDB integration |
+| `TIDB_ENABLED` | `false` | Required: explicitly set to `true` for runtime startup |
 | `TIDB_JDBC_URL` | `jdbc:mysql://localhost:3306/coordinator` | TiDB/MySQL JDBC URL |
 | `TIDB_USER` | `root` | TiDB username |
 | `TIDB_PASSWORD` | *(required)* | TiDB password |

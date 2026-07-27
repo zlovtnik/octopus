@@ -4,8 +4,9 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
-import com.sslproxy.coordinator.domain.ScanRequestRecord
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.tidb.{TidbPayloadResolver, TidbRepository}
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
 
@@ -16,29 +17,36 @@ object ScanRequestStream:
       cfg: KafkaCfg,
       artifact: VerifiedCutoverArtifact,
       repo: TidbRepository,
+      payloadResolver: TidbPayloadResolver,
+      metrics: CoordinatorMetrics,
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact,
-      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).map(_.fold(
-        err => {
-          log.error("scan_request_consumer",
+      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).flatMap {
+        case Left(err) =>
+          IO(log.error("scan_request_consumer",
             "status" -> "offset_load_failed",
             "consumer_group" -> cfg.scanConsumer,
             "topic" -> cfg.scanTopic,
             "operation" -> err.operation,
-            "error" -> err.message)
-          Set.empty[CutoffKey]
-        },
-        identity
-      ))
+            "error" -> err.message)) *>
+            IO.raiseError[Set[CutoffKey]](
+              new RuntimeException("cutover offset authorization unavailable"))
+        case Right(cutoffs) =>
+          IO.pure(cutoffs)
+      }
     ) { locked =>
       for
         request <- IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value))
+        resolved <- IO.blocking(payloadResolver.resolve(request))
         decision <- dbSemaphore.permit.use { _ =>
           KafkaDatabaseResult.require(
-            repo.recordScanRequestWithEvidence(request, locked.metadata)
+            repo.recordScanRequestWithEvidence(resolved, locked.metadata)
           )
         }
+        _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
+          IO(metrics.recordSyncEventHydrated())
+        )
         _ <- IO(log.info("scan_request_consumer",
           "status" -> decision.disposition.databaseValue,
           "stream_name" -> request.streamName,

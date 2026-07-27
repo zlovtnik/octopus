@@ -5,7 +5,7 @@ import cats.effect.kernel.Fiber
 import cats.effect.std.Semaphore
 import com.comcast.ip4s.*
 import fs2.Stream
-import com.sslproxy.coordinator.config.AppConfig
+import com.sslproxy.coordinator.config.{AppConfig, RuntimeConfig}
 import com.sslproxy.coordinator.cron.CronScheduler
 import com.sslproxy.coordinator.cutover.CutoverArtifactLoader
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
@@ -120,7 +120,7 @@ object Main extends IOApp.Simple:
                         cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer, dbSemaphore
                       )
 
-                      val baseStreams =
+                      val processorStreams =
                         cronScheduler.mainLoop
                           .merge(cronScheduler.schemaRefresher)
                           .merge(hydrationService.runOnce.handleErrorWith { error =>
@@ -130,32 +130,43 @@ object Main extends IOApp.Simple:
                               "status" -> "failed"
                             )))
                           })
-                          .merge(payloadAuditStream)
-                          .merge(wirelessStreams)
 
                       artifactOpt match
                         case Some(artifact) =>
                           log.info("startup", "status" -> "consumers_enabled",
-                            "artifact_version" -> artifact.artifact.schemaVersion.toString, "cluster_id" -> artifact.artifact.clusterId)
+                            "artifact_version" -> artifact.artifact.schemaVersion.toString,
+                            "cluster_id" -> artifact.artifact.clusterId,
+                            "scan_topic" -> cfg.kafka.scanTopic,
+                            "scan_group" -> cfg.kafka.scanConsumer,
+                            "load_topic" -> cfg.kafka.loadTopic,
+                            "load_group" -> cfg.kafka.loadConsumer,
+                            "result_topic" -> cfg.kafka.resultTopic,
+                            "result_group" -> cfg.kafka.resultConsumer)
                         case None =>
                           log.info("startup", "status" -> "consumers_disabled")
 
                       val consumerStreams = artifactOpt match
                         case Some(artifact) =>
-                          ScanRequestStream.run(
-                            cfg.kafka,
-                            artifact,
-                            tiDbRepo,
-                            payloadResolver,
-                            metrics,
-                            dbSemaphore
-                          )
+                          payloadAuditStream
+                            .merge(wirelessStreams)
+                            .merge(ScanRequestStream.run(
+                              cfg.kafka,
+                              artifact,
+                              tiDbRepo,
+                              payloadResolver,
+                              metrics,
+                              dbSemaphore
+                            ))
                             .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, dbSemaphore))
                             .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore))
                         case None =>
                           Stream.empty
 
-                      val streams = baseStreams.merge(consumerStreams)
+                      val streams = enabledRuntimeStreams(
+                        cfg.runtime,
+                        processorStreams,
+                        consumerStreams
+                      )
 
                       Resource.make(
                         tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
@@ -178,3 +189,14 @@ object Main extends IOApp.Simple:
     // Schema introspection and health checks use the transactor directly.
     // Keep capacity available for them when admitted worker traffic is busy.
     (poolSize - 2).max(1).toLong
+
+  private[coordinator] def enabledRuntimeStreams[A](
+      runtime: RuntimeConfig,
+      processorStreams: Stream[IO, A],
+      consumerStreams: Stream[IO, A]
+  ): Stream[IO, A] =
+    (runtime.processorsEnabled, runtime.consumersEnabled) match
+      case (true, true)   => processorStreams.merge(consumerStreams)
+      case (true, false)  => processorStreams
+      case (false, true)  => consumerStreams
+      case (false, false) => Stream.empty

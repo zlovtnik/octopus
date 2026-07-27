@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.config
 
 import cats.data.NonEmptyList
+import com.typesafe.config.Config
 import pureconfig.{ConfigReader, ConfigCursor}
 import pureconfig.error.ConfigReaderFailures
 import com.sslproxy.coordinator.config.StringListConfigReader.given
@@ -138,10 +139,15 @@ final case class AppConfigValidation(errors: NonEmptyList[String])
 object AppConfig:
   private val VersionedConsumerGroup = "^[A-Za-z0-9._-]+[-_.]v[1-9][0-9]*$".r
   private val Sha256Hex = "^[0-9a-f]{64}$".r
+  private val ProxyEventsStream = "proxy.events"
 
   def load: AppConfig =
     val config = pureconfig.ConfigSource.default.loadOrThrow[AppConfig]
     validate(config).fold(error => throw error, identity)
+
+  private[coordinator] def load(config: Config): AppConfig =
+    val loaded = pureconfig.ConfigSource.fromConfig(config).loadOrThrow[AppConfig]
+    validate(loaded).fold(error => throw error, identity)
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val stagedTiDbErrors =
@@ -150,11 +156,34 @@ object AppConfig:
     val runtimeErrors =
       if config.runtime.anyEnabled then activeRuntimeErrors(config)
       else List.empty
-    val errors = processorErrors(config.processors) ++ stagedTiDbErrors ++ runtimeErrors
+    val errors =
+      processorErrors(config.processors) ++
+        ingestErrors(config.ingest) ++
+        stagedTiDbErrors ++
+        runtimeErrors
 
     NonEmptyList.fromList(errors) match
       case Some(values) => Left(AppConfigValidation(values))
       case None         => Right(config)
+
+  private def ingestErrors(config: IngestConfig): List[String] =
+    List(
+      Option.when(!config.streamNames.contains(ProxyEventsStream))(
+        s"ingest.stream-names must contain $ProxyEventsStream"
+      ),
+      Option.when(!config.loadStreamNames.contains(ProxyEventsStream))(
+        s"ingest.load-stream-names must contain $ProxyEventsStream so proxy events are persisted to TiDB"
+      ),
+      Option.when(config.streamNames.distinct.size != config.streamNames.size)(
+        "ingest.stream-names must not contain duplicates"
+      ),
+      Option.when(config.loadStreamNames.distinct.size != config.loadStreamNames.size)(
+        "ingest.load-stream-names must not contain duplicates"
+      ),
+      Option.when(config.loadStreamNames.exists(name => !config.streamNames.contains(name)))(
+        "ingest.load-stream-names must be a subset of ingest.stream-names"
+      )
+    ).flatten
 
   private def processorErrors(config: ProcessorConfig): List[String] =
     List(
@@ -225,24 +254,27 @@ object AppConfig:
 
   private def activeRuntimeErrors(config: AppConfig): List[String] =
     val cutover = config.cutover
-    if cutover.devBypass then List.empty
-    else
-      val configuredGroups = List(
-        config.kafka.scanConsumer,
-        config.kafka.resultConsumer,
-        config.kafka.payloadAuditConsumer,
-        config.kafka.loadConsumer,
-        config.wireless.macLookupConsumer,
-        config.wireless.networksAuthorizedConsumer,
-        config.wireless.probeFlushConsumer
+    val configuredGroups = List(
+      config.kafka.scanConsumer,
+      config.kafka.resultConsumer,
+      config.kafka.payloadAuditConsumer,
+      config.kafka.loadConsumer,
+      config.wireless.macLookupConsumer,
+      config.wireless.networksAuthorizedConsumer,
+      config.wireless.probeFlushConsumer
+    )
+    val runtimeInvariantErrors = List(
+      Option.when(!config.tidb.enabled)(
+        "an enabled runtime requires tidb.enabled=true"
       )
+    ).flatten
+
+    if cutover.devBypass then runtimeInvariantErrors
+    else
       val requiredGroups = cutover.requiredConsumerGroups
       val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
 
-      List(
-        Option.when(!config.tidb.enabled)(
-          "an enabled runtime requires tidb.enabled=true"
-        ),
+      runtimeInvariantErrors ++ List(
         required(cutover.artifactPath, "cutover.artifact-path"),
         required(cutover.signaturePath, "cutover.signature-path"),
         Option.when(keySources != 1)(

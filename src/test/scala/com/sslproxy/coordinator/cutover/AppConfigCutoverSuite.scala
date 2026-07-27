@@ -1,7 +1,10 @@
 package com.sslproxy.coordinator.cutover
 
-import com.sslproxy.coordinator.config.{AppConfig, CutoverConfig, ProcessorConfig, RuntimeConfig, TiDbConfig}
+import com.sslproxy.coordinator.config.{AppConfig, CutoverConfig, IngestConfig, ProcessorConfig, RuntimeConfig, TiDbConfig}
+import com.typesafe.config.ConfigFactory
 import munit.FunSuite
+
+import scala.jdk.CollectionConverters.*
 
 class AppConfigCutoverSuite extends FunSuite:
   test("application defaults disable TiDB, consumers, processors, and the processor catalog"):
@@ -12,6 +15,31 @@ class AppConfigCutoverSuite extends FunSuite:
     assertEquals(config.processors.enabled, List.empty)
     assertEquals(config.processors.restartBaseDelayMs, 1000L)
     assertEquals(config.processors.restartMaxDelayMs, 30000L)
+
+  test("deployment SYNC variables configure locked topics and consumer groups"):
+    val environment = ConfigFactory.parseMap(Map(
+      "SYNC_SCAN_TOPIC" -> "sync.scan.request.cluster",
+      "SYNC_PAYLOAD_AUDIT_TOPIC" -> "proxy.payload_audit.cluster",
+      "SYNC_SCAN_CONSUMER" -> "octopus-scan-v7",
+      "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
+      "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
+      "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
+      "SYNC_STREAM_NAMES" -> "proxy.events,proxy.payload_audit",
+      "COORDINATOR_LOAD_STREAM_NAMES" -> "proxy.events,proxy.payload_audit"
+    ).asJava)
+    val config = ConfigFactory.parseResources("application.conf")
+      .withFallback(environment)
+      .resolve()
+    val loaded = AppConfig.load(config)
+
+    assertEquals(loaded.kafka.scanTopic, "sync.scan.request.cluster")
+    assertEquals(loaded.kafka.payloadAuditTopic, "proxy.payload_audit.cluster")
+    assertEquals(loaded.kafka.scanConsumer, "octopus-scan-v7")
+    assertEquals(loaded.kafka.loadConsumer, "octopus-load-v7")
+    assertEquals(loaded.kafka.resultConsumer, "octopus-result-v7")
+    assertEquals(loaded.kafka.payloadAuditConsumer, "octopus-payload-audit-v7")
+    assertEquals(loaded.ingest.streamNames, List("proxy.events", "proxy.payload_audit"))
+    assertEquals(loaded.ingest.loadStreamNames, List("proxy.events", "proxy.payload_audit"))
 
   test("enabled runtime fails closed without artifact, signature, pinned key, cluster, and groups"):
     val baseline = AppConfig.load
@@ -97,6 +125,18 @@ class AppConfigCutoverSuite extends FunSuite:
 
     assertEquals(AppConfig.validate(staged), Right(staged))
 
+  test("cutover dev bypass still requires TiDB for an enabled runtime"):
+    val baseline = AppConfig.load
+    val activeWithoutTiDb = baseline.copy(
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = baseline.cutover.copy(devBypass = true)
+    )
+
+    AppConfig.validate(activeWithoutTiDb) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("requires tidb.enabled=true")))
+      case Right(_) => fail("expected an enabled runtime without TiDB to fail")
+
   test("stage mode rejects loopback root blank-password or downgraded TLS TiDB"):
     val baseline = AppConfig.load
     val staged = baseline.copy(tidb = baseline.tidb.copy(enabled = true, sslMode = "REQUIRED"))
@@ -112,6 +152,22 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(messages.exists(_.contains("tidb.ssl-server-name")))
         assert(!messages.exists(_.contains("cutover.artifact-path")))
       case Right(_) => fail("expected invalid staged TiDB configuration rejection")
+
+  test("proxy.events must remain in both ingest and TiDB load streams"):
+    val baseline = AppConfig.load
+    val missing = baseline.copy(
+      ingest = IngestConfig(
+        streamNames = baseline.ingest.streamNames.filterNot(_ == "proxy.events"),
+        loadStreamNames = baseline.ingest.loadStreamNames.filterNot(_ == "proxy.events")
+      )
+    )
+
+    AppConfig.validate(missing) match
+      case Left(error) =>
+        val messages = error.errors.toList
+        assert(messages.exists(_.contains("ingest.stream-names must contain proxy.events")))
+        assert(messages.exists(_.contains("persisted to TiDB")))
+      case Right(_) => fail("expected proxy.events routing rejection")
 
   private def completeCutover(groups: List[String]): CutoverConfig =
     CutoverConfig(

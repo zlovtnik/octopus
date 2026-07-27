@@ -1,8 +1,11 @@
 package com.sslproxy.coordinator
 
-import munit.FunSuite
+import cats.effect.IO
+import com.sslproxy.coordinator.config.RuntimeConfig
+import fs2.Stream
+import munit.CatsEffectSuite
 
-class MainSuite extends FunSuite:
+class MainSuite extends CatsEffectSuite:
 
   test("database worker permits reserve two pool connections"):
     assertEquals(Main.dbWorkerPermits(10), 8L)
@@ -11,3 +14,36 @@ class MainSuite extends FunSuite:
   test("database worker permits retain one worker for small pools"):
     assertEquals(Main.dbWorkerPermits(2), 1L)
     assertEquals(Main.dbWorkerPermits(1), 1L)
+
+  test("runtime flags start both processor and consumer lanes"):
+    Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO]
+    ).compile.toList.map(values => assertEquals(values.toSet, Set("processor", "consumer")))
+
+  test("runtime flags do not start disabled lanes"):
+    val processorOnly = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO]
+    )
+    val consumerOnly = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = false, consumersEnabled = true),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO]
+    )
+    val disabled = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO]
+    )
+
+    for
+      processors <- processorOnly.compile.toList
+      consumers <- consumerOnly.compile.toList
+      none <- disabled.compile.toList
+    yield
+      assertEquals(processors, List("processor"))
+      assertEquals(consumers, List("consumer"))
+      assertEquals(none, List.empty)

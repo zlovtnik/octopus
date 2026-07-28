@@ -11,6 +11,7 @@ class AppConfigCutoverSuite extends FunSuite:
     val config = AppConfig.load
 
     assertEquals(config.tidb.enabled, false)
+    assertEquals(config.tidb.poolSize, 4)
     assertEquals(config.runtime, RuntimeConfig(processorsEnabled = false, consumersEnabled = false))
     assertEquals(config.processors.enabled, List.empty)
     assertEquals(config.processors.restartBaseDelayMs, 1000L)

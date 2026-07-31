@@ -32,4 +32,4 @@ object LeaseSql:
   def retryDelaySeconds(attempt: Int, baseSeconds: Int, maxSeconds: Int): Int =
     val safeAttempt = attempt.max(1).min(30)
     val multiplier = 1L << (safeAttempt - 1)
-    Math.min(maxSeconds.toLong, Math.max(1, baseSeconds).toLong * multiplier).toInt
+    Math.min(Math.max(1, maxSeconds).toLong, Math.max(1, baseSeconds).toLong * multiplier).toInt

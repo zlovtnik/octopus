@@ -146,7 +146,11 @@ class TidbRepository(xa: Transactor[IO]):
                                   SELECT 1 FROM sync_batches b
                                   WHERE b.stream_name = e.stream_name
                                     AND b.dedupe_key = e.dedupe_key
-                                )""").update.run
+                                    AND b.status = 'pending'
+                                    AND b.created_at >= e.updated_at
+                                )
+                              ORDER BY e.observed_at, e.stream_name, e.dedupe_key
+                              LIMIT $limit""").update.run
         yield processed.toLong
     }
 
@@ -312,7 +316,7 @@ class TidbRepository(xa: Transactor[IO]):
             IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId).pure[ConnectionIO]
           else
             for
-              inserted <- sql"""INSERT IGNORE INTO sync_events (
+              inserted <- sql"""INSERT INTO sync_events (
                                    dedupe_key, stream_name, observed_at, payload_ref, payload,
                                    payload_sha256, status, attempt_count, last_error,
                                    producer, event_kind, created_at, updated_at
@@ -320,7 +324,7 @@ class TidbRepository(xa: Transactor[IO]):
                                    ${record.dedupeKey}, ${record.streamName}, ${observedAt.orNull}, $payloadRef, $payload,
                                    ${record.eventPayloadSha256}, 'batched', 1, NULL,
                                    'ssl-proxy', $eventKind, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                                 )""".update.run
+                                 ) ON DUPLICATE KEY UPDATE dedupe_key = sync_events.dedupe_key""".update.run
               _ <- hydrateSyncEvent(record, eventKind)
               _ <- sql"""INSERT INTO sync_jobs (
                             job_id, stream_name, dedupe_key, status, attempt_count, created_at
@@ -741,6 +745,7 @@ class TidbRepository(xa: Transactor[IO]):
         val token = UUID.randomUUID().toString
         val topics = destinationTopics.distinct.map(value => fr0"$value").intercalate(fr",")
         val safeLeaseSeconds = leaseSeconds.max(1)
+        val eligibilityPredicate = Fragment.const(LeaseSql.EligibilityPredicate)
 
         for
           updated <- (fr"""UPDATE outbox_events
@@ -753,8 +758,7 @@ class TidbRepository(xa: Transactor[IO]):
                                 updated_at = CURRENT_TIMESTAMP(6)
                             WHERE destination_topic IN (""" ++ topics ++ fr""" )
                               AND status = 'pending'
-                              AND next_attempt_at <= CURRENT_TIMESTAMP(6)
-                              AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP(6))
+                              AND """ ++ eligibilityPredicate ++ fr"""
                               AND attempt_count < max_attempts
                             ORDER BY created_at, outbox_id
                             LIMIT 1""").update.run
@@ -994,7 +998,7 @@ class TidbRepository(xa: Transactor[IO]):
       cursorEnd: String
   ): ConnectionIO[Unit] =
     for
-      _ <- sql"""UPDATE sync_batches
+      updated <- sql"""UPDATE sync_batches
                   SET status = 'completed',
                       row_count = ${result.rowCount},
                       checksum = ${result.checksum},
@@ -1003,19 +1007,22 @@ class TidbRepository(xa: Transactor[IO]):
                   WHERE batch_id = ${result.batchId}
                     AND job_id = ${result.jobId}
                     AND status IN ('dispatched', 'running', 'completed')""".update.run
-      _ <- sql"""UPDATE sync_jobs
-                  SET status = 'completed',
-                      finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
+      _ <- if updated == 1 then
+        sql"""UPDATE sync_jobs
+              SET status = 'completed',
+                  finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
+              WHERE job_id = ${result.jobId}
+                AND NOT EXISTS (
+                  SELECT 1 FROM sync_batches
                   WHERE job_id = ${result.jobId}
-                    AND NOT EXISTS (
-                      SELECT 1 FROM sync_batches
-                      WHERE job_id = ${result.jobId}
-                        AND status <> 'completed'
-                    )""".update.run
-      _ <- sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-                  VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
-                  ON DUPLICATE KEY UPDATE cursor_value = VALUES(cursor_value),
-                      updated_at = CURRENT_TIMESTAMP(6)""".update.run
+                    AND status <> 'completed'
+                )""".update.run.void *>
+          sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
+                VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE
+                  cursor_value = GREATEST(sync_cursors.cursor_value, VALUES(cursor_value)),
+                  updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
+      else ().pure[ConnectionIO]
     yield ()
 
   private def completeFailedResult(

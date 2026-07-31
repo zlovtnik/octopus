@@ -44,11 +44,8 @@ class MainSuite extends CatsEffectSuite:
     for
       processors <- processorOnly.compile.toList
       consumers <- consumerOnly.compile.toList
-      disabledFiber <- disabled.compile.drain.start
-      _ <- IO.sleep(50.millis)
-      disabledOutcome <- disabledFiber.poll
-      _ <- disabledFiber.cancel
+      disabledOutcome <- IO.race(IO.sleep(50.millis), disabled.compile.drain)
     yield
       assertEquals(processors, List("processor"))
       assertEquals(consumers, List("consumer"))
-      assertEquals(disabledOutcome, None)
+      assertEquals(disabledOutcome, Left(()))

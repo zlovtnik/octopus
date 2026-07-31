@@ -171,6 +171,15 @@ class TidbRepository(xa: Transactor[IO]):
       ingestScanRequest(record, Some(metadata))
     }
 
+  def recordScanRequestsWithEvidence(
+      records: List[(ResolvedScanRequestRecord, BrokerRecordMetadata)]
+  ): IO[Either[DatabaseError, List[IngestionDecision]]] =
+    if records.isEmpty then IO.pure(Right(Nil))
+    else
+      runDb("tidb.record_scan_requests_with_evidence") {
+        records.traverse((record, metadata) => ingestScanRequest(record, Some(metadata)))
+      }
+
   def findSyncEventsNeedingHydration(
       after: Option[SyncEventHydrationCandidate],
       limit: Int
@@ -931,33 +940,66 @@ class TidbRepository(xa: Transactor[IO]):
       metadata: BrokerRecordMetadata
   ): IO[Either[DatabaseError, Unit]] =
     runDb("tidb.record_load_result_with_evidence") {
-      val dedupeKey = s"load:${load.batchId}:${load.attempt.max(1)}"
-      validateBrokerMetadata(metadata) *>
-        existingBrokerEvidence(metadata).flatMap {
-          case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
-          case None =>
-            enqueueResultTx(result, load.attempt) *>
-              persistBrokerEvidence(metadata, dedupeKey, IngestionDisposition.Processed)
-        }
+      recordLoadResultWithEvidenceTx(load, result, metadata)
     }
+
+  def recordLoadResultsWithEvidence(
+      records: List[(TidbLoad, TidbResult, BrokerRecordMetadata)]
+  ): IO[Either[DatabaseError, Unit]] =
+    if records.isEmpty then IO.pure(Right(()))
+    else
+      runDb("tidb.record_load_results_with_evidence") {
+        records.traverse_((load, result, metadata) =>
+          recordLoadResultWithEvidenceTx(load, result, metadata)
+        )
+      }
 
   def recordResultWithEvidence(
       result: TidbResult,
       metadata: BrokerRecordMetadata
   ): IO[Either[DatabaseError, Unit]] =
     runDb("tidb.record_result_with_evidence") {
-      val attempt = metadata.messageKey.flatMap(resultAttempt).getOrElse(1)
-      val dedupeKey = s"result:${result.batchId}:$attempt"
-
-      validateBrokerMetadata(metadata) *>
-        validateResult(result) *>
-        existingBrokerEvidence(metadata).flatMap {
-          case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
-          case None =>
-            applyResultTransition(result) *>
-              persistBrokerEvidence(metadata, dedupeKey, IngestionDisposition.Processed)
-        }
+      recordResultWithEvidenceTx(result, metadata)
     }
+
+  def recordResultsWithEvidence(
+      records: List[(TidbResult, BrokerRecordMetadata)]
+  ): IO[Either[DatabaseError, Unit]] =
+    if records.isEmpty then IO.pure(Right(()))
+    else
+      runDb("tidb.record_results_with_evidence") {
+        records.traverse_((result, metadata) => recordResultWithEvidenceTx(result, metadata))
+      }
+
+  private def recordLoadResultWithEvidenceTx(
+      load: TidbLoad,
+      result: TidbResult,
+      metadata: BrokerRecordMetadata
+  ): ConnectionIO[Unit] =
+    val dedupeKey = s"load:${load.batchId}:${load.attempt.max(1)}"
+    validateBrokerMetadata(metadata) *>
+      existingBrokerEvidence(metadata).flatMap {
+        case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
+        case None =>
+          enqueueResultTx(result, load.attempt) *>
+            persistBrokerEvidence(metadata, dedupeKey, IngestionDisposition.Processed)
+      }
+
+  private def recordResultWithEvidenceTx(
+      result: TidbResult,
+      metadata: BrokerRecordMetadata
+  ): ConnectionIO[Unit] =
+    val attempt = metadata.messageKey.flatMap(resultAttempt).getOrElse(1)
+    val dedupeKey = s"result:${result.batchId}:$attempt"
+
+    validateBrokerMetadata(metadata) *>
+      validateResult(result) *>
+      existingBrokerEvidence(metadata).flatMap {
+        case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
+        case None =>
+          applyResultTransition(result) *>
+            persistBrokerEvidence(metadata, dedupeKey, IngestionDisposition.Processed)
+      }
 
   private def enqueueResultTx(result: TidbResult, attempt: Int): ConnectionIO[Unit] =
     val safeAttempt = attempt.max(1)

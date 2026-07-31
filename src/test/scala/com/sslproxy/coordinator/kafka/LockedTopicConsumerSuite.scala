@@ -140,7 +140,9 @@ class LockedTopicConsumerSuite extends FunSuite:
       loadConsumer = "octopus-load-v1",
       maxPollRecords = 100,
       pollTimeoutMs = 1000L,
-      topicPartitions = 5,
+      lockedBatchSize = 100,
+      lockedBatchWindowMs = 250L,
+      topicPartitions = 24,
       topicReplicationFactor = 3
     )
 

@@ -43,6 +43,7 @@ final case class TiDbConfig(
     user: String,
     password: String,
     poolSize: Int,
+    healthcheckReserve: Int,
     connectionTimeoutMs: Long,
     statementTimeoutSecs: Int,
     enabled: Boolean,
@@ -69,6 +70,8 @@ final case class KafkaCfg(
     loadConsumer: String,
     maxPollRecords: Int,
     pollTimeoutMs: Long,
+    lockedBatchSize: Int,
+    lockedBatchWindowMs: Long,
     topicPartitions: Int,
     topicReplicationFactor: Int
 ) derives ConfigReader
@@ -218,6 +221,15 @@ object AppConfig:
       Option.when(config.topicPartitions <= 0)(
         "kafka.topic-partitions must be positive"
       ),
+      Option.when(config.lockedBatchSize <= 0)(
+        "kafka.locked-batch-size must be positive"
+      ),
+      Option.when(config.lockedBatchSize > config.maxPollRecords)(
+        "kafka.locked-batch-size must not exceed kafka.max-poll-records"
+      ),
+      Option.when(config.lockedBatchWindowMs <= 0L)(
+        "kafka.locked-batch-window-ms must be positive"
+      ),
       Option.when(config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)(
         "kafka.topic-replication-factor must be between 3 and 32767"
       )
@@ -252,6 +264,12 @@ object AppConfig:
       ),
       required(config.password, "tidb.password"),
       Option.when(config.poolSize <= 0)("tidb.pool-size must be positive"),
+      Option.when(config.healthcheckReserve < 0)(
+        "tidb.healthcheck-reserve must not be negative"
+      ),
+      Option.when(config.healthcheckReserve >= config.poolSize)(
+        "tidb.healthcheck-reserve must be smaller than tidb.pool-size"
+      ),
       Option.when(config.connectionTimeoutMs <= 0L)(
         "tidb.connection-timeout-ms must be positive"
       ),

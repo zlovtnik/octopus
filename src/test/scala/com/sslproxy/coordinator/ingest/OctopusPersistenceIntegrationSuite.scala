@@ -85,6 +85,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     user = "root",
     password = "",
     poolSize = 4,
+    healthcheckReserve = 1,
     connectionTimeoutMs = 5000L,
     statementTimeoutSecs = 30,
     enabled = true,

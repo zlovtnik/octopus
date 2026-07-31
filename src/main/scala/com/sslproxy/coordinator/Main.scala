@@ -65,7 +65,10 @@ object Main extends IOApp.Simple:
                 IO.pure(None)
 
             Resource.eval(artifactIO).flatMap { artifactOpt =>
-              Resource.eval(Semaphore[IO](dbWorkerPermits(cfg.tidb.poolSize))).flatMap { dbSemaphore =>
+              Resource.eval(Semaphore[IO](dbWorkerPermits(
+                cfg.tidb.poolSize,
+                cfg.tidb.healthcheckReserve
+              ))).flatMap { dbSemaphore =>
                 KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
                   Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
                     val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
@@ -187,10 +190,10 @@ object Main extends IOApp.Simple:
 
       appResource.use(_.joinWithNever)
 
-  private[coordinator] def dbWorkerPermits(poolSize: Int): Long =
+  private[coordinator] def dbWorkerPermits(poolSize: Int, healthcheckReserve: Int): Long =
     // Schema introspection and health checks use the transactor directly.
-    // Keep capacity available for them when admitted worker traffic is busy.
-    (poolSize - 2).max(1).toLong
+    // Keep the configured capacity available when admitted worker traffic is busy.
+    (poolSize - healthcheckReserve).max(1).toLong
 
   private[coordinator] def enabledRuntimeStreams[A](
       runtime: RuntimeConfig,

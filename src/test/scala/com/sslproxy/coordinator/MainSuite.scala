@@ -9,13 +9,13 @@ import scala.concurrent.duration.*
 
 class MainSuite extends CatsEffectSuite:
 
-  test("database worker permits reserve two pool connections"):
-    assertEquals(Main.dbWorkerPermits(10), 8L)
-    assertEquals(Main.dbWorkerPermits(4), 2L)
+  test("database worker permits use the configured connection reserve"):
+    assertEquals(Main.dbWorkerPermits(20, 2), 18L)
+    assertEquals(Main.dbWorkerPermits(20, 5), 15L)
 
   test("database worker permits retain one worker for small pools"):
-    assertEquals(Main.dbWorkerPermits(2), 1L)
-    assertEquals(Main.dbWorkerPermits(1), 1L)
+    assertEquals(Main.dbWorkerPermits(2, 1), 1L)
+    assertEquals(Main.dbWorkerPermits(1, 1), 1L)
 
   test("runtime flags start both processor and consumer lanes"):
     Main.enabledRuntimeStreams(

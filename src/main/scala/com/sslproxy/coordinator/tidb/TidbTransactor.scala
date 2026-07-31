@@ -7,7 +7,7 @@ import io.circe.Json
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.sql.{BatchUpdateException, Connection, PreparedStatement, SQLException, Timestamp, Types}
-import java.time.{Instant, OffsetDateTime}
+import java.time.{Instant, OffsetDateTime, ZoneOffset}
 import scala.concurrent.duration.*
 
 final class TidbTransactor private (
@@ -56,7 +56,8 @@ final class TidbTransactor private (
           val delay = retryBaseDelay * (1L << (attempt - 1))
           log.warn("tidb_retry", "status" -> "retrying",
             "operation" -> label, "attempt" -> s"$attempt/$retryMaxAttempts",
-            "delay" -> s"${delay.toMillis}ms", "error" -> err.getMessage)
+            "delay" -> s"${delay.toMillis}ms",
+            "error" -> Option(err.getMessage).getOrElse(err.getClass.getSimpleName))
           IO.sleep(delay) *> go(attempt + 1)
         else
           IO.raiseError(err)
@@ -82,18 +83,17 @@ final class TidbTransactor private (
 
   private def executeBatch(stmt: PreparedStatement, rows: Seq[Seq[Any]]): Long =
     var count = 0L
-    var totalAffected = 0L
     for row <- rows do
       for (value, idx) <- row.zipWithIndex do
         setParam(stmt, idx + 1, value)
       stmt.addBatch()
       count += 1
       if count % batchSize == 0 then
-        totalAffected += TidbTransactor.totalAffected(stmt.executeBatch(), batchSize)
+        TidbTransactor.validateBatchResults(stmt.executeBatch())
     val remainder = (count % batchSize).toInt
     if remainder != 0 then
-      totalAffected += TidbTransactor.totalAffected(stmt.executeBatch(), remainder)
-    totalAffected
+      TidbTransactor.validateBatchResults(stmt.executeBatch())
+    rows.size.toLong
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
     value match
@@ -456,7 +456,7 @@ final class TidbTransactor private (
           primaryMac = Some(row.sourceMac),
           secondaryMac = row.bssid,
           ssid = row.ssid,
-          signalDbm = None,
+          signalDbm = Some(row.observedDbm),
           detailsJson = jsonDetails(
             "baseline_dbm" -> row.baselineDbm,
             "observed_dbm" -> row.observedDbm,
@@ -507,8 +507,8 @@ final class TidbTransactor private (
           signalDbm = None,
           detailsJson = jsonDetails(
             "attack_chain" -> row.attackChain,
-            "first_event_at" -> row.firstEventAt.toString,
-            "last_event_at" -> row.lastEventAt.toString,
+            "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+            "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
             "factor_breakdown" -> row.factorBreakdown,
             "explanation" -> row.explanation
           ),
@@ -535,8 +535,8 @@ final class TidbTransactor private (
             "session_key" -> row.sessionKey,
             "attack_tag" -> row.attackTag,
             "sequence" -> row.sequence,
-            "first_event_at" -> row.firstEventAt.toString,
-            "last_event_at" -> row.lastEventAt.toString,
+            "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+            "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
             "factor_breakdown" -> row.factorBreakdown,
             "explanation" -> row.explanation
           ),
@@ -559,8 +559,8 @@ final class TidbTransactor private (
           secondaryMac = Some(row.bssid),
           ssid = None,
           signalDbm = row.signalDbm,
-          detailsJson = jsonDetails("pmkid" -> row.pmkid),
-          rawJson = row.rawJson
+          detailsJson = jsonDetails("pmkid_sha256" -> row.pmkidSha256),
+          rawJson = None
         )
       })
     }
@@ -596,7 +596,7 @@ final class TidbTransactor private (
       try
         val params = rows.map { row =>
           Seq[Any](
-            alertType, batchId, row.rowSequence, row.detectedAt, row.sensorId,
+            alertType, batchId, row.rowSequence, ts(row.detectedAt), row.sensorId,
             row.locationId, optStr(row.iface), optLong(row.channel),
             optStr(row.primaryMac), optStr(row.secondaryMac), optStr(row.ssid),
             optLong(row.signalDbm), row.detailsJson, optStr(row.rawJson), now, now
@@ -787,30 +787,18 @@ object TidbTransactor:
       rawJson: Option[String]
   )
 
-  /**
-   * Count one successful JDBC batch for the externally reported TiDB result.
-   *
-   * `SUCCESS_NO_INFO` means the driver confirms the batch command succeeded but
-   * does not provide an affected-row count. If any command reports that status,
-   * the explicit contract is to report the number of input rows submitted in
-   * this batch, rather than mix known physical counts with unknown ones.
-   * `EXECUTE_FAILED` and all other negative update counts are failures.
-   */
-  private[tidb] def totalAffected(results: Array[Int], submittedRows: Int): Long =
+  /** Validate JDBC batch results while the sink reports submitted input rows. */
+  private[tidb] def validateBatchResults(results: Array[Int]): Unit =
     import java.sql.Statement
 
-    require(submittedRows >= 0, "submittedRows must be non-negative")
     if results.contains(Statement.EXECUTE_FAILED) then
       throw new BatchUpdateException("JDBC batch reported EXECUTE_FAILED", results)
-    else if results.contains(Statement.SUCCESS_NO_INFO) then
-      submittedRows.toLong
     else
-      results.foldLeft(0L) { (total, affected) =>
-        if affected < 0 then
+      results.foreach { affected =>
+        if affected < 0 && affected != Statement.SUCCESS_NO_INFO then
           throw new SQLException(
             s"JDBC batch returned an unsupported negative update count: $affected"
           )
-        total + affected.toLong
       }
 
   def resource(config: TiDbConfig): Resource[IO, TidbTransactor] =
@@ -864,7 +852,8 @@ object TidbTransactor:
           val attemptNum = maxRetries - remaining + 1
           val delay = baseDelay * math.min(attemptNum, 5).toLong
           log.warn("tidb_pool_retry",
-            "attempt" -> s"$attemptNum/$maxRetries", "error" -> error.getMessage,
+            "attempt" -> s"$attemptNum/$maxRetries",
+            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName),
             "delay" -> s"${delay.toSeconds}s")
           IO.sleep(delay) *> retryWithBackoff(remaining - 1, error)
         }

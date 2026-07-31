@@ -6,28 +6,22 @@ import munit.FunSuite
 
 class TidbTransactorSuite extends FunSuite:
 
-  test("totalAffected sums known JDBC update counts"):
-    assertEquals(TidbTransactor.totalAffected(Array(1, 2, 0), submittedRows = 3), 3L)
+  test("validateBatchResults accepts known JDBC update counts"):
+    TidbTransactor.validateBatchResults(Array(1, 2, 0))
 
-  test("totalAffected reports submitted input rows when JDBC count is unknown"):
-    val result = TidbTransactor.totalAffected(
-      Array(4, Statement.SUCCESS_NO_INFO, 0),
-      submittedRows = 3
-    )
+  test("validateBatchResults accepts successful batches with unknown update counts"):
+    TidbTransactor.validateBatchResults(Array(4, Statement.SUCCESS_NO_INFO, 0))
 
-    assertEquals(result, 3L)
-    assert(result >= 0L)
-
-  test("totalAffected fails when JDBC reports EXECUTE_FAILED"):
+  test("validateBatchResults fails when JDBC reports EXECUTE_FAILED"):
     val error = intercept[BatchUpdateException] {
-      TidbTransactor.totalAffected(Array(1, Statement.EXECUTE_FAILED), submittedRows = 2)
+      TidbTransactor.validateBatchResults(Array(1, Statement.EXECUTE_FAILED))
     }
 
     assertEquals(error.getUpdateCounts.toList, List(1, Statement.EXECUTE_FAILED))
 
-  test("totalAffected fails for unsupported negative JDBC update counts"):
+  test("validateBatchResults fails for unsupported negative JDBC update counts"):
     intercept[SQLException] {
-      TidbTransactor.totalAffected(Array(-4), submittedRows = 1)
+      TidbTransactor.validateBatchResults(Array(-4))
     }
 
   test("disabled TLS does not allow public key retrieval by default"):

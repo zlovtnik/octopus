@@ -309,6 +309,5 @@ final case class WirelessHandshakeAlertInsert(
     bssid: String,
     clientMac: String,
     signalDbm: Option[Long],
-    pmkid: Option[String],
-    rawJson: Option[String]
+    pmkidSha256: Option[String]
 )

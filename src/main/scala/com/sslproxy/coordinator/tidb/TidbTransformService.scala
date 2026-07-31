@@ -1,5 +1,6 @@
 package com.sslproxy.coordinator.tidb
 
+import com.sslproxy.coordinator.util.Sha256Utils
 import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -145,7 +146,7 @@ object TidbTransformService:
         transmitterMac = optionalString(row, "transmitter_mac"),
         receiverMac = optionalString(row, "receiver_mac"),
         destinationBssid = optionalString(row, "destination_bssid"),
-        ssid = optionalString(row, "ssid"),
+        ssid = row.hcursor.get[String]("ssid").toOption,
         signalDbm = optionalLong(row, "signal_dbm"),
         sequenceNumber = optionalLong(row, "sequence_number"),
         rawLen = requiredLong(row, "raw_len", "wireless.audit"),
@@ -347,15 +348,14 @@ object TidbTransformService:
     rows.zipWithIndex.map { case (row, index) =>
       WirelessHandshakeAlertInsert(
         rowSequence = rowSequence(index, "wifi.alert.handshake"),
-        detectedAt = requiredTimestamp(row, "observed_at", "wifi.alert.handshake"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wifi.alert.handshake"),
         sensorId = requiredString(row, "sensor_id", "wifi.alert.handshake"),
         locationId = requiredString(row, "location_id", "wifi.alert.handshake"),
         iface = requiredString(row, "interface", "wifi.alert.handshake"),
         bssid = requiredString(row, "bssid", "wifi.alert.handshake"),
         clientMac = requiredString(row, "client_mac", "wifi.alert.handshake"),
         signalDbm = optionalLong(row, "signal_dbm"),
-        pmkid = optionalString(row, "pmkid"),
-        rawJson = rawJson(row)
+        pmkidSha256 = optionalString(row, "pmkid").map(Sha256Utils.sha256Hex)
       )
     }
 

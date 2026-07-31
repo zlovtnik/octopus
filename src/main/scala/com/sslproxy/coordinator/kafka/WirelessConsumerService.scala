@@ -5,12 +5,15 @@ import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser.parse as parseJson
 import com.sslproxy.coordinator.observability.StructuredLogger
 
+import java.nio.charset.StandardCharsets
+import java.security.SecureRandom
 import scala.concurrent.duration.*
 
 object WirelessConsumerService:
@@ -19,6 +22,11 @@ object WirelessConsumerService:
   private val SensorInboxPrefix = "_INBOX.atheros_sensor."
   private val MaxRetries = 3
   private val RetryDelay = 500.millis
+  private val MacPattern = "(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$".r
+  private val MacHashSalt: Array[Byte] =
+    val bytes = new Array[Byte](32)
+    new SecureRandom().nextBytes(bytes)
+    bytes
 
   def macLookupStream(
       cfg: WirelessConfig,
@@ -113,18 +121,22 @@ object WirelessConsumerService:
         case None =>
           IO(log.warn("mac_lookup", "status" -> "skip", "error" -> "missing mac field"))
         case Some(mac) =>
-          IO(log.warn("mac_lookup", "status" -> "processing", "mac_hash" -> hashMac(mac))) *>
+          val macHashFields = hashMac(mac).toList.map("mac_hash" -> _)
+          IO(log.debug("mac_lookup", (("status" -> "processing") :: macHashFields)*)) *>
             dbSemaphore.permit.use(_ => pgRepo.lookupDeviceByMac(mac)).attempt.flatMap {
               case Left(err) =>
                 IO(log.warn("mac_lookup", "status" -> "skip",
                   "error" -> errorMessage(err)))
               case Right(Right(Some(reply))) =>
                 val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
-                IO(log.info("mac_lookup", "status" -> "found",
-                  "reply_topic" -> replyTopic, "mac_hash" -> hashMac(mac))) *>
-                  publishReply(producer, replyTopic, reply)
+                IO(log.info("mac_lookup", (("status" -> "found") ::
+                  ("reply_topic" -> replyTopic) :: macHashFields)*)) *>
+                  publishReply(producer, replyTopic, reply).handleErrorWith { err =>
+                    IO(log.error("mac_lookup", "status" -> "reply_publish_failed",
+                      "reply_topic" -> replyTopic, "error" -> errorMessage(err)))
+                  }
               case Right(Right(None)) =>
-                IO(log.info("mac_lookup", "status" -> "not_found", "mac_hash" -> hashMac(mac)))
+                IO(log.info("mac_lookup", (("status" -> "not_found") :: macHashFields)*))
               case Right(Left(err)) =>
                 IO(log.error("mac_lookup", "status" -> "db_error", "error" -> err.message))
             }
@@ -211,9 +223,11 @@ object WirelessConsumerService:
       json.hcursor.downField(field).as[String].toOption.filter(_.nonEmpty)
   }
 
-  private[kafka] def hashMac(mac: String): String =
-    if mac == null || mac.length < 4 then "invalid"
-    else mac.take(2) + "***" + mac.takeRight(2)
+  private[kafka] def hashMac(mac: String): Option[String] =
+    Option(mac).map(_.trim.toLowerCase(java.util.Locale.ROOT)).filter(MacPattern.matches).map { normalized =>
+      val input = MacHashSalt ++ normalized.getBytes(StandardCharsets.UTF_8)
+      Sha256Utils.sha256Hex(input).take(24)
+    }
 
   private def publishReply(
       producer: KafkaProducer[IO, String, String],

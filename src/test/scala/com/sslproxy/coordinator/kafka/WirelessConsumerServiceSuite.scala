@@ -108,12 +108,11 @@ class WirelessConsumerServiceSuite extends FunSuite:
 
   test("hashMac produces hashed output for valid MAC"):
     val hashed = WirelessConsumerService.hashMac("aa:bb:cc:dd:ee:ff")
-    assert(hashed.startsWith("aa"), s"expected start with aa, got $hashed")
-    assert(hashed.endsWith("ff"), s"expected end with ff, got $hashed")
-    assert(hashed.contains("***"), s"expected *** in hash, got $hashed")
+    assert(hashed.exists(_.matches("[0-9a-f]{24}")), s"expected truncated SHA-256, got $hashed")
+    assertEquals(hashed, WirelessConsumerService.hashMac("AA:BB:CC:DD:EE:FF"))
 
-  test("hashMac returns invalid for null"):
-    assertEquals(WirelessConsumerService.hashMac(null), "invalid")
+  test("hashMac omits invalid null input"):
+    assertEquals(WirelessConsumerService.hashMac(null), None)
 
-  test("hashMac returns invalid for short string"):
-    assertEquals(WirelessConsumerService.hashMac("ab"), "invalid")
+  test("hashMac omits malformed input"):
+    assertEquals(WirelessConsumerService.hashMac("ab"), None)

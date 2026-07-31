@@ -33,10 +33,18 @@ class CutoverArtifactSuite extends CatsEffectSuite:
     val authorizedAgain = verified.authorizeRecordOffset(GroupA, Topic, 0, 100L).toOption.get
     assertEquals(authorized.key, CutoffKey(GroupA, Topic, 0))
     assertEquals(authorized.verification.groupVersion, 1)
+    assertEquals(authorized.verification.evidenceMode, CutoverEvidenceMode.Verified)
     assertEquals(authorized.verification.artifactSha256, verified.artifact.artifactSha256)
     assertEquals(authorized.durable.sha256.length, 64)
     assertEquals(authorized.durable, authorizedAgain.durable)
     assert(authorized.durable.canonicalJson.contains("\"group_id\":\"octopus-scan-tidb-v1\""))
+
+  test("dev bypass durable evidence is explicitly marked"):
+    val bypass = VerifiedCutoverArtifact.devBypass("redpanda-dev", VerifiedAt)
+    val authorized = bypass.authorizeRecordOffset(GroupA, Topic, 0, 1L).toOption.get
+
+    assertEquals(authorized.verification.evidenceMode, CutoverEvidenceMode.DevBypass)
+    assert(authorized.durable.canonicalJson.contains("\"evidence_mode\":\"dev_bypass\""))
 
   test("reject a canonical artifact whose signed payload was tampered"):
     val fixture = signedFixture(

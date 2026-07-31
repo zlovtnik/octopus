@@ -47,3 +47,6 @@ class TidbTransactorSuite extends FunSuite:
 
     assert(url.contains("sslMode=VERIFY_IDENTITY"))
     assert(!url.contains("sslMode=REQUIRED"))
+
+  test("outbox retry delay clamps a non-positive maximum to one second"):
+    assertEquals(LeaseSql.retryDelaySeconds(attempt = 3, baseSeconds = 5, maxSeconds = 0), 1)

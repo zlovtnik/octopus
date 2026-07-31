@@ -76,7 +76,7 @@ class TidbTransformServiceSuite extends FunSuite:
     assertEquals(result.wirelessProbeRequests.size, 1)
     assertEquals(result.wirelessProbeRequests.head.ssid, "TestNet")
 
-  test("transform attack sequence preserves a hidden SSID"):
+  test("transform attack sequence represents an absent SSID as None"):
     val row = parse(
       """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1",
         |"first_event_at":"2026-07-20T11:59:00Z","last_event_at":"2026-07-20T12:00:00Z"}""".stripMargin
@@ -86,6 +86,30 @@ class TidbTransformServiceSuite extends FunSuite:
 
     assertEquals(result.wirelessAttackSequence.size, 1)
     assertEquals(result.wirelessAttackSequence.head.ssid, None)
+
+  test("transform attack sequence preserves an empty hidden SSID"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1","ssid":"",
+        |"first_event_at":"2026-07-20T11:59:00Z","last_event_at":"2026-07-20T12:00:00Z"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessAttackSequence, List(row))
+
+    assertEquals(result.wirelessAttackSequence.head.ssid, Some(""))
+
+  test("transform handshake alerts accepts detected_at and minimizes handshake evidence"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1",
+        |"interface":"wlan0","bssid":"aa:bb:cc:dd:ee:01","client_mac":"aa:bb:cc:dd:ee:02",
+        |"pmkid":"sensitive-pmkid"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessHandshakeAlert, List(row))
+    val alert = result.wirelessHandshakeAlert.head
+
+    assertEquals(alert.detectedAt.toString, "2026-07-20T12:00Z")
+    assertEquals(alert.pmkidSha256.map(_.length), Some(64))
+    assert(!alert.toString.contains("sensitive-pmkid"))
 
   test("inputRowCount returns correct counts"):
     val row = parse("""{"type": "tls_scan", "host": "a.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get

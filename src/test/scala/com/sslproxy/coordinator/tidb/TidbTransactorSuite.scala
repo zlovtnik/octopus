@@ -1,0 +1,55 @@
+package com.sslproxy.coordinator.tidb
+
+import com.sslproxy.coordinator.config.AppConfig
+import java.sql.{BatchUpdateException, SQLException, Statement}
+import munit.FunSuite
+
+class TidbTransactorSuite extends FunSuite:
+
+  test("totalAffected sums known JDBC update counts"):
+    assertEquals(TidbTransactor.totalAffected(Array(1, 2, 0), submittedRows = 3), 3L)
+
+  test("totalAffected reports submitted input rows when JDBC count is unknown"):
+    val result = TidbTransactor.totalAffected(
+      Array(4, Statement.SUCCESS_NO_INFO, 0),
+      submittedRows = 3
+    )
+
+    assertEquals(result, 3L)
+    assert(result >= 0L)
+
+  test("totalAffected fails when JDBC reports EXECUTE_FAILED"):
+    val error = intercept[BatchUpdateException] {
+      TidbTransactor.totalAffected(Array(1, Statement.EXECUTE_FAILED), submittedRows = 2)
+    }
+
+    assertEquals(error.getUpdateCounts.toList, List(1, Statement.EXECUTE_FAILED))
+
+  test("totalAffected fails for unsupported negative JDBC update counts"):
+    intercept[SQLException] {
+      TidbTransactor.totalAffected(Array(-4), submittedRows = 1)
+    }
+
+  test("disabled TLS does not allow public key retrieval by default"):
+    val config = AppConfig.load.tidb.copy(sslMode = "DISABLED")
+
+    val url = TidbTransactor.jdbcUrl(config)
+
+    assert(url.contains("useSSL=false"))
+    assert(!url.contains("allowPublicKeyRetrieval=true"))
+
+  test("disabled TLS allows explicit local-development public key retrieval"):
+    val config = AppConfig.load.tidb.copy(
+      sslMode = "DISABLED",
+      localDevAllowPublicKeyRetrieval = true
+    )
+
+    assert(TidbTransactor.jdbcUrl(config).contains("allowPublicKeyRetrieval=true"))
+
+  test("secure JDBC URLs always pin identity verification"):
+    val config = AppConfig.load.tidb.copy(sslMode = "REQUIRED")
+
+    val url = TidbTransactor.jdbcUrl(config)
+
+    assert(url.contains("sslMode=VERIFY_IDENTITY"))
+    assert(!url.contains("sslMode=REQUIRED"))

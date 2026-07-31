@@ -6,11 +6,13 @@ import com.sslproxy.coordinator.tidb.TidbResult
 import munit.FunSuite
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.errors.TopicExistsException
 
 import java.nio.charset.StandardCharsets
 import java.security.{KeyPairGenerator, MessageDigest, Signature}
 import java.time.Instant
 import java.util.{Base64, HexFormat}
+import java.util.concurrent.ExecutionException
 
 class LockedTopicConsumerSuite extends FunSuite:
   private val ScanGroup = "octopus-scan-v1"
@@ -89,7 +91,7 @@ class LockedTopicConsumerSuite extends FunSuite:
       case Left(_: MissingCutoverCoverage) => ()
       case other => fail(s"expected missing coverage rejection, found $other")
 
-  test("locked consumer settings use explicit group and disable offset reset"):
+  test("locked consumer settings use earliest with a guard-enforced cutoff"):
     val settings = KafkaComponents.consumerSettings(kafkaConfig, kafkaConfig.loadConsumer)
 
     assertEquals(settings.properties(ConsumerConfig.GROUP_ID_CONFIG), kafkaConfig.loadConsumer)
@@ -97,6 +99,14 @@ class LockedTopicConsumerSuite extends FunSuite:
     assertEquals(settings.properties(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG), "false")
     assertEquals(settings.properties(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG), "false")
     assertEquals(settings.properties(ConsumerConfig.ISOLATION_LEVEL_CONFIG), "read_committed")
+
+  test("topic provisioning accepts an already-existing topic race only"):
+    assert(KafkaComponents.isTopicAlreadyExists(
+      new ExecutionException(new TopicExistsException("topic already exists"))
+    ))
+    assert(!KafkaComponents.isTopicAlreadyExists(
+      new ExecutionException(new IllegalStateException("topic creation failed"))
+    ))
 
   test("result codec preserves the locked result payload"):
     val expected = TidbResult(
@@ -129,7 +139,9 @@ class LockedTopicConsumerSuite extends FunSuite:
       payloadAuditConsumer = "octopus-payload-audit-v1",
       loadConsumer = "octopus-load-v1",
       maxPollRecords = 100,
-      pollTimeoutMs = 1000L
+      pollTimeoutMs = 1000L,
+      topicPartitions = 5,
+      topicReplicationFactor = 3
     )
 
   private def verifiedArtifact(

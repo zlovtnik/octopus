@@ -6,7 +6,7 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.Json
 import com.sslproxy.coordinator.observability.StructuredLogger
 
-import java.sql.{Connection, PreparedStatement, Timestamp, Types}
+import java.sql.{BatchUpdateException, Connection, PreparedStatement, SQLException, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime}
 import scala.concurrent.duration.*
 
@@ -15,7 +15,7 @@ final class TidbTransactor private (
     config: TiDbConfig,
     tlsMaterial: Option[TidbTlsMaterial]
 ) extends TidbSink:
-  import TidbTransactor.log
+  import TidbTransactor.{WirelessAlertRow, log}
 
   def dataSource: HikariDataSource = ds
 
@@ -88,21 +88,11 @@ final class TidbTransactor private (
       stmt.addBatch()
       count += 1
       if count % batchSize == 0 then
-        totalAffected += sumBatchResults(stmt.executeBatch())
+        totalAffected += TidbTransactor.totalAffected(stmt.executeBatch(), batchSize)
     val remainder = (count % batchSize).toInt
     if remainder != 0 then
-      totalAffected += sumBatchResults(stmt.executeBatch())
+      totalAffected += TidbTransactor.totalAffected(stmt.executeBatch(), remainder)
     totalAffected
-
-  private def sumBatchResults(results: Array[Int]): Long =
-    import java.sql.Statement
-    if results.isEmpty then 0L
-    else results.map {
-      case Statement.EXECUTE_FAILED   => 0L
-      case Statement.SUCCESS_NO_INFO  => 1L
-      case n if n >= 0                => n.toLong
-      case _                          => 0L
-    }.sum
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
     value match
@@ -410,96 +400,174 @@ final class TidbTransactor private (
 
   override def insertWirelessRogueAp(batchId: String, rows: List[WirelessRogueApInsert]): IO[Long] =
     withRetry("insert_wireless_rogue_ap") {
-      mergeWirelessAlerts(batchId, rows, "rogue_ap", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, row.iface, row.channel,
-        row.rogueBssid, null, optStr(row.ssid), optLong(row.signalDbm),
-        jsonDetails("ssid_impersonation" -> row.ssidImpersonation), optStr(row.rawJson)
-      ))
+      mergeWirelessAlerts(batchId, "rogue_ap", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = Some(row.iface),
+          channel = Some(row.channel),
+          primaryMac = Some(row.rogueBssid),
+          secondaryMac = None,
+          ssid = row.ssid,
+          signalDbm = row.signalDbm,
+          detailsJson = jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
+          rawJson = row.rawJson
+        )
+      })
     }
 
   override def insertWirelessDeauthFlood(batchId: String, rows: List[WirelessDeauthFloodInsert]): IO[Long] =
     withRetry("insert_wireless_deauth_flood") {
-      mergeWirelessAlerts(batchId, rows, "deauth_flood", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, row.iface, row.channel,
-        row.attackerMac, row.targetBssid, optStr(row.targetSsid), optLong(row.signalDbm),
-        jsonDetails("deauth_count" -> row.deauthCount, "window_secs" -> row.windowSecs, "threshold" -> row.threshold),
-        optStr(row.rawJson)
-      ))
+      mergeWirelessAlerts(batchId, "deauth_flood", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = Some(row.iface),
+          channel = Some(row.channel),
+          primaryMac = row.attackerMac,
+          secondaryMac = row.targetBssid,
+          ssid = row.targetSsid,
+          signalDbm = row.signalDbm,
+          detailsJson = jsonDetails(
+            "deauth_count" -> row.deauthCount,
+            "window_secs" -> row.windowSecs,
+            "threshold" -> row.threshold
+          ),
+          rawJson = row.rawJson
+        )
+      })
     }
 
   override def insertWirelessSignalAnomaly(batchId: String, rows: List[WirelessSignalAnomalyInsert]): IO[Long] =
     withRetry("insert_wireless_signal_anomaly") {
-      mergeWirelessAlerts(batchId, rows, "signal_anomaly", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, row.channel,
-        row.sourceMac, row.bssid, optStr(row.ssid), None,
-        jsonDetails(
-          "baseline_dbm" -> row.baselineDbm,
-          "observed_dbm" -> row.observedDbm,
-          "dbm_delta" -> row.dbmDelta,
-          "configured_delta" -> row.configuredDelta
-        ), None
-      ))
+      mergeWirelessAlerts(batchId, "signal_anomaly", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = None,
+          channel = Some(row.channel),
+          primaryMac = Some(row.sourceMac),
+          secondaryMac = row.bssid,
+          ssid = row.ssid,
+          signalDbm = None,
+          detailsJson = jsonDetails(
+            "baseline_dbm" -> row.baselineDbm,
+            "observed_dbm" -> row.observedDbm,
+            "dbm_delta" -> row.dbmDelta,
+            "configured_delta" -> row.configuredDelta
+          ),
+          rawJson = None
+        )
+      })
     }
 
   override def insertWirelessPmfAttack(batchId: String, rows: List[WirelessPmfAttackInsert]): IO[Long] =
     withRetry("insert_wireless_pmf_attack") {
-      mergeWirelessAlerts(batchId, rows, "pmf_attack", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, row.channel,
-        row.targetMac, row.targetBssid, optStr(row.ssid), None,
-        jsonDetails("attack_tag" -> row.attackTag, "reconnect_window_ms" -> row.reconnectWindowMs),
-        None
-      ))
+      mergeWirelessAlerts(batchId, "pmf_attack", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = None,
+          channel = row.channel,
+          primaryMac = Some(row.targetMac),
+          secondaryMac = row.targetBssid,
+          ssid = row.ssid,
+          signalDbm = None,
+          detailsJson = jsonDetails(
+            "attack_tag" -> row.attackTag,
+            "reconnect_window_ms" -> row.reconnectWindowMs
+          ),
+          rawJson = None
+        )
+      })
     }
 
   override def insertWirelessAttackSequence(batchId: String, rows: List[WirelessAttackSequenceInsert]): IO[Long] =
     withRetry("insert_wireless_attack_sequence") {
-      mergeWirelessAlerts(batchId, rows, "attack_sequence", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, null,
-        null, null, row.ssid, None,
-        jsonDetails(
-          "attack_chain" -> row.attackChain,
-          "first_event_at" -> row.firstEventAt.toString,
-          "last_event_at" -> row.lastEventAt.toString,
-          "factor_breakdown" -> row.factorBreakdown,
-          "explanation" -> row.explanation
-        ),
-        optStr(row.rawJson)
-      ))
+      mergeWirelessAlerts(batchId, "attack_sequence", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = None,
+          channel = None,
+          primaryMac = None,
+          secondaryMac = None,
+          ssid = row.ssid,
+          signalDbm = None,
+          detailsJson = jsonDetails(
+            "attack_chain" -> row.attackChain,
+            "first_event_at" -> row.firstEventAt.toString,
+            "last_event_at" -> row.lastEventAt.toString,
+            "factor_breakdown" -> row.factorBreakdown,
+            "explanation" -> row.explanation
+          ),
+          rawJson = row.rawJson
+        )
+      })
     }
 
   override def insertWirelessSequenceAlert(batchId: String, rows: List[WirelessSequenceAlertInsert]): IO[Long] =
     withRetry("insert_wireless_sequence_alert") {
-      mergeWirelessAlerts(batchId, rows, "sequence_alert", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, null,
-        row.sourceMac, row.bssid, optStr(row.ssid), None,
-        jsonDetails(
-          "session_key" -> row.sessionKey,
-          "attack_tag" -> row.attackTag,
-          "sequence" -> row.sequence,
-          "first_event_at" -> row.firstEventAt.toString,
-          "last_event_at" -> row.lastEventAt.toString,
-          "factor_breakdown" -> row.factorBreakdown,
-          "explanation" -> row.explanation
-        ),
-        optStr(row.rawJson)
-      ))
+      mergeWirelessAlerts(batchId, "sequence_alert", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = None,
+          channel = None,
+          primaryMac = row.sourceMac,
+          secondaryMac = row.bssid,
+          ssid = row.ssid,
+          signalDbm = None,
+          detailsJson = jsonDetails(
+            "session_key" -> row.sessionKey,
+            "attack_tag" -> row.attackTag,
+            "sequence" -> row.sequence,
+            "first_event_at" -> row.firstEventAt.toString,
+            "last_event_at" -> row.lastEventAt.toString,
+            "factor_breakdown" -> row.factorBreakdown,
+            "explanation" -> row.explanation
+          ),
+          rawJson = row.rawJson
+        )
+      })
     }
 
   override def insertWirelessHandshakeAlert(batchId: String, rows: List[WirelessHandshakeAlertInsert]): IO[Long] =
     withRetry("insert_wireless_handshake_alert") {
-      mergeWirelessAlerts(batchId, rows, "handshake", row => Seq[Any](
-        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, row.iface, null,
-        row.clientMac, row.bssid, None, optLong(row.signalDbm),
-        jsonDetails("pmkid" -> row.pmkid),
-        optStr(row.rawJson)
-      ))
+      mergeWirelessAlerts(batchId, "handshake", rows.map { row =>
+        WirelessAlertRow(
+          rowSequence = row.rowSequence,
+          detectedAt = row.detectedAt,
+          sensorId = row.sensorId,
+          locationId = row.locationId,
+          iface = Some(row.iface),
+          channel = None,
+          primaryMac = Some(row.clientMac),
+          secondaryMac = Some(row.bssid),
+          ssid = None,
+          signalDbm = row.signalDbm,
+          detailsJson = jsonDetails("pmkid" -> row.pmkid),
+          rawJson = row.rawJson
+        )
+      })
     }
 
-  private def mergeWirelessAlerts[A](
+  private def mergeWirelessAlerts(
       batchId: String,
-      rows: List[A],
       alertType: String,
-      binder: A => Seq[Any]
+      rows: List[WirelessAlertRow]
   ): IO[Long] =
     val now = Timestamp.from(Instant.now())
     val sql =
@@ -526,11 +594,11 @@ final class TidbTransactor private (
       val stmt = conn.prepareStatement(sql)
       try
         val params = rows.map { row =>
-          val values = binder(row)
           Seq[Any](
-            alertType, batchId, values(0), values(1), values(2), values(3),
-            values(4), values(5), values(6), values(7), values(8), values(9),
-            values(10), values(11), now, now
+            alertType, batchId, row.rowSequence, row.detectedAt, row.sensorId,
+            row.locationId, optStr(row.iface), optLong(row.channel),
+            optStr(row.primaryMac), optStr(row.secondaryMac), optStr(row.ssid),
+            optLong(row.signalDbm), row.detailsJson, optStr(row.rawJson), now, now
           )
         }
         executeBatch(stmt, params)
@@ -703,6 +771,47 @@ final class TidbTransactor private (
 object TidbTransactor:
   private val log = StructuredLogger(getClass)
 
+  private final case class WirelessAlertRow(
+      rowSequence: Long,
+      detectedAt: OffsetDateTime,
+      sensorId: String,
+      locationId: String,
+      iface: Option[String],
+      channel: Option[Long],
+      primaryMac: Option[String],
+      secondaryMac: Option[String],
+      ssid: Option[String],
+      signalDbm: Option[Long],
+      detailsJson: String,
+      rawJson: Option[String]
+  )
+
+  /**
+   * Count one successful JDBC batch for the externally reported TiDB result.
+   *
+   * `SUCCESS_NO_INFO` means the driver confirms the batch command succeeded but
+   * does not provide an affected-row count. If any command reports that status,
+   * the explicit contract is to report the number of input rows submitted in
+   * this batch, rather than mix known physical counts with unknown ones.
+   * `EXECUTE_FAILED` and all other negative update counts are failures.
+   */
+  private[tidb] def totalAffected(results: Array[Int], submittedRows: Int): Long =
+    import java.sql.Statement
+
+    require(submittedRows >= 0, "submittedRows must be non-negative")
+    if results.contains(Statement.EXECUTE_FAILED) then
+      throw new BatchUpdateException("JDBC batch reported EXECUTE_FAILED", results)
+    else if results.contains(Statement.SUCCESS_NO_INFO) then
+      submittedRows.toLong
+    else
+      results.foldLeft(0L) { (total, affected) =>
+        if affected < 0 then
+          throw new SQLException(
+            s"JDBC batch returned an unsupported negative update count: $affected"
+          )
+        total + affected.toLong
+      }
+
   def resource(config: TiDbConfig): Resource[IO, TidbTransactor] =
     Resource.make(allocate(config))(_.close())
 
@@ -765,5 +874,10 @@ object TidbTransactor:
     val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}" +
       "?rewriteBatchedStatements=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
     config.sslMode match
-      case "DISABLED" => s"$base&useSSL=false&allowPublicKeyRetrieval=true"
-      case mode       => s"$base&sslMode=$mode&fallbackToSystemTrustStore=false"
+      case "DISABLED" =>
+        val publicKeyRetrieval =
+          if config.localDevAllowPublicKeyRetrieval then "&allowPublicKeyRetrieval=true"
+          else ""
+        s"$base&useSSL=false$publicKeyRetrieval"
+      case _ =>
+        s"$base&sslMode=VERIFY_IDENTITY&fallbackToSystemTrustStore=false"

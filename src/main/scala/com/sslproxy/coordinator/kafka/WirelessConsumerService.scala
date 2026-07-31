@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
-import com.sslproxy.coordinator.config.WirelessConfig
+import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
@@ -22,26 +22,26 @@ object WirelessConsumerService:
 
   def macLookupStream(
       cfg: WirelessConfig,
-      bootstrapServers: String,
+      kafkaCfg: KafkaCfg,
       pgRepo: TidbRepository,
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    val settings = consumerSettings(cfg.macLookupConsumer, cfg.maxPollRecords, bootstrapServers)
-    wirelessStream(settings, cfg.macLookupTopic, cfg.consumersCount, bootstrapServers) { committable =>
+    val settings = consumerSettings(cfg.macLookupConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.macLookupTopic, cfg.consumersCount, kafkaCfg) { committable =>
       val payload = committable.record.value
       handleMacLookup(payload, cfg.macLookupReplyTopic, pgRepo, producer, dbSemaphore).as(committable.offset)
     }
 
   def networksAuthorizedStream(
       cfg: WirelessConfig,
-      bootstrapServers: String,
+      kafkaCfg: KafkaCfg,
       pgRepo: TidbRepository,
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    val settings = consumerSettings(cfg.networksAuthorizedConsumer, cfg.maxPollRecords, bootstrapServers)
-    wirelessStream(settings, cfg.networksAuthorizedTopic, cfg.consumersCount, bootstrapServers) { committable =>
+    val settings = consumerSettings(cfg.networksAuthorizedConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.networksAuthorizedTopic, cfg.consumersCount, kafkaCfg) { committable =>
       val payload = committable.record.value
       handleNetworksAuthorized(
         payload,
@@ -54,39 +54,39 @@ object WirelessConsumerService:
 
   def probeFlushStream(
       cfg: WirelessConfig,
-      bootstrapServers: String,
+      kafkaCfg: KafkaCfg,
       pgRepo: TidbRepository,
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    val settings = consumerSettings(cfg.probeFlushConsumer, cfg.maxPollRecords, bootstrapServers)
+    val settings = consumerSettings(cfg.probeFlushConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
     val dlqTopic = cfg.probeFlushTopic + cfg.dlqSuffix
-    wirelessStream(settings, cfg.probeFlushTopic, cfg.consumersCount, bootstrapServers) { committable =>
+    wirelessStream(settings, cfg.probeFlushTopic, cfg.consumersCount, kafkaCfg) { committable =>
       val payload = committable.record.value
       handleProbeFlush(payload, pgRepo, producer, dlqTopic, dbSemaphore).as(committable.offset)
     }
 
   def allStreams(
       cfg: WirelessConfig,
-      bootstrapServers: String,
+      kafkaCfg: KafkaCfg,
       pgRepo: TidbRepository,
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    macLookupStream(cfg, bootstrapServers, pgRepo, producer, dbSemaphore)
-      .merge(networksAuthorizedStream(cfg, bootstrapServers, pgRepo, producer, dbSemaphore))
-      .merge(probeFlushStream(cfg, bootstrapServers, pgRepo, producer, dbSemaphore))
+    macLookupStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore)
+      .merge(networksAuthorizedStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+      .merge(probeFlushStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
 
   private def wirelessStream(
       settings: ConsumerSettings[IO, String, String],
       topic: String,
       consumersCount: Int,
-      bootstrapServers: String
+      kafkaCfg: KafkaCfg
   )(
       process: CommittableConsumerRecord[IO, String, String] => IO[CommittableOffset[IO]]
   ): Stream[IO, Unit] =
     Stream
-      .eval(KafkaComponents.waitForTopic(bootstrapServers, topic))
+      .eval(KafkaComponents.waitForTopic(kafkaCfg, topic))
       .flatMap(_ =>
         Stream.resource(fs2.kafka.KafkaConsumer.resource(settings))
       )
@@ -109,26 +109,25 @@ object WirelessConsumerService:
   ): IO[Unit] =
     if payload == null || payload.isEmpty then IO.unit
     else
-      val result = for
-        mac <- IO.fromOption(extractField(payload, "mac"))(
-                 new IllegalArgumentException("missing mac field"))
-        _   <- IO(log.warn("mac_lookup", "status" -> "processing", "mac_hash" -> hashMac(mac)))
-        lookup <- dbSemaphore.permit.use(_ => pgRepo.lookupDeviceByMac(mac))
-        _   <- lookup match
-                case Right(Some(reply)) =>
-                  val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
-                  IO(log.info("mac_lookup", "status" -> "found",
-                    "reply_topic" -> replyTopic, "mac_hash" -> hashMac(mac))) *>
-                    publishReply(producer, replyTopic, reply)
-                case Right(None) =>
-                  IO(log.info("mac_lookup", "status" -> "not_found", "mac_hash" -> hashMac(mac)))
-                case Left(err) =>
-                  IO(log.error("mac_lookup", "status" -> "db_error", "error" -> err.message))
-      yield ()
-
-      result.handleErrorWith { err =>
-        IO(log.warn("mac_lookup", "status" -> "skip", "error" -> err.getMessage)) *> IO.unit
-      }
+      extractField(payload, "mac") match
+        case None =>
+          IO(log.warn("mac_lookup", "status" -> "skip", "error" -> "missing mac field"))
+        case Some(mac) =>
+          IO(log.warn("mac_lookup", "status" -> "processing", "mac_hash" -> hashMac(mac))) *>
+            dbSemaphore.permit.use(_ => pgRepo.lookupDeviceByMac(mac)).attempt.flatMap {
+              case Left(err) =>
+                IO(log.warn("mac_lookup", "status" -> "skip",
+                  "error" -> errorMessage(err)))
+              case Right(Right(Some(reply))) =>
+                val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
+                IO(log.info("mac_lookup", "status" -> "found",
+                  "reply_topic" -> replyTopic, "mac_hash" -> hashMac(mac))) *>
+                  publishReply(producer, replyTopic, reply)
+              case Right(Right(None)) =>
+                IO(log.info("mac_lookup", "status" -> "not_found", "mac_hash" -> hashMac(mac)))
+              case Right(Left(err)) =>
+                IO(log.error("mac_lookup", "status" -> "db_error", "error" -> err.message))
+            }
 
   private def handleNetworksAuthorized(
       payload: String,
@@ -143,7 +142,10 @@ object WirelessConsumerService:
         case Right(reply) =>
           val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
           IO(log.info("networks_authorized", "status" -> "ok", "reply_topic" -> replyTopic)) *>
-            publishReply(producer, replyTopic, reply)
+            publishReply(producer, replyTopic, reply).handleErrorWith { err =>
+              IO(log.error("networks_authorized", "status" -> "reply_publish_failed",
+                "reply_topic" -> replyTopic, "error" -> errorMessage(err)))
+            }
         case Left(err) =>
           IO(log.error("networks_authorized", "status" -> "db_error", "error" -> err.message))
       }
@@ -179,8 +181,14 @@ object WirelessConsumerService:
         case Left(err) =>
           IO(log.error("probe_flush", "status" -> "dlq",
             "topic" -> dlqTopic, "error" -> err.message)) *>
-            publishDlq(producer, dlqTopic, payload, err)
+            publishDlq(producer, dlqTopic, payload, err).handleErrorWith { publishError =>
+              IO(log.error("probe_flush", "status" -> "dlq_publish_failed",
+                "topic" -> dlqTopic, "error" -> errorMessage(publishError)))
+            }
       }
+
+  private def errorMessage(error: Throwable): String =
+    Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
 
   private[kafka] def resolveReplyTopic(payload: String, defaultTopic: String): String =
     extractField(payload, "reply_topic") match

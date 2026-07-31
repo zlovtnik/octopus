@@ -20,18 +20,19 @@ final class BatchDispatchService(
     retryBaseSeconds: Int,
     retryMaxSeconds: Int
 ):
-  import BatchDispatchService.log
+  import BatchDispatchService.{DispatchResult, log}
 
-  def dispatchNext(): IO[Boolean] =
+  def dispatchNext(): IO[DispatchResult] =
     repo.claimOutbox(ownerId, destinationTopics, leaseSeconds).flatMap {
       case Left(error) =>
         IO(log.error("outbox_claim", "status" -> "db_error",
-          "operation" -> error.operation, "error" -> error.message)).as(false)
-      case Right(None) => IO.pure(false)
+          "operation" -> error.operation, "error" -> error.message))
+          .as(DispatchResult.StopDraining)
+      case Right(None) => IO.pure(DispatchResult.NoWork)
       case Right(Some(record)) => publish(record)
     }
 
-  private def publish(record: OutboxRecord): IO[Boolean] =
+  private def publish(record: OutboxRecord): IO[DispatchResult] =
     val brokerRecord = ProducerRecord(
       record.destinationTopic,
       record.messageKey,
@@ -43,23 +44,25 @@ final class BatchDispatchService(
       case Left(error) => fail(record, error)
     }
 
-  private def acknowledge(record: OutboxRecord): IO[Boolean] =
+  private def acknowledge(record: OutboxRecord): IO[DispatchResult] =
     repo.acknowledgeOutbox(record).flatMap {
       case Right(true) =>
         IO(metrics.recordBatchDispatched()) *>
           IO(log.info("outbox_publish", "status" -> "published",
             "outbox_id" -> record.outboxId, "topic" -> record.destinationTopic,
-            "message_key" -> record.messageKey, "fence" -> record.lease.fence.toString)).as(true)
+            "message_key" -> record.messageKey, "fence" -> record.lease.fence.toString))
+            .as(DispatchResult.Dispatched)
       case Right(false) =>
         IO(log.warn("outbox_publish", "status" -> "lease_lost_after_publish",
-          "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString)).as(false)
+          "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString))
+          .as(DispatchResult.ContinueDraining)
       case Left(error) =>
         IO(log.error("outbox_publish", "status" -> "ack_failed",
           "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> error.message)).as(false)
+          "error" -> error.message)).as(DispatchResult.ContinueDraining)
     }
 
-  private def fail(record: OutboxRecord, cause: Throwable): IO[Boolean] =
+  private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
     repo.failOutbox(record, message, retryBaseSeconds, retryMaxSeconds).flatMap {
       case Right(disposition) =>
@@ -68,12 +71,18 @@ final class BatchDispatchService(
           case OutboxFailureDisposition.Parked         => "parked"
         IO(log.warn("outbox_publish", "status" -> status,
           "outbox_id" -> record.outboxId, "attempt" -> record.attemptCount.toString,
-          "error" -> message)).as(false)
+          "error" -> message)).as(DispatchResult.StopDraining)
       case Left(error) =>
         IO(log.error("outbox_publish", "status" -> "fail_transition_failed",
           "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> error.message)).as(false)
+          "error" -> error.message)).as(DispatchResult.StopDraining)
     }
 
 object BatchDispatchService:
   private val log = StructuredLogger(getClass)
+
+  enum DispatchResult:
+    case NoWork
+    case Dispatched
+    case ContinueDraining
+    case StopDraining

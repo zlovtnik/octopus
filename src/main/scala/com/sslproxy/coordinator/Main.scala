@@ -91,7 +91,7 @@ object Main extends IOApp.Simple:
                       List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
                       cfg.cron.batchDispatchLeaseSeconds,
                       cfg.cron.scanRetryBackoffSeconds,
-                      cfg.cron.batchDispatchLeaseSeconds
+                      cfg.cron.batchDispatchRetryMaxSeconds
                     )
 
                     val cronScheduler = new CronScheduler(
@@ -117,7 +117,7 @@ object Main extends IOApp.Simple:
                       )
 
                       val wirelessStreams = WirelessConsumerService.allStreams(
-                        cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer, dbSemaphore
+                        cfg.wireless, cfg.kafka, tiDbRepo, kafka.producer, dbSemaphore
                       )
 
                       val processorStreams =

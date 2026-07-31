@@ -30,7 +30,13 @@ class StructuredLoggerSuite extends FunSuite:
     logger.setLevel(ch.qos.logback.classic.Level.INFO)
 
     val structuredLogger = StructuredLogger("test.structured")
-    structuredLogger.info("test_event", "status" -> "ok", "table" -> "users", "error" -> "none")
+    structuredLogger.info(
+      "test_event",
+      "status" -> "ok",
+      "offset" -> "42",
+      "table" -> "users",
+      "error" -> "none"
+    )
 
     appender.stop()
 
@@ -39,6 +45,7 @@ class StructuredLoggerSuite extends FunSuite:
 
     val json = parse(lines(0)).getOrElse(throw new RuntimeException("invalid json"))
     assertEquals(json.hcursor.downField("status").as[String].toOption, Some("ok"))
+    assertEquals(json.hcursor.downField("offset").as[String].toOption, Some("42"))
     assertEquals(json.hcursor.downField("table").as[String].toOption, Some("users"))
     assertEquals(json.hcursor.downField("error").as[String].toOption, Some("none"))
     assert(json.hcursor.downField("message").as[String].toOption.exists(_.contains("test_event")))

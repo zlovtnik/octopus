@@ -12,10 +12,14 @@ class AppConfigCutoverSuite extends FunSuite:
 
     assertEquals(config.tidb.enabled, false)
     assertEquals(config.tidb.poolSize, 4)
+    assertEquals(config.kafka.topicPartitions, 5)
+    assertEquals(config.kafka.topicReplicationFactor, 3)
+    assertEquals(config.cron.batchDispatchRetryMaxSeconds, 300)
     assertEquals(config.runtime, RuntimeConfig(processorsEnabled = false, consumersEnabled = false))
     assertEquals(config.processors.enabled, List.empty)
     assertEquals(config.processors.restartBaseDelayMs, 1000L)
     assertEquals(config.processors.restartMaxDelayMs, 30000L)
+    assertEquals(config.cutover.devBypass, false)
 
   test("deployment SYNC variables configure locked topics and consumer groups"):
     val environment = ConfigFactory.parseMap(Map(
@@ -119,6 +123,28 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(messages.exists(_.contains("restart-base-delay-ms")))
         assert(messages.exists(_.contains("restart-max-delay-ms")))
       case Right(_) => fail("expected invalid processor configuration rejection")
+
+  test("topic auto-provisioning rejects an unsafe replication factor"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 1)
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
+      case Right(_) => fail("expected unsafe topic replication rejection")
+
+  test("batch dispatch retry maximum must cover its base backoff"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      cron = baseline.cron.copy(batchDispatchRetryMaxSeconds = 1)
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("batch-dispatch-retry-max-seconds")))
+      case Right(_) => fail("expected invalid batch dispatch retry maximum")
 
   test("stage mode permits TiDB readiness with all runtime work disabled and no cutover artifact"):
     val baseline = AppConfig.load

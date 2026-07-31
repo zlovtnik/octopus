@@ -6,6 +6,7 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
+import com.sslproxy.coordinator.dispatch.BatchDispatchService.DispatchResult
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.sink.SchemaIntrospector
@@ -170,7 +171,7 @@ class CronScheduler(
           case Right(alerts) =>
             IO.whenA(alerts.nonEmpty)(
               IO(log.info("shadow_audit", "status" -> "alerts_generated",
-                "count" -> alerts.size.toString, "result" -> alerts.toString))
+                "count" -> alerts.size.toString))
             ) *> lastShadowAuditMs.set(now)
         }
     }
@@ -180,13 +181,17 @@ object CronScheduler:
 
   private[cron] def drainBatch(
       maxDispatches: Int
-  )(dispatchNext: () => IO[Boolean]): IO[Int] =
+  )(dispatchNext: () => IO[DispatchResult]): IO[Int] =
     def loop(remaining: Int, dispatched: Int): IO[Int] =
       if remaining <= 0 then IO.pure(dispatched)
       else
         dispatchNext().flatMap {
-          case true  => loop(remaining - 1, dispatched + 1)
-          case false => IO.pure(dispatched)
+          case DispatchResult.Dispatched =>
+            loop(remaining - 1, dispatched + 1)
+          case DispatchResult.ContinueDraining =>
+            loop(remaining - 1, dispatched)
+          case DispatchResult.NoWork | DispatchResult.StopDraining =>
+            IO.pure(dispatched)
         }
 
     loop(maxDispatches.max(0), 0)

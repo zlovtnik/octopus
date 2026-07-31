@@ -19,7 +19,19 @@ object TidbLoadStream:
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.loadConsumer, cfg.loadTopic, artifact,
-      repo.loadConsumerOffsets(cfg.loadConsumer, cfg.loadTopic).map(_.fold(_ => Set.empty[CutoffKey], identity))
+      repo.loadConsumerOffsets(cfg.loadConsumer, cfg.loadTopic).flatMap {
+        case Left(err) =>
+          IO(log.error("tidb_load_consumer",
+            "status" -> "offset_load_failed",
+            "consumer_group" -> cfg.loadConsumer,
+            "topic" -> cfg.loadTopic,
+            "operation" -> err.operation,
+            "error" -> err.message)) *>
+            IO.raiseError[Set[CutoffKey]](
+              new RuntimeException("cutover offset authorization unavailable"))
+        case Right(cutoffs) =>
+          IO.pure(cutoffs)
+      }
     ) { locked =>
       dbSemaphore.permit.use { _ =>
         for

@@ -26,7 +26,6 @@ private[tidb] object TidbTls:
   def configure(hikari: HikariConfig, config: TiDbConfig): TidbTlsMaterial =
     val material = createTrustStore(Path.of(config.sslCaPath))
 
-    hikari.addDataSourceProperty("sslMode", "VERIFY_IDENTITY")
     hikari.addDataSourceProperty("trustCertificateKeyStoreUrl", material.trustStorePath.toUri.toString)
     hikari.addDataSourceProperty("trustCertificateKeyStoreType", "PKCS12")
     hikari.addDataSourceProperty("trustCertificateKeyStorePassword", material.trustStorePassword)

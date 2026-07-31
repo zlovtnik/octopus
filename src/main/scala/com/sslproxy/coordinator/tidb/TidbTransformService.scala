@@ -302,7 +302,7 @@ object TidbTransformService:
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.attack_sequence"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.attack_sequence"),
         locationId = requiredString(row, "location_id", "wireless.alert.attack_sequence"),
-        ssid = requiredString(row, "ssid", "wireless.alert.attack_sequence"),
+        ssid = optionalString(row, "ssid"),
         attackChain = jsonArrayString(row, "attack_chain"),
         firstEventAt = requiredTimestamp(row, "first_event_at", "wireless.alert.attack_sequence"),
         lastEventAt = requiredTimestamp(row, "last_event_at", "wireless.alert.attack_sequence"),

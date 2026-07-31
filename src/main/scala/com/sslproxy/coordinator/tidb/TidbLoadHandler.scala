@@ -24,11 +24,12 @@ class TidbLoadHandler(
         "tidb_load", "status" -> "parsed",
         "batch_id" -> load.batchId, "stream_name" -> load.streamName, "input_rows" -> rows.length.toString))
       result   <- transformAndInsert(resolved, target, rows)
-      _        <- IO(log.info(
-        "tidb_load", "status" -> "inserted",
-        "batch_id" -> load.batchId, "stream_name" -> load.streamName,
-        "result_status" -> result.fold(_ => "failure", _ => "success"),
-        "row_count" -> result.fold(_ => 0L, identity).toString))
+      _        <- result match
+        case Right(rowCount) => IO(log.info(
+          "tidb_load", "status" -> "inserted",
+          "batch_id" -> load.batchId, "stream_name" -> load.streamName,
+          "result_status" -> "success", "row_count" -> rowCount.toString))
+        case Left(_) => IO.unit
       checksum  = TidbChecksum.checksum(target, payload)
       finalResult = result match
         case Left(err) => err
@@ -92,7 +93,11 @@ class TidbLoadHandler(
 
       insertIO.attempt.map {
         case Right(count) => Right(count)
-        case Left(err)    => Left(buildFailureResult(load, err))
+        case Left(err)    =>
+          log.error("tidb_load", err,
+            "status" -> "insert_failed", "batch_id" -> load.batchId,
+            "stream_name" -> load.streamName, "error_class" -> classifyError(err).wireValue)
+          Left(buildFailureResult(load, err))
       }
 
   private def buildFailureResult(load: TidbLoad, err: Throwable): TidbResult =

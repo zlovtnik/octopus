@@ -51,7 +51,8 @@ final case class TiDbConfig(
     sslServerName: String = "",
     sslClientKeyStorePath: String = "",
     sslClientKeyStorePassword: String = "",
-    sslClientKeyStoreType: String = "PKCS12"
+    sslClientKeyStoreType: String = "PKCS12",
+    localDevAllowPublicKeyRetrieval: Boolean = false
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -66,7 +67,9 @@ final case class KafkaCfg(
     payloadAuditConsumer: String,
     loadConsumer: String,
     maxPollRecords: Int,
-    pollTimeoutMs: Long
+    pollTimeoutMs: Long,
+    topicPartitions: Int,
+    topicReplicationFactor: Int
 ) derives ConfigReader
 
 final case class CronConfig(
@@ -77,6 +80,7 @@ final case class CronConfig(
     scanMaxAttempts: Int,
     scanRetryBackoffSeconds: Int,
     batchDispatchLeaseSeconds: Int,
+    batchDispatchRetryMaxSeconds: Int,
     batchMaxAttempts: Int,
     heartbeatLogIntervalMs: Int,
     schemaRefreshIntervalSeconds: Int,
@@ -159,6 +163,8 @@ object AppConfig:
     val errors =
       processorErrors(config.processors) ++
         ingestErrors(config.ingest) ++
+        kafkaErrors(config.kafka) ++
+        cronErrors(config.cron) ++
         stagedTiDbErrors ++
         runtimeErrors
 
@@ -198,6 +204,26 @@ object AppConfig:
       ),
       Option.when(config.restartMaxDelayMs < config.restartBaseDelayMs)(
         "processors.restart-max-delay-ms must be at least processors.restart-base-delay-ms"
+      )
+    ).flatten
+
+  private def kafkaErrors(config: KafkaCfg): List[String] =
+    List(
+      Option.when(config.topicPartitions <= 0)(
+        "kafka.topic-partitions must be positive"
+      ),
+      Option.when(config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)(
+        "kafka.topic-replication-factor must be between 3 and 32767"
+      )
+    ).flatten
+
+  private def cronErrors(config: CronConfig): List[String] =
+    List(
+      Option.when(config.batchDispatchRetryMaxSeconds <= 0)(
+        "cron.batch-dispatch-retry-max-seconds must be positive"
+      ),
+      Option.when(config.batchDispatchRetryMaxSeconds < config.scanRetryBackoffSeconds)(
+        "cron.batch-dispatch-retry-max-seconds must be at least cron.scan-retry-backoff-seconds"
       )
     ).flatten
 

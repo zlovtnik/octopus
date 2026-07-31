@@ -273,7 +273,7 @@ final case class WirelessAttackSequenceInsert(
     detectedAt: OffsetDateTime,
     sensorId: String,
     locationId: String,
-    ssid: String,
+    ssid: Option[String],
     attackChain: Option[String],
     firstEventAt: OffsetDateTime,
     lastEventAt: OffsetDateTime,

@@ -42,7 +42,7 @@ object PayloadAuditConsumer:
       )
 
     Stream
-      .eval(KafkaComponents.waitForTopic(cfg.bootstrapServers, cfg.payloadAuditTopic))
+      .eval(KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic))
       .flatMap(_ =>
         Stream.resource(KafkaConsumer.resource(consumerSettings))
       )

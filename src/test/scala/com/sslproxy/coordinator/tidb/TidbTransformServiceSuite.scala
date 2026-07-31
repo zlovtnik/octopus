@@ -68,6 +68,17 @@ class TidbTransformServiceSuite extends FunSuite:
     assertEquals(result.wirelessProbeRequests.size, 1)
     assertEquals(result.wirelessProbeRequests.head.ssid, "TestNet")
 
+  test("transform attack sequence preserves a hidden SSID"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1",
+        |"first_event_at":"2026-07-20T11:59:00Z","last_event_at":"2026-07-20T12:00:00Z"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessAttackSequence, List(row))
+
+    assertEquals(result.wirelessAttackSequence.size, 1)
+    assertEquals(result.wirelessAttackSequence.head.ssid, None)
+
   test("inputRowCount returns correct counts"):
     val row = parse("""{"type": "tls_scan", "host": "a.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get
     val result = TidbTransformService.transform(TidbSinkTarget.ProxyEvents, List(row))

@@ -181,10 +181,12 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `SYNC_TIDB_STREAM_NAMES` | (see reference.conf) | Stream names dispatched to TiDB |
 | `SYNC_REDPANDA_BOOTSTRAP_SERVERS` | `localhost:9092` | Redpanda/Kafka bootstrap servers |
 | `TIDB_ENABLED` | `false` | Required: explicitly set to `true` for runtime startup |
-| `TIDB_JDBC_URL` | `jdbc:mysql://localhost:3306/coordinator` | TiDB/MySQL JDBC URL |
-| `TIDB_USER` | `root` | TiDB username |
-| `TIDB_PASSWORD` | *(required)* | TiDB password |
-| `TIDB_CONNECTION_POOL_SIZE` | `8` | Doobie connection pool size |
+| `TIDB_HOST` | `127.0.0.1` | TiDB host; loopback is rejected when TiDB is enabled |
+| `TIDB_PORT` | `4000` | TiDB port |
+| `TIDB_DATABASE` | `coordinator` | TiDB database |
+| `TIDB_USER` | `root` | Disabled-mode default; enabled TiDB requires a non-root account |
+| `TIDB_PASSWORD` | *(empty)* | Required when TiDB is enabled |
+| `TIDB_POOL_SIZE` | `4` | Hikari/Doobie connection pool size |
 
 ### Redpanda Topics
 
@@ -257,12 +259,19 @@ The coordinator is configured exclusively through environment variables, loaded 
 | Variable | Default | Description |
 |---|---|---|
 | `TIDB_ENABLED` | `false` | Enable TiDB (required for runtime) |
-| `TIDB_JDBC_URL` | *(required)* | TiDB/MySQL JDBC URL |
-| `TIDB_USER` | *(required)* | TiDB username |
-| `TIDB_PASSWORD` | *(required)* | TiDB password |
-| `TIDB_CONNECTION_POOL_SIZE` | `8` | Connection pool size |
-| `TIDB_LOAD_MAX_RETRIES` | `3` | Max retries for TiDB load |
-| `TIDB_SCHEMA_VALIDATION_WARN_ONLY` | `false` | Schema validation mode |
+| `TIDB_HOST` | `127.0.0.1` | TiDB host; must be non-loopback when enabled |
+| `TIDB_PORT` | `4000` | TiDB port |
+| `TIDB_DATABASE` | `coordinator` | TiDB database |
+| `TIDB_USER` | `root` | Disabled-mode default; a least-privilege non-root account is required when enabled |
+| `TIDB_PASSWORD` | *(empty)* | Required when enabled |
+| `TIDB_POOL_SIZE` | `4` | Connection pool size |
+| `TIDB_CONNECTION_TIMEOUT_MS` | `5000` | Pool connection timeout |
+| `TIDB_STATEMENT_TIMEOUT_SECS` | `30` | Statement/network timeout |
+| `TIDB_WARN_ONLY` | `false` | Schema validation mode; must remain `false` when enabled |
+| `TIDB_SSL_MODE` | `VERIFY_IDENTITY` | TLS mode; must remain `VERIFY_IDENTITY` when enabled |
+| `TIDB_SSL_CA_PATH` | *(empty)* | CA bundle path; required when enabled |
+| `TIDB_SSL_SERVER_NAME` | *(empty)* | TLS server name; must equal `TIDB_HOST` when enabled |
+| `TIDB_LOCAL_DEV_ALLOW_PUBLIC_KEY_RETRIEVAL` | `false` | Explicit opt-in for non-TLS local development only |
 
 ### Observability
 
@@ -307,14 +316,20 @@ Tests include:
 ### Local Development
 
 ```sh
-# Start dependencies (TiDB, Redpanda, MinIO)
-docker compose up -d tidb redpanda minio
+# Start the local non-database dependencies. Use an externally reachable
+# development TiDB endpoint because enabled TiDB rejects loopback hosts.
+docker compose up -d redpanda minio
 
 # Set required env vars and run
 export TIDB_ENABLED=true
-export TIDB_JDBC_URL=jdbc:mysql://localhost:3306/coordinator
-export TIDB_USER=root
+export TIDB_HOST=tidb.dev.internal
+export TIDB_PORT=4000
+export TIDB_DATABASE=octopus_core
+export TIDB_USER=octopus_runtime
 export TIDB_PASSWORD=...
+export TIDB_SSL_MODE=VERIFY_IDENTITY
+export TIDB_SSL_CA_PATH=/path/to/tidb-ca.crt
+export TIDB_SSL_SERVER_NAME=tidb.dev.internal
 export SYNC_REDPANDA_BOOTSTRAP_SERVERS=localhost:9092
 export MINIO_ACCESS_KEY_ID=...
 export MINIO_SECRET_ACCESS_KEY=...
@@ -327,10 +342,16 @@ sbt run
 ```sh
 docker run -d \
   -p 8081:8081 \
+  -v /path/to/tidb-ca.crt:/etc/tidb-tls/ca.crt:ro \
   -e TIDB_ENABLED=true \
-  -e TIDB_JDBC_URL=jdbc:mysql://host.docker.internal:3306/coordinator \
-  -e TIDB_USER=root \
+  -e TIDB_HOST=tidb.dev.internal \
+  -e TIDB_PORT=4000 \
+  -e TIDB_DATABASE=octopus_core \
+  -e TIDB_USER=octopus_runtime \
   -e TIDB_PASSWORD=... \
+  -e TIDB_SSL_MODE=VERIFY_IDENTITY \
+  -e TIDB_SSL_CA_PATH=/etc/tidb-tls/ca.crt \
+  -e TIDB_SSL_SERVER_NAME=tidb.dev.internal \
   -e SYNC_REDPANDA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
   ssl-proxy/octopus:latest
 ```
@@ -340,32 +361,32 @@ docker run -d \
 The coordinator is deployed as part of the `ssl-proxy` Helm chart (located in the parent repository at `helm/ssl-proxy/`). A typical values override:
 
 ```yaml
-octopus:
+global:
+  shared:
+    tidb:
+      host: tidb.example.internal
+      port: 4000
+      tls:
+        serverName: tidb.example.internal
+        caSecret:
+          name: tidb-client-ca
+          key: ca.crt
+      accounts:
+        octopus:
+          database: octopus_core
+          user: octopus_runtime
+          passwordSecret:
+            name: tidb-octopus
+            key: password
+
+javaCoordinator:
   enabled: true
   image:
     repository: ssl-proxy/octopus
     tag: latest
-  env:
-    TIDB_ENABLED: "true"
-    TIDB_JDBC_URL: jdbc:mysql://tidb:3306/coordinator
-    TIDB_USER: root
-    TIDB_PASSWORD:
-      valueFrom:
-        secretKeyRef:
-          name: tidb-credentials
-          key: password
-    SYNC_REDPANDA_BOOTSTRAP_SERVERS: redpanda:9092
-    MINIO_ENDPOINT: http://minio:9000
-    MINIO_ACCESS_KEY_ID:
-      valueFrom:
-        secretKeyRef:
-          name: minio-credentials
-          key: access-key
-    MINIO_SECRET_ACCESS_KEY:
-      valueFrom:
-        secretKeyRef:
-          name: minio-credentials
-          key: secret-key
+  tidb:
+    enabled: true
+    sslMode: VERIFY_IDENTITY
 ```
 
 ---

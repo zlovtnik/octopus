@@ -8,6 +8,11 @@ import JsonFields.*
 /** Pure JSON → case class transforms. */
 object TidbTransformService:
 
+  // proxy_blocked_host_rollups.risk_score is DECIMAL(10,4). Keep an extreme
+  // source score from rolling back the proxy event that owns the rollup.
+  private val MinRollupRiskScore = -999999.9999d
+  private val MaxRollupRiskScore = 999999.9999d
+
   def transform(target: TidbSinkTarget, rows: List[Json]): TidbRowSet =
     target match
       case TidbSinkTarget.ProxyEvents             => transformProxyRows(rows)
@@ -99,7 +104,9 @@ object TidbTransformService:
           host = proxyRow.host,
           blockedBytes = blockedBytes,
           frequencyHz = optionalDouble(row, "frequency_hz").orElse(nestedDouble(row, "metrics", "frequency_hz")),
-          riskScore = optionalDouble(row, "risk_score").orElse(nestedDouble(row, "metrics", "risk_score")),
+          riskScore = boundedRollupRiskScore(
+            optionalDouble(row, "risk_score").orElse(nestedDouble(row, "metrics", "risk_score"))
+          ),
           category = optionalString(row, "category"),
           verdict = verdict,
           tarpitHeldMs = optionalLong(row, "tarpit_held_ms").getOrElse(0L),
@@ -116,6 +123,9 @@ object TidbTransformService:
           asnOrg = optionalString(row, "asn_org")
         )
       )
+
+  private def boundedRollupRiskScore(score: Option[Double]): Option[Double] =
+    score.map(value => Math.max(MinRollupRiskScore, Math.min(MaxRollupRiskScore, value)))
 
   private def transformWirelessAudit(rows: List[Json]): List[WirelessAuditFrameInsert] =
     rows.zipWithIndex.map { case (row, index) =>

@@ -23,6 +23,7 @@ final class TidbTransactor private (
 
   private val retryMaxAttempts: Int = 3
   private val retryBaseDelay: FiniteDuration = 200.millis
+  private val networkTimeoutExecutor: java.util.concurrent.Executor = command => command.run()
 
   private def withConnection[A](f: Connection => A): IO[A] =
     IO.blocking {
@@ -37,7 +38,7 @@ final class TidbTransactor private (
       try
         conn.setAutoCommit(false)
         if config.statementTimeoutSecs > 0 then
-          conn.setNetworkTimeout(null, config.statementTimeoutSecs * 1000)
+          conn.setNetworkTimeout(networkTimeoutExecutor, config.statementTimeoutSecs * 1000)
         val result = f(conn)
         conn.commit()
         result

@@ -38,20 +38,30 @@ object ScanRequestStream:
     ) { locked =>
       for
         request <- IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value))
-        resolved <- IO.blocking(payloadResolver.resolve(request))
-        decision <- dbSemaphore.permit.use { _ =>
-          KafkaDatabaseResult.require(
-            repo.recordScanRequestWithEvidence(resolved, locked.metadata)
-          )
-        }
-        _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
-          IO(metrics.recordSyncEventHydrated())
-        )
-        _ <- IO(log.info("scan_request_consumer",
-          "status" -> decision.disposition.databaseValue,
-          "stream_name" -> request.streamName,
-          "group" -> locked.metadata.consumerGroup,
-          "partition" -> locked.metadata.partition.toString,
-          "offset" -> locked.metadata.offset.toString))
+        _ <- if request.streamName != "proxy.events" then
+          IO(log.debug("scan_request_consumer",
+            "status" -> "skipped",
+            "stream_name" -> request.streamName,
+            "group" -> locked.metadata.consumerGroup,
+            "partition" -> locked.metadata.partition.toString,
+            "offset" -> locked.metadata.offset.toString))
+        else
+          for
+            resolved <- IO.blocking(payloadResolver.resolve(request))
+            decision <- dbSemaphore.permit.use { _ =>
+              KafkaDatabaseResult.require(
+                repo.recordScanRequestWithEvidence(resolved, locked.metadata)
+              )
+            }
+            _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
+              IO(metrics.recordSyncEventHydrated())
+            )
+            _ <- IO(log.info("scan_request_consumer",
+              "status" -> decision.disposition.databaseValue,
+              "stream_name" -> request.streamName,
+              "group" -> locked.metadata.consumerGroup,
+              "partition" -> locked.metadata.partition.toString,
+              "offset" -> locked.metadata.offset.toString))
+          yield ()
       yield ()
     }

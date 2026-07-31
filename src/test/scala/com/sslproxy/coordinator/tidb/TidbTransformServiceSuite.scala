@@ -23,6 +23,14 @@ class TidbTransformServiceSuite extends FunSuite:
     assertEquals(result.proxyEvents.size, 1)
     assertEquals(result.blockedEvents.size, 0)
 
+  test("transform ProxyEvents bounds blocked risk scores to DECIMAL(10,4)"):
+    val high = parse("""{"type":"tls_scan","host":"high.example","time":"2026-07-20T12:00:00Z","blocked":true,"risk_score":1000000}""").toOption.get
+    val low = parse("""{"type":"tls_scan","host":"low.example","time":"2026-07-20T12:00:00Z","blocked":true,"metrics":{"risk_score":-1000000}}""").toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.ProxyEvents, List(high, low))
+
+    assertEquals(result.blockedEvents.map(_.riskScore), List(Some(999999.9999d), Some(-999999.9999d)))
+
   test("transform ProxyPayloadAudit creates audit records"):
     val row = parse("""{"host": "example.com", "observed_at": "2026-07-20T12:00:00Z", "byte_offset": 0}""").toOption.get
     val result = TidbTransformService.transform(TidbSinkTarget.ProxyPayloadAudit, List(row))

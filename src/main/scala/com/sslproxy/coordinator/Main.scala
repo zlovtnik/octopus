@@ -156,10 +156,11 @@ object Main extends IOApp.Simple:
                               tiDbRepo,
                               payloadResolver,
                               metrics,
+                              kafka.producer,
                               dbSemaphore
                             ))
-                            .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, dbSemaphore))
-                            .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore))
+                            .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, kafka.producer, dbSemaphore))
+                            .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, kafka.producer, dbSemaphore))
                         case None =>
                           Stream.empty
 

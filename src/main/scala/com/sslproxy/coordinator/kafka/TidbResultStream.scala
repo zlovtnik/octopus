@@ -6,6 +6,7 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
+import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 object TidbResultStream:
@@ -15,10 +16,23 @@ object TidbResultStream:
       cfg: KafkaCfg,
       artifact: VerifiedCutoverArtifact,
       repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.resultConsumer, cfg.resultTopic, artifact,
-      repo.loadConsumerOffsets(cfg.resultConsumer, cfg.resultTopic).map(_.fold(_ => Set.empty[CutoffKey], identity))
+    LockedTopicConsumer.stream(cfg, cfg.resultConsumer, cfg.resultTopic, artifact, producer,
+      repo.loadConsumerOffsets(cfg.resultConsumer, cfg.resultTopic).flatMap {
+        case Left(err) =>
+          IO(log.error("tidb_result_consumer",
+            "status" -> "offset_load_failed",
+            "consumer_group" -> cfg.resultConsumer,
+            "topic" -> cfg.resultTopic,
+            "operation" -> err.operation,
+            "error" -> err.message)) *>
+            IO.raiseError[Set[CutoffKey]](
+              new RuntimeException("cutover offset authorization unavailable"))
+        case Right(cutoffs) =>
+          IO.pure(cutoffs)
+      }
     ) { locked =>
       for
         result <- IO.fromEither(KafkaComponents.deserializeResult(locked.record.value))

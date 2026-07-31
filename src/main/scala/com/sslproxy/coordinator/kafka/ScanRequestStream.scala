@@ -8,6 +8,7 @@ import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.{TidbPayloadResolver, TidbRepository}
 import fs2.Stream
+import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 object ScanRequestStream:
@@ -19,9 +20,10 @@ object ScanRequestStream:
       repo: TidbRepository,
       payloadResolver: TidbPayloadResolver,
       metrics: CoordinatorMetrics,
+      producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact,
+    LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact, producer,
       repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).flatMap {
         case Left(err) =>
           IO(log.error("scan_request_consumer",
@@ -47,11 +49,13 @@ object ScanRequestStream:
             "offset" -> locked.metadata.offset.toString))
         else
           for
-            resolved <- IO.blocking(payloadResolver.resolve(request))
             decision <- dbSemaphore.permit.use { _ =>
-              KafkaDatabaseResult.require(
-                repo.recordScanRequestWithEvidence(resolved, locked.metadata)
-              )
+              for
+                resolved <- IO.blocking(payloadResolver.resolve(request))
+                decision <- KafkaDatabaseResult.require(
+                  repo.recordScanRequestWithEvidence(resolved, locked.metadata)
+                )
+              yield decision
             }
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())

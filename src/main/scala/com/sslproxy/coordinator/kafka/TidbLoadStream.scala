@@ -6,6 +6,7 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbRepository}
 import fs2.Stream
+import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 object TidbLoadStream:
@@ -16,9 +17,10 @@ object TidbLoadStream:
       artifact: VerifiedCutoverArtifact,
       repo: TidbRepository,
       handler: TidbLoadHandler,
+      producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.loadConsumer, cfg.loadTopic, artifact,
+    LockedTopicConsumer.stream(cfg, cfg.loadConsumer, cfg.loadTopic, artifact, producer,
       repo.loadConsumerOffsets(cfg.loadConsumer, cfg.loadTopic).flatMap {
         case Left(err) =>
           IO(log.error("tidb_load_consumer",

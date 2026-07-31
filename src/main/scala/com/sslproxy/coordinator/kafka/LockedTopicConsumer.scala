@@ -1,14 +1,18 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, CutoverError, CutoverOffsetEvidence, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.BrokerRecordMetadata
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
-import fs2.kafka.{CommittableConsumerRecord, ConsumerRecord, KafkaConsumer}
+import fs2.kafka.{CommittableConsumerRecord, CommittableOffset, CommittableOffsetBatch, ConsumerRecord, KafkaConsumer, KafkaProducer, ProducerRecord, ProducerRecords}
+import io.circe.Json
 import org.apache.kafka.common.TopicPartition
 import com.sslproxy.coordinator.observability.StructuredLogger
+
+import scala.concurrent.duration.*
 
 private[kafka] final case class CutoverOffsetGuardState(
     bootstrapped: Set[CutoffKey]
@@ -51,8 +55,8 @@ private[kafka] final case class LockedBrokerRecord(
 
 /** A single-topic/single-group consumer boundary. Each call allocates a new
   * KafkaConsumer and commits a record only after `process` has durably handled
-  * it. Any missing offset, replay below the cutoff, bootstrap gap, decode
-  * failure, or database failure terminates this processor without committing.
+  * it. Tombstones and cutover/topic authorization failures are parked before
+  * commit; processing and database failures terminate without committing.
   */
 private[kafka] object LockedTopicConsumer:
   private val log = StructuredLogger(getClass)
@@ -62,6 +66,7 @@ private[kafka] object LockedTopicConsumer:
       groupId: String,
       topic: String,
       artifact: VerifiedCutoverArtifact,
+      producer: KafkaProducer[IO, String, String],
       bootstrapped: IO[Set[CutoffKey]] = IO.pure(Set.empty)
   )(
       process: LockedBrokerRecord => IO[Unit]
@@ -77,9 +82,11 @@ private[kafka] object LockedTopicConsumer:
 
             val records = consumer.partitionedStream
               .map { partitionStream =>
-                partitionStream.evalMap { committable =>
-                  processRecord(guard, artifact, groupId, topic, committable, process)
-                }
+                partitionStream
+                  .evalMap { committable =>
+                    processRecord(guard, artifact, groupId, topic, committable, producer, cfg.dlqSuffix, process)
+                  }
+                  .through(commitBatch(cfg.maxPollRecords))
               }
               .parJoinUnbounded
 
@@ -110,10 +117,30 @@ private[kafka] object LockedTopicConsumer:
       groupId: String,
       expectedTopic: String,
       committable: CommittableConsumerRecord[IO, String, String],
+      producer: KafkaProducer[IO, String, String],
+      dlqSuffix: String,
       process: LockedBrokerRecord => IO[Unit]
-  ): IO[Unit] =
-    val record = committable.record
+  ): IO[CommittableOffset[IO]] =
+    prepareRecord(guard, artifact, groupId, expectedTopic, committable.record).attempt.flatMap {
+      case Right(locked) =>
+        process(locked).as(committable.offset)
+      case Left(error) =>
+        parkNonRetriable(
+          producer,
+          expectedTopic + dlqSuffix,
+          groupId,
+          committable.record,
+          error
+        ).as(committable.offset)
+    }
 
+  private def prepareRecord(
+      guard: Ref[IO, CutoverOffsetGuardState],
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      expectedTopic: String,
+      record: ConsumerRecord[String, String]
+  ): IO[LockedBrokerRecord] =
     for
       rawValue <- IO.fromOption(Option(record.value))(
         IllegalArgumentException(
@@ -149,9 +176,40 @@ private[kafka] object LockedTopicConsumer:
         "partition" -> record.partition.toString,
         "offset" -> record.offset.toString,
         "cutoff" -> authorization.cutoffOffset.toString))
-      _ <- process(LockedBrokerRecord(record, metadata, authorization))
-      _ <- committable.offset.commit
-    yield ()
+    yield LockedBrokerRecord(record, metadata, authorization)
+
+  private def parkNonRetriable(
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      groupId: String,
+      record: ConsumerRecord[String, String],
+      error: Throwable
+  ): IO[Unit] =
+    val message = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+    val body = Json.obj(
+      "consumer_group" -> Json.fromString(groupId),
+      "error" -> Json.fromString(message),
+      "error_class" -> Json.fromString(error.getClass.getSimpleName),
+      "offset" -> Json.fromLong(record.offset),
+      "original" -> Option(record.value).fold(Json.Null)(Json.fromString),
+      "partition" -> Json.fromInt(record.partition),
+      "topic" -> Json.fromString(record.topic)
+    ).noSpaces
+    val key = Option(record.key).getOrElse(s"${record.partition}:${record.offset}")
+
+    producer.produce(ProducerRecords.one(ProducerRecord(dlqTopic, key, body))).flatten.void *>
+      IO(log.error("locked_consumer_record",
+        "status" -> "parked",
+        "group" -> groupId,
+        "topic" -> record.topic,
+        "partition" -> record.partition.toString,
+        "offset" -> record.offset.toString,
+        "dlq_topic" -> dlqTopic,
+        "error" -> message))
+
+  private def commitBatch(maxPollRecords: Int): fs2.Pipe[IO, CommittableOffset[IO], Unit] =
+    _.groupWithin(maxPollRecords.max(1), 1.second)
+      .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
 
   private def authorize(
       guard: Ref[IO, CutoverOffsetGuardState],

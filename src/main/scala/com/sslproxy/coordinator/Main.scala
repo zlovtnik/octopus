@@ -91,7 +91,8 @@ object Main extends IOApp.Simple:
                       List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
                       cfg.cron.batchDispatchLeaseSeconds,
                       cfg.cron.scanRetryBackoffSeconds,
-                      cfg.cron.batchDispatchRetryMaxSeconds
+                      cfg.cron.batchDispatchRetryMaxSeconds,
+                      dbSemaphore
                     )
 
                     val cronScheduler = new CronScheduler(
@@ -199,4 +200,4 @@ object Main extends IOApp.Simple:
       case (true, true)   => processorStreams.merge(consumerStreams)
       case (true, false)  => processorStreams
       case (false, true)  => consumerStreams
-      case (false, false) => Stream.empty
+      case (false, false) => Stream.never[IO]

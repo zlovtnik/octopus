@@ -11,8 +11,13 @@ enum CutoverEvidenceType(val wireValue: String):
   case RecordOffsetAuthorization extends CutoverEvidenceType("record_offset_authorization")
   case BootstrapPosition extends CutoverEvidenceType("bootstrap_position")
 
+enum CutoverEvidenceMode(val wireValue: String):
+  case Verified extends CutoverEvidenceMode("verified")
+  case DevBypass extends CutoverEvidenceMode("dev_bypass")
+
 final case class CutoverVerificationEvidence(
     evidenceVersion: Int,
+    evidenceMode: CutoverEvidenceMode,
     schemaVersion: Int,
     groupVersion: Int,
     artifactId: String,
@@ -32,6 +37,7 @@ final case class CutoverVerificationEvidence(
         "canonical_artifact_sha256" -> Json.fromString(canonicalArtifactSha256),
         "captured_at" -> Json.fromString(capturedAt.toString),
         "cluster_id" -> Json.fromString(clusterId),
+        "evidence_mode" -> Json.fromString(evidenceMode.wireValue),
         "evidence_type" -> Json.fromString("artifact_verification"),
         "evidence_version" -> Json.fromInt(evidenceVersion),
         "group_version" -> Json.fromInt(groupVersion),
@@ -63,6 +69,7 @@ final case class CutoverOffsetEvidence(
         "cluster_id" -> Json.fromString(verification.clusterId),
         "cutoff_offset" -> Json.fromLong(cutoffOffset),
         "evidence_type" -> Json.fromString(evidenceType.wireValue),
+        "evidence_mode" -> Json.fromString(verification.evidenceMode.wireValue),
         "evidence_version" -> Json.fromInt(verification.evidenceVersion),
         "group_id" -> Json.fromString(groupId),
         "group_version" -> Json.fromInt(verification.groupVersion),

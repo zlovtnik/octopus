@@ -43,7 +43,7 @@ cron:coordinator-loop
 **Independent FS2 Kafka consumer streams** (not in the main loop):
 
 - Scan request consumer — consumes `sync.scan.request`, accumulates into batches, flushes to TiDB
-- Result consumer — consumes `sync.oracle.result`, accumulates into batches, calls `process_batch_results()`
+- Result consumer — consumes `sync.oracle.result` and records batch/job outcomes and monotonic cursor progress in TiDB
 - TiDB load consumer — consumes `sync.oracle.load`, performs TiDB sink operations, publishes results to `sync.oracle.result`
 - Wireless handlers — 7 independent consumer streams for wireless operations
 
@@ -62,7 +62,7 @@ cron:coordinator-loop
 | `coordinator-adaptive-pull` | direct | FS2 stream | Shrinks Kafka fetch size when DB is behind |
 | `coordinator-backpressure` | direct | FS2 stream | Suspends/resumes scan consumer based on pending count |
 | `coordinator-scan-requests` | direct | FS2 stream | Pass-through (delegation marker) |
-| `coordinator-ingest` | direct | FS2 stream | Calls `coordinator.process_ingest_ledger()` |
+| `coordinator-ingest` | direct | FS2 stream | Promotes pending events through jobs into batches |
 | `coordinator-stale-recovery` | direct | FS2 stream | Calls `coordinator.recover_stale_dispatched_batches()` |
 | `coordinator-dispatch` | direct | FS2 stream | Loops dispatching batches to `sync.oracle.load` |
 | `coordinator-results` | direct | FS2 stream | Pass-through (delegation marker) |
@@ -72,7 +72,7 @@ cron:coordinator-loop
 | `scan-request-consumer` | kafka | `sync.scan.request` | Consumes scan requests, records in DB |
 | `scan-request-flush-timer` | timer | 1s interval | Flushes partial scan batches |
 | `tidb-load-consumer` | kafka | `sync.oracle.load` | TiDB sink worker (conditional on `tidb-sink.enabled`) |
-| `result-consumer` | kafka | `sync.oracle.result` | Consumes batch results, calls `process_batch_results()` |
+| `result-consumer` | kafka | `sync.oracle.result` | Records batch/job outcomes and monotonic cursor progress in TiDB |
 | `result-flush-timer` | timer | 1s interval | Flushes partial result batches |
 | `wireless-backlog-save` | kafka | `wireless.backlog.save` | Saves wireless backlog entry |
 | `wireless-backlog-list` | kafka | `wireless.backlog.list` | Lists pending backlog, publishes reply |
@@ -473,7 +473,7 @@ The coordinator is deployed via the parent repo's `helm/ssl-proxy/` chart. Key c
 
 | Metric | Type | Description |
 |---|---|---|
-| `db.client.operation` | Timer | Database stored procedure call duration |
+| `db.client.operation` | Timer | TiDB operation duration for Doobie-based persistence |
 | `coordinator.loop.counter` | Counter | Main loop iterations |
 | `coordinator.batch.dispatched` | Counter | Successfully dispatched batches |
 | `coordinator.backpressure.active` | Gauge | Whether scan consumer is suspended |

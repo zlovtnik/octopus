@@ -70,10 +70,10 @@ final class ProcessorSupervisor private (
     Stream.eval(runForever(workload, 0))
 
   private def runForever(workload: ProcessorWorkload, restartCount: Int): IO[Unit] =
-    setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
+    (setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
       workload.startup *>
       setStatus(workload.id, ProcessorLifecycle.Ready, restartCount, None) *>
-      workload.stream.compile.drain.attempt.flatMap {
+      workload.stream.compile.drain).attempt.flatMap {
         case Right(_) =>
           retry(workload, restartCount, IllegalStateException("processor stream completed unexpectedly"))
         case Left(error: TerminalProcessorError) =>

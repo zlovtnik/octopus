@@ -5,6 +5,8 @@ import com.sslproxy.coordinator.config.RuntimeConfig
 import fs2.Stream
 import munit.CatsEffectSuite
 
+import scala.concurrent.duration.*
+
 class MainSuite extends CatsEffectSuite:
 
   test("database worker permits reserve two pool connections"):
@@ -42,8 +44,11 @@ class MainSuite extends CatsEffectSuite:
     for
       processors <- processorOnly.compile.toList
       consumers <- consumerOnly.compile.toList
-      none <- disabled.compile.toList
+      disabledFiber <- disabled.compile.drain.start
+      _ <- IO.sleep(50.millis)
+      disabledOutcome <- disabledFiber.poll
+      _ <- disabledFiber.cancel
     yield
       assertEquals(processors, List("processor"))
       assertEquals(consumers, List("consumer"))
-      assertEquals(none, List.empty)
+      assertEquals(disabledOutcome, None)

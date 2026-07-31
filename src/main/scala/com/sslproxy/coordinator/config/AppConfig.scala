@@ -5,6 +5,7 @@ import com.typesafe.config.Config
 import pureconfig.{ConfigReader, ConfigCursor}
 import pureconfig.error.ConfigReaderFailures
 import com.sslproxy.coordinator.config.StringListConfigReader.given
+import com.sslproxy.coordinator.processor.ProcessorId
 
 object StringListConfigReader:
   given ConfigReader[List[String]] with
@@ -113,7 +114,8 @@ final case class SyncConfig(
 
 final case class RuntimeConfig(
     processorsEnabled: Boolean,
-    consumersEnabled: Boolean
+    consumersEnabled: Boolean,
+    environment: String = "production"
 ) derives ConfigReader:
   def anyEnabled: Boolean = processorsEnabled || consumersEnabled
 
@@ -192,6 +194,10 @@ object AppConfig:
     ).flatten
 
   private def processorErrors(config: ProcessorConfig): List[String] =
+    val idErrors = config.enabled.flatMap { id =>
+      ProcessorId.fromString(id).fold(error => List(error), _ => List.empty)
+    }
+
     List(
       Option.when(config.enabled.exists(_.trim.isEmpty))(
         "processors.enabled must not contain blank processor IDs"
@@ -205,7 +211,7 @@ object AppConfig:
       Option.when(config.restartMaxDelayMs < config.restartBaseDelayMs)(
         "processors.restart-max-delay-ms must be at least processors.restart-base-delay-ms"
       )
-    ).flatten
+    ).flatten ++ idErrors
 
   private def kafkaErrors(config: KafkaCfg): List[String] =
     List(
@@ -264,7 +270,7 @@ object AppConfig:
         "tidb.ssl-server-name must equal tidb.host because Connector/J verifies the JDBC host identity"
       ),
       Option.when(
-        config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.nonEmpty
+        config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.trim.nonEmpty
       )(
         "tidb.ssl-client-key-store-path and tidb.ssl-client-key-store-password must be configured together"
       ),
@@ -295,7 +301,12 @@ object AppConfig:
       )
     ).flatten
 
-    if cutover.devBypass then runtimeInvariantErrors
+    if cutover.devBypass then
+      runtimeInvariantErrors ++ List(
+        Option.when(config.runtime.environment != "development")(
+          "cutover.dev-bypass requires OCTOPUS_ENVIRONMENT=development"
+        )
+      ).flatten
     else
       val requiredGroups = cutover.requiredConsumerGroups
       val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
@@ -306,7 +317,7 @@ object AppConfig:
         Option.when(keySources != 1)(
           "exactly one of cutover.public-key-path or cutover.public-key-base-64 is required"
         ),
-        Option.when(Sha256Hex.findFirstIn(cutover.publicKeySha256).isEmpty)(
+        Option.when(!Sha256Hex.matches(cutover.publicKeySha256))(
           "cutover.public-key-sha-256 must be 64 lowercase hexadecimal characters"
         ),
         Option.when(cutover.expectedSchemaVersion <= 0)(
@@ -334,4 +345,4 @@ object AppConfig:
     Option.when(value.trim.isEmpty)(s"$path must not be blank")
 
   private def isVersionedConsumerGroup(group: String): Boolean =
-    VersionedConsumerGroup.findFirstIn(group).nonEmpty
+    VersionedConsumerGroup.matches(group)

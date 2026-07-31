@@ -29,6 +29,12 @@ class AppConfigCutoverSuite extends FunSuite:
       "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
       "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
       "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
+      "COORDINATOR_SCAN_TOPIC" -> "coordinator.scan.request",
+      "COORDINATOR_PAYLOAD_AUDIT_TOPIC" -> "coordinator.payload.audit",
+      "COORDINATOR_SCAN_CONSUMER" -> "coordinator-scan-v6",
+      "COORDINATOR_LOAD_CONSUMER" -> "coordinator-load-v6",
+      "COORDINATOR_RESULT_CONSUMER" -> "coordinator-result-v6",
+      "COORDINATOR_PAYLOAD_AUDIT_CONSUMER" -> "coordinator-payload-audit-v6",
       "SYNC_STREAM_NAMES" -> "proxy.events,proxy.payload_audit",
       "COORDINATOR_LOAD_STREAM_NAMES" -> "proxy.events,proxy.payload_audit"
     ).asJava)
@@ -92,6 +98,24 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.exists(_.contains("every configured consumer group")))
       case Right(_) => fail("expected unversioned group rejection")
 
+  test("enabled runtime rejects consumer groups and key pins with trailing newlines"):
+    val baseline = AppConfig.load
+    val configured = baseline.copy(
+      kafka = baseline.kafka.copy(scanConsumer = "octopus-scan-v1\n")
+    )
+    val enabled = configured.copy(
+      tidb = enabledTiDb(configured.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = completeCutover(configuredGroups(configured)).copy(publicKeySha256 = ("0" * 64) + "\n")
+    )
+
+    AppConfig.validate(enabled) match
+      case Left(error) =>
+        val messages = error.errors.toList
+        assert(messages.exists(_.contains("every configured consumer group")))
+        assert(messages.exists(_.contains("64 lowercase hexadecimal")))
+      case Right(_) => fail("expected full-string validation rejection")
+
   test("required cutover groups must exactly match configured groups"):
     val baseline = AppConfig.load
     val groups = configuredGroups(baseline).drop(1)
@@ -123,6 +147,17 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(messages.exists(_.contains("restart-base-delay-ms")))
         assert(messages.exists(_.contains("restart-max-delay-ms")))
       case Right(_) => fail("expected invalid processor configuration rejection")
+
+  test("processor configuration rejects unknown processor IDs"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      processors = baseline.processors.copy(enabled = List("sync-job-planer"))
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.contains("unknown processor id: sync-job-planer"))
+      case Right(_) => fail("expected unknown processor rejection")
 
   test("topic auto-provisioning rejects an unsafe replication factor"):
     val baseline = AppConfig.load
@@ -163,6 +198,23 @@ class AppConfigCutoverSuite extends FunSuite:
       case Left(error) =>
         assert(error.errors.toList.exists(_.contains("requires tidb.enabled=true")))
       case Right(_) => fail("expected an enabled runtime without TiDB to fail")
+
+  test("cutover dev bypass is restricted to the explicit development environment"):
+    val baseline = AppConfig.load
+    val production = baseline.copy(
+      tidb = enabledTiDb(baseline.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = baseline.cutover.copy(devBypass = true)
+    )
+    val development = production.copy(
+      runtime = production.runtime.copy(environment = "development")
+    )
+
+    AppConfig.validate(production) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("OCTOPUS_ENVIRONMENT=development")))
+      case Right(_) => fail("expected production dev bypass rejection")
+    assertEquals(AppConfig.validate(development), Right(development))
 
   test("stage mode rejects loopback root blank-password or downgraded TLS TiDB"):
     val baseline = AppConfig.load

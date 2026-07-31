@@ -16,6 +16,7 @@ final class VerifiedCutoverArtifact private[cutover] (
   val verificationEvidence: CutoverVerificationEvidence =
     CutoverVerificationEvidence(
       evidenceVersion = 1,
+      evidenceMode = if devMode then CutoverEvidenceMode.DevBypass else CutoverEvidenceMode.Verified,
       schemaVersion = artifact.schemaVersion,
       groupVersion = artifact.groupVersion,
       artifactId = artifact.artifactId,

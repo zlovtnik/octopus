@@ -217,17 +217,17 @@ private[cutover] object CutoverArtifactCodec:
         Option.when(artifact.schemaVersion != expectedSchemaVersion)(
           s"schema_version ${artifact.schemaVersion} does not match expected $expectedSchemaVersion"
         ),
-        Option.when(SafeIdentifier.findFirstIn(artifact.artifactId).isEmpty)(
+        Option.when(!SafeIdentifier.matches(artifact.artifactId))(
           "artifact_id must be a non-blank safe identifier of at most 128 characters"
         ),
-        Option.when(SafeIdentifier.findFirstIn(artifact.clusterId).isEmpty)(
+        Option.when(!SafeIdentifier.matches(artifact.clusterId))(
           "cluster_id must be a non-blank safe identifier of at most 128 characters"
         ),
         Option.when(artifact.clusterId != expectedClusterId)(
           s"cluster_id ${artifact.clusterId} does not match expected $expectedClusterId"
         ),
         Option.when(artifact.groupVersion <= 0)("group_version must be positive"),
-        Option.when(Sha256Hex.findFirstIn(artifact.artifactSha256).isEmpty)(
+        Option.when(!Sha256Hex.matches(artifact.artifactSha256))(
           "artifact_sha256 must be 64 lowercase hexadecimal characters"
         ),
         Option.when(artifact.cutoffs.isEmpty)("cutoffs must not be empty"),
@@ -243,7 +243,7 @@ private[cutover] object CutoverArtifactCodec:
         Option.when(artifact.cutoffs.exists(_.cutoffOffset < 0L))(
           "cutoff offsets must be non-negative"
         ),
-        Option.when(artifact.cutoffs.exists(cutoff => KafkaTopic.findFirstIn(cutoff.topic).isEmpty))(
+        Option.when(artifact.cutoffs.exists(cutoff => !KafkaTopic.matches(cutoff.topic)))(
           "cutoff topics must use valid Kafka topic characters"
         ),
         Option.when(groupVersions.size != artifact.cutoffs.size)(

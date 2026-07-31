@@ -150,9 +150,7 @@ class CronScheduler(
     // Ordered outbox UPDATE claims contend on the same leading row/range.
     // Drain sequentially so claim transactions cannot occupy the whole pool.
     CronScheduler.drainBatch(cfg.dispatchBatchSize) { () =>
-      dbSemaphore.permit.use { _ =>
-        batchDispatchService.dispatchNext()
-      }
+      batchDispatchService.dispatchNext()
     }.void
 
   private def shadowAudit(): IO[Unit] =

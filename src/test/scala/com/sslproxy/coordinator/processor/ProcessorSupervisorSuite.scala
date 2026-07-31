@@ -50,6 +50,25 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     }
   }
 
+  test("terminal startup failure is isolated and visible in readiness") {
+    val id = ProcessorId.EventRetention
+    val config = ProcessorConfig(List(id.value), 1L, 10L)
+    ProcessorSupervisor.create(config).flatMap { supervisor =>
+      val workload = ProcessorWorkload(
+        id,
+        Stream.never[IO],
+        startup = IO.raiseError(TerminalProcessorError("invalid startup configuration"))
+      )
+      supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).flatMap { statuses =>
+          fiber.cancel.as {
+            assertEquals(statuses(id).lastError, Some("invalid startup configuration"))
+          }
+        }
+      }
+    }
+  }
+
   test("retry delay is exponentially bounded with bounded jitter") {
     assertEquals(ProcessorSupervisor.retryDelay(100L, 1000L, 1, 0.0d), 100.millis)
     assertEquals(ProcessorSupervisor.retryDelay(100L, 1000L, 4, 0.0d), 800.millis)

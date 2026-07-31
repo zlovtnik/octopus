@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord, TidbRepository}
 import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
@@ -18,12 +19,13 @@ final class BatchDispatchService(
     destinationTopics: List[String],
     leaseSeconds: Int,
     retryBaseSeconds: Int,
-    retryMaxSeconds: Int
+    retryMaxSeconds: Int,
+    dbSemaphore: Semaphore[IO]
 ):
   import BatchDispatchService.{DispatchResult, log}
 
   def dispatchNext(): IO[DispatchResult] =
-    repo.claimOutbox(ownerId, destinationTopics, leaseSeconds).flatMap {
+    dbSemaphore.permit.use(_ => repo.claimOutbox(ownerId, destinationTopics, leaseSeconds)).flatMap {
       case Left(error) =>
         IO(log.error("outbox_claim", "status" -> "db_error",
           "operation" -> error.operation, "error" -> error.message))
@@ -45,7 +47,7 @@ final class BatchDispatchService(
     }
 
   private def acknowledge(record: OutboxRecord): IO[DispatchResult] =
-    repo.acknowledgeOutbox(record).flatMap {
+    dbSemaphore.permit.use(_ => repo.acknowledgeOutbox(record)).flatMap {
       case Right(true) =>
         IO(metrics.recordBatchDispatched()) *>
           IO(log.info("outbox_publish", "status" -> "published",
@@ -59,12 +61,14 @@ final class BatchDispatchService(
       case Left(error) =>
         IO(log.error("outbox_publish", "status" -> "ack_failed",
           "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> error.message)).as(DispatchResult.ContinueDraining)
+          "error" -> error.message)).as(DispatchResult.StopDraining)
     }
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
-    repo.failOutbox(record, message, retryBaseSeconds, retryMaxSeconds).flatMap {
+    dbSemaphore.permit.use { _ =>
+      repo.failOutbox(record, message, retryBaseSeconds, retryMaxSeconds)
+    }.flatMap {
       case Right(disposition) =>
         val status = disposition match
           case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"

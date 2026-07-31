@@ -30,11 +30,12 @@ class CutoverArtifactSuite extends CatsEffectSuite:
     assertEquals(verified.cutoffFor(GroupA, Topic, 0), Right(100L))
 
     val authorized = verified.authorizeRecordOffset(GroupA, Topic, 0, 100L).toOption.get
+    val authorizedAgain = verified.authorizeRecordOffset(GroupA, Topic, 0, 100L).toOption.get
     assertEquals(authorized.key, CutoffKey(GroupA, Topic, 0))
     assertEquals(authorized.verification.groupVersion, 1)
     assertEquals(authorized.verification.artifactSha256, verified.artifact.artifactSha256)
     assertEquals(authorized.durable.sha256.length, 64)
-    assertEquals(authorized.durable, authorized.durable)
+    assertEquals(authorized.durable, authorizedAgain.durable)
     assert(authorized.durable.canonicalJson.contains("\"group_id\":\"octopus-scan-tidb-v1\""))
 
   test("reject a canonical artifact whose signed payload was tampered"):
@@ -142,6 +143,16 @@ class CutoverArtifactSuite extends CatsEffectSuite:
         assert(detail.contains("unique by (group_id, topic, partition)"))
       case other => fail(s"expected duplicate cutoff rejection, found $other")
 
+  test("reject safe identifiers with trailing line terminators"):
+    val fixture = signedFixture(
+      List(PartitionCutoff(GroupA, Topic, partition = 0, cutoffOffset = 100L)),
+      artifactId = "prod-cutover-20260721\n"
+    )
+
+    verifyEither(fixture) match
+      case Left(CutoverFormatError(detail)) => assert(detail.contains("artifact_id"))
+      case other => fail(s"expected full-string identifier rejection, found $other")
+
   test("load and verify artifact, detached signature, and pinned public key from files"):
     val fixture = signedFixture(
       List(PartitionCutoff(GroupA, Topic, partition = 0, cutoffOffset = 100L))
@@ -189,9 +200,12 @@ class CutoverArtifactSuite extends CatsEffectSuite:
       VerifiedAt
     )
 
-  private def signedFixture(cutoffs: List[PartitionCutoff]): SignedFixture =
+  private def signedFixture(
+      cutoffs: List[PartitionCutoff],
+      artifactId: String = "prod-cutover-20260721"
+  ): SignedFixture =
     val keyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-    val artifactBytes = artifactDocument(cutoffs)
+    val artifactBytes = artifactDocument(cutoffs, artifactId)
     val publicKeyBytes = keyPair.getPublic.getEncoded
     val publicKeyBase64 = Base64.getEncoder.encodeToString(publicKeyBytes)
     val groups = cutoffs.map(_.groupId).distinct
@@ -212,7 +226,7 @@ class CutoverArtifactSuite extends CatsEffectSuite:
       config
     )
 
-  private def artifactDocument(cutoffs: List[PartitionCutoff]): Array[Byte] =
+  private def artifactDocument(cutoffs: List[PartitionCutoff], artifactId: String): Array[Byte] =
     val cutoffJson = cutoffs.sortBy(cutoff => (cutoff.groupId, cutoff.topic, cutoff.partition)).map { cutoff =>
       Json.obj(
         "cutoff_offset" -> Json.fromLong(cutoff.cutoffOffset),
@@ -222,7 +236,7 @@ class CutoverArtifactSuite extends CatsEffectSuite:
       )
     }
     val payload = Json.obj(
-      "artifact_id" -> Json.fromString("prod-cutover-20260721"),
+      "artifact_id" -> Json.fromString(artifactId),
       "captured_at" -> Json.fromString("2026-07-21T20:00:00Z"),
       "cluster_id" -> Json.fromString("redpanda-prod-1"),
       "cutoffs" -> Json.arr(cutoffJson*),

@@ -26,11 +26,12 @@ import fs2.kafka.ConsumerRecord
 import io.circe.parser as circeParser
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
-import org.testcontainers.containers.MySQLContainer
+import org.testcontainers.containers.GenericContainer
 import org.testcontainers.utility.DockerImageName
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import java.sql.DriverManager
 import java.util.Base64
 import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
@@ -41,27 +42,31 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private val ProxyMaxAuditBodyBytes = 65_536
   private var containerStarted = false
 
-  private final class TestMySqlContainer(image: DockerImageName)
-      extends MySQLContainer[TestMySqlContainer](image)
+  private final class TestTiDbContainer(image: DockerImageName)
+      extends GenericContainer[TestTiDbContainer](image)
 
-  private lazy val mysql =
-    new TestMySqlContainer(DockerImageName.parse("mysql:8.4"))
-      .withDatabaseName("octopus_core")
-      .withUsername("octopus_test")
-      .withPassword("octopus_test")
+  private lazy val tidb =
+    new TestTiDbContainer(DockerImageName.parse("pingcap/tidb:v8.5.7"))
+      .withExposedPorts(4000)
       .withCommand(
-        "--character-set-server=utf8mb4",
-        "--collation-server=utf8mb4_0900_ai_ci"
+        "--store=unistore",
+        "--path=/tmp/tidb",
+        "--log-file="
       )
+
+  private def jdbcUrl(database: Option[String]): String =
+    val databasePath = database.fold("")(name => s"/$name")
+    s"jdbc:mysql://${tidb.getHost}:${tidb.getMappedPort(4000)}$databasePath" +
+      "?rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true"
 
   private lazy val dataSource =
     val config = new HikariConfig()
-    config.setJdbcUrl(mysql.getJdbcUrl)
-    config.setUsername(mysql.getUsername)
-    config.setPassword(mysql.getPassword)
-    config.setDriverClassName(mysql.getDriverClassName)
+    config.setJdbcUrl(jdbcUrl(Some("octopus_core")))
+    config.setUsername("root")
+    config.setPassword("")
+    config.setDriverClassName("com.mysql.cj.jdbc.Driver")
     config.setMaximumPoolSize(4)
-    config.setConnectionInitSql("SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci")
+    config.setConnectionInitSql("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
     new HikariDataSource(config)
 
   private lazy val doobieExecutor = Executors.newFixedThreadPool(2)
@@ -74,11 +79,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
   private lazy val repository = new TidbRepository(xa)
   private lazy val schemaConfig = TiDbConfig(
-    host = mysql.getHost,
-    port = mysql.getFirstMappedPort.intValue(),
-    database = mysql.getDatabaseName,
-    user = mysql.getUsername,
-    password = mysql.getPassword,
+    host = tidb.getHost,
+    port = tidb.getMappedPort(4000).intValue(),
+    database = "octopus_core",
+    user = "root",
+    password = "",
     poolSize = 4,
     connectionTimeoutMs = 5000L,
     statementTimeoutSecs = 30,
@@ -91,7 +96,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   override def beforeAll(): Unit =
     super.beforeAll()
     if dockerAvailable then
-      mysql.start()
+      tidb.start()
       containerStarted = true
       applyCanonicalManifest()
 
@@ -99,7 +104,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     if containerStarted then
       dataSource.close()
       doobieExecutor.shutdown()
-      mysql.stop()
+      tidb.stop()
     super.afterAll()
 
   test("wireless scan ingestion hydrates payload hashes and projected columns"):
@@ -228,22 +233,34 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(projection.get[String]("identity_source"), Right("observed_identity"))
       assert(projection.get[String]("wireless_search_text").toOption.exists(_.contains("sensor-projection")))
 
-  test("historical hydration repairs sparse rows and skips archived payloads"):
+  test("historical hydration normalizes null-like projections without changing durable payloads"):
     requireDocker()
     val payload =
-      """{"schema_version":2,"event_type":"wifi_management_frame","observed_at":"2026-07-27T12:01:00Z","sensor_id":"backfill-sensor","location_id":"lab","channel":6,"frame_type":"management","frame_subtype":"beacon","source_mac":"AA:BB:CC:DD:EE:10","raw_len":128,"retry":false,"more_data":false,"power_save":false,"protected":false,"security_flags":0,"tags":[]}"""
+      """{"event_type":"wifi_management_frame","observed_at":"2026-07-27T12:01:00Z","sensor_id":"backfill-sensor","location_id":"lab","frame_type":"management","frame_subtype":"beacon","source_mac":"AA:BB:CC:DD:EE:10","ssid":"null","signal_dbm":null,"noise_dbm":"null","frequency_mhz":"malformed","channel_flags":9223372036854775808,"raw_len":null,"frame_control_flags":"null","retry":null,"protected":"null","risk_score":"null","mixed_encryption":null,"tags":[],"rf":{"signal_dbm":"-42","noise_dbm":null,"frequency_mhz":"5180","channel_flags":{"raw":"256"},"raw_len":"null"},"mac":{"retry":"1"}}"""
     val payloadHash = Sha256Utils.sha256Hex(payload)
     val payloadRef = inlineRef(payload)
+    val nullSchemaPayload =
+      """{"schema_version":null,"event_type":"wifi_management_frame","observed_at":"2026-07-27T12:01:30Z","sensor_id":"null-schema-sensor","source_mac":"AA:BB:CC:DD:EE:11"}"""
+    val nullSchemaHash = Sha256Utils.sha256Hex(nullSchemaPayload)
+    val nullSchemaRef = inlineRef(nullSchemaPayload)
     val archivedHash = "f" * 64
     val tombstonedHash = "e" * 64
 
     for
       _ <- sql"""INSERT INTO sync_events (
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
-                   status, producer, payload_archived
+                   payload, status, producer, payload_archived
                  ) VALUES (
                    $payloadHash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:00'),
-                   $payloadRef, ${"0" * 64}, 'completed', 'ssl-proxy', 0
+                   $payloadRef, $payloadHash, $payload, 'completed', 'ssl-proxy', 0
+                 )""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   payload, status, producer, payload_archived
+                 ) VALUES (
+                   $nullSchemaHash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:30'),
+                   $nullSchemaRef, $nullSchemaHash, $nullSchemaPayload,
+                   'completed', 'ssl-proxy', 0
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_events (
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
@@ -266,21 +283,90 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    TIMESTAMP('2026-07-27 12:03:00'),
                    TIMESTAMPADD(DAY, 1, CURRENT_TIMESTAMP(6))
                  )""".update.run.transact(xa)
+      rawBefore <- sql"""SELECT CAST(payload AS CHAR), payload_sha256, payload_ref
+                          FROM sync_events
+                          WHERE dedupe_key = $payloadHash
+                            AND stream_name = 'wireless.audit'"""
+        .query[(String, String, String)].unique.transact(xa)
       candidates <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
       candidate = candidates.find(_.dedupeKey == payloadHash)
         .getOrElse(fail("expected sparse wireless row in hydration page"))
+      nullSchemaCandidate = candidates.find(_.dedupeKey == nullSchemaHash)
+        .getOrElse(fail("expected JSON-null schema version row in hydration page"))
       _ = assert(!candidates.exists(_.dedupeKey == archivedHash))
       _ = assert(!candidates.exists(_.dedupeKey == tombstonedHash))
-      _ <- repository.hydrateExistingSyncEvent(candidate, payload).map(requireRight)
-      state <- sql"""SELECT payload_sha256, payload IS NOT NULL, event_type, sensor_id, retry
+      hydrated <- repository.hydrateExistingSyncEvent(candidate, payload).map(requireRight)
+      nullSchemaHydrated <- repository.hydrateExistingSyncEvent(
+        nullSchemaCandidate,
+        nullSchemaPayload
+      ).map(requireRight)
+      rawAfter <- sql"""SELECT CAST(payload AS CHAR), payload_sha256, payload_ref
+                         FROM sync_events
+                         WHERE dedupe_key = $payloadHash
+                           AND stream_name = 'wireless.audit'"""
+        .query[(String, String, String)].unique.transact(xa)
+      state <- sql"""SELECT schema_version, ssid, signal_dbm, noise_dbm,
+                            frequency_mhz, channel_flags, raw_len, frame_control_flags,
+                            retry, risk_score, mixed_encryption, protected
                      FROM sync_events
                      WHERE dedupe_key = $payloadHash
                        AND stream_name = 'wireless.audit'"""
-        .query[(String, Int, String, String, Int)].unique.transact(xa)
+        .query[(Int, String, Int, Option[Int], Int, Int, Int, Int, Int, Option[Double], Option[Int], Int)]
+        .unique.transact(xa)
+      nullSchemaVersion <- sql"""SELECT schema_version
+                                  FROM sync_events
+                                  WHERE dedupe_key = $nullSchemaHash
+                                    AND stream_name = 'wireless.audit'"""
+        .query[Int].unique.transact(xa)
       remaining <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
     yield
-      assertEquals(state, (payloadHash, 1, "wifi_management_frame", "backfill-sensor", 0))
+      assert(hydrated)
+      assert(nullSchemaHydrated)
+      assertEquals(rawAfter, rawBefore)
+      assertEquals(rawAfter._2, payloadHash)
+      assertEquals(rawAfter._3, payloadRef)
+      assertEquals(
+        state,
+        (1, "null", -42, None, 5180, 256, 0, 0, 1, None, None, 0)
+      )
+      assertEquals(nullSchemaVersion, 1)
       assert(!remaining.exists(_.dedupeKey == payloadHash))
+      assert(!remaining.exists(_.dedupeKey == nullSchemaHash))
+
+  test("shadow alert generation skips null-like signals and uses maintained projections"):
+    requireDocker()
+    val nullSignalPayload = """{"signal_dbm":"null"}"""
+    val validSignalPayload = """{"signal_dbm":null,"rf":{"signal_dbm":"-40"}}"""
+    val nullSignalKey = Sha256Utils.sha256Hex(nullSignalPayload)
+    val validSignalKey = Sha256Utils.sha256Hex(validSignalPayload)
+
+    for
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   payload, status, producer, source_mac, signal_dbm
+                 ) VALUES (
+                   $nullSignalKey, 'wireless.audit', CURRENT_TIMESTAMP(6),
+                   ${inlineRef(nullSignalPayload)}, $nullSignalKey, $nullSignalPayload,
+                   'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:20', NULL
+                 )""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                   payload, status, producer, source_mac, signal_dbm
+                 ) VALUES (
+                   $validSignalKey, 'wireless.audit', CURRENT_TIMESTAMP(6),
+                   ${inlineRef(validSignalPayload)}, $validSignalKey, $validSignalPayload,
+                   'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:21', -40
+                 )""".update.run.transact(xa)
+      alerts <- repository.generateShadowAlerts().map(requireRight)
+      stored <- sql"""SELECT source_mac, signal_dbm
+                       FROM wireless_shadow_alerts
+                       WHERE source_mac IN ('aa:bb:cc:dd:ee:20', 'aa:bb:cc:dd:ee:21')
+                       ORDER BY source_mac"""
+        .query[(String, Int)].to[List].transact(xa)
+    yield
+      assertEquals(stored, List(("aa:bb:cc:dd:ee:21", -40)))
+      assert(alerts.exists(_.contains("aa:bb:cc:dd:ee:21")))
+      assert(!alerts.exists(_.contains("aa:bb:cc:dd:ee:20")))
 
   test("load acknowledgement binds batch_id without a JSON collation comparison"):
     requireDocker()
@@ -510,7 +596,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     result.fold(error => fail(s"${error.operation}: ${error.message}"), identity)
 
   private def requireDocker(): Unit =
-    assume(dockerAvailable, "Docker is required for the MySQL integration suite")
+    assume(dockerAvailable, "Docker is required for the TiDB integration suite")
 
   private def applyCanonicalManifest(): Unit =
     val manifest = schemaRoot.resolve("manifest.yaml")
@@ -520,7 +606,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .takeWhile(_.startsWith("  - "))
       .map(_.drop(4).trim)
 
-    val connection = mysql.createConnection("")
+    val connection = DriverManager.getConnection(jdbcUrl(None), "root", "")
     try
       val statement = connection.createStatement()
       try

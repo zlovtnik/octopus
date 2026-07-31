@@ -420,277 +420,284 @@ class TidbRepository(xa: Transactor[IO]):
           else 0.pure[ConnectionIO]
         yield updated > 0
 
+  private def jsonExtract(path: String): Fragment =
+    fr0"JSON_EXTRACT(payload, $path)"
+
+  private def jsonType(path: String): Fragment =
+    val extracted = jsonExtract(path)
+    fr0"JSON_TYPE($extracted)"
+
+  private def jsonUnquoted(path: String): Fragment =
+    val extracted = jsonExtract(path)
+    fr0"JSON_UNQUOTE($extracted)"
+
+  private def coalesceJson(projections: List[Fragment]): Fragment =
+    fr0"COALESCE(" ++ projections.intercalate(fr0", ") ++ fr0")"
+
+  private def jsonText(path: String, aliases: String*): Fragment =
+    coalesceJson((path :: aliases.toList).map { candidate =>
+      val candidateType = jsonType(candidate)
+      val candidateText = jsonUnquoted(candidate)
+      fr0"CASE WHEN $candidateType = 'STRING' THEN NULLIF($candidateText, '') ELSE NULL END"
+    })
+
+  private def jsonInteger(
+      path: String,
+      aliases: String*
+  )(
+      positiveMax: String = "2147483647",
+      negativeMagnitudeMax: String = "2147483648"
+  ): Fragment =
+    coalesceJson((path :: aliases.toList).map { candidate =>
+      val candidateType = jsonType(candidate)
+      val candidateText = jsonUnquoted(candidate)
+      val trimmed = fr0"TRIM($candidateText)"
+      val magnitude =
+        fr0"COALESCE(NULLIF(TRIM(LEADING '0' FROM TRIM(LEADING '-' FROM TRIM(LEADING '+' FROM $trimmed))), ''), '0')"
+      val magnitudeLimit =
+        fr0"CASE WHEN LEFT($trimmed, 1) = '-' THEN $negativeMagnitudeMax ELSE $positiveMax END"
+      val safeText =
+        fr0"""CASE
+             WHEN $candidateType IN ('INTEGER', 'UNSIGNED INTEGER', 'STRING')
+              AND REGEXP_LIKE($trimmed, '^[+-]?[0-9]+$$')
+              AND (
+                CHAR_LENGTH($magnitude) < CHAR_LENGTH($magnitudeLimit)
+                OR (
+                  CHAR_LENGTH($magnitude) = CHAR_LENGTH($magnitudeLimit)
+                  AND $magnitude <= $magnitudeLimit
+                )
+              )
+             THEN $trimmed
+             ELSE NULL
+           END"""
+      fr0"CAST($safeText AS SIGNED)"
+    })
+
+  private def jsonDouble(path: String, aliases: String*): Fragment =
+    coalesceJson((path :: aliases.toList).map { candidate =>
+      val candidateType = jsonType(candidate)
+      val candidateText = jsonUnquoted(candidate)
+      val trimmed = fr0"TRIM($candidateText)"
+      val scientific = fr0"REGEXP_LIKE($trimmed, '^[+-]?[0-9]([.][0-9]+)?[eE][+-]?[0-9]{1,3}$$')"
+      val exponent =
+        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', -1) ELSE NULL END AS SIGNED)"
+      val mantissa =
+        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', 1) ELSE NULL END AS DECIMAL(18,16))"
+      val safeText =
+        fr0"""CASE
+             WHEN $candidateType IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'STRING')
+              AND (
+                REGEXP_LIKE($trimmed, '^[+-]?([0-9]{1,308}([.][0-9]*)?|[.][0-9]+)$$')
+                OR (
+                  $scientific
+                  AND $exponent BETWEEN -324 AND 308
+                  AND ($exponent < 308 OR ABS($mantissa) <= 1.7976931348623157)
+                )
+              )
+             THEN $trimmed
+             ELSE NULL
+           END"""
+      fr0"CAST($safeText AS DOUBLE)"
+    })
+
+  private def jsonBoolean(path: String, aliases: String*): Fragment =
+    coalesceJson((path :: aliases.toList).map { candidate =>
+      val candidateType = jsonType(candidate)
+      val candidateText = jsonUnquoted(candidate)
+      fr0"""CASE
+             WHEN $candidateType IN ('BOOLEAN', 'INTEGER', 'UNSIGNED INTEGER', 'STRING') THEN
+               CASE LOWER(TRIM($candidateText))
+                 WHEN 'true' THEN 1
+                 WHEN 'false' THEN 0
+                 WHEN '1' THEN 1
+                 WHEN '0' THEN 0
+                 ELSE NULL
+               END
+             ELSE NULL
+           END"""
+    })
+
+  private def jsonArray(path: String): Fragment =
+    val extracted = jsonExtract(path)
+    val extractedType = jsonType(path)
+    fr0"CASE WHEN $extractedType = 'ARRAY' THEN $extracted ELSE NULL END"
+
   private def hydrateWirelessProjection(dedupeKey: String): ConnectionIO[Int] =
+    val intMax = "2147483647"
+    val intMinMagnitude = "2147483648"
+    val longMax = "9223372036854775807"
+    val longMinMagnitude = "9223372036854775808"
+
     val project =
-      sql"""UPDATE sync_events
+      val sensorId = jsonText("$.sensor_id")
+      val locationId = jsonText("$.location_id")
+      val username = jsonText("$.username")
+      val eventType = jsonText("$.event_type", "$.type")
+      val schemaVersion = jsonInteger("$.schema_version")()
+      val frameType = jsonText("$.frame_type", "$.mac.frame_type")
+      val frameSubtype = jsonText("$.frame_subtype", "$.mac.frame_subtype")
+      val sourceMac = jsonText("$.source_mac", "$.mac.source_mac")
+      val transmitterMac = jsonText("$.transmitter_mac", "$.mac.transmitter_mac")
+      val receiverMac = jsonText("$.receiver_mac", "$.mac.receiver_mac")
+      val bssid = jsonText("$.bssid", "$.mac.bssid")
+      val destinationBssid = jsonText(
+        "$.destination_bssid",
+        "$.destination_mac",
+        "$.mac.destination_mac",
+        "$.mac.bssid"
+      )
+      val ssid = jsonText("$.ssid")
+      val signalDbm = jsonInteger("$.signal_dbm", "$.rf.signal_dbm")()
+      val noiseDbm = jsonInteger("$.noise_dbm", "$.rf.noise_dbm")()
+      val frequencyMhz = jsonInteger("$.frequency_mhz", "$.rf.frequency_mhz")()
+      val channelFlags = jsonInteger("$.channel_flags", "$.rf.channel_flags.raw")()
+      val dataRateKbps = jsonInteger("$.data_rate_kbps", "$.rf.data_rate_kbps")()
+      val antennaId = jsonInteger("$.antenna_id", "$.rf.antenna_id")()
+      val tsft = jsonInteger("$.tsft", "$.rf.tsft")(longMax, longMinMagnitude)
+      val fragmentNumber = jsonInteger("$.fragment_number", "$.mac.fragment_number")()
+      val channelNumber = jsonInteger("$.channel_number", "$.channel", "$.rf.channel_number")()
+      val signalStatus = jsonText("$.signal_status", "$.rf.signal_status")
+      val adjacentMacHint = jsonText("$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
+      val qosTid = jsonInteger("$.qos_tid", "$.qos.tid")()
+      val qosEosp = jsonBoolean("$.qos_eosp", "$.qos.eosp")
+      val qosAckPolicy = jsonInteger("$.qos_ack_policy", "$.qos.ack_policy")()
+      val qosAckPolicyLabel = jsonText("$.qos_ack_policy_label", "$.qos.ack_policy_label")
+      val qosAmsdu = jsonBoolean("$.qos_amsdu", "$.qos.amsdu")
+      val llcOui = jsonText("$.llc_oui", "$.llc_snap.oui")
+      val ethertype = jsonInteger("$.ethertype", "$.llc_snap.ethertype")()
+      val ethertypeName = jsonText("$.ethertype_name", "$.llc_snap.ethertype_name")
+      val srcIp = jsonText("$.src_ip", "$.network.src_ip")
+      val dstIp = jsonText("$.dst_ip", "$.network.dst_ip")
+      val ipTtl = jsonInteger("$.ip_ttl", "$.network.ttl")()
+      val ipProtocol = jsonInteger("$.ip_protocol", "$.network.protocol")()
+      val ipProtocolName = jsonText("$.ip_protocol_name", "$.network.protocol_name")
+      val srcPort = jsonInteger("$.src_port", "$.transport.src_port")()
+      val dstPort = jsonInteger("$.dst_port", "$.transport.dst_port")()
+      val transportProtocol = jsonText("$.transport_protocol", "$.transport.protocol")
+      val transportLength = jsonInteger("$.transport_length", "$.transport.length")()
+      val transportChecksum = jsonInteger("$.transport_checksum", "$.transport.checksum")()
+      val appProtocol = jsonText("$.app_protocol", "$.application.protocol")
+      val ssdpMessageType = jsonText("$.ssdp_message_type", "$.application.ssdp.message_type")
+      val ssdpSt = jsonText("$.ssdp_st", "$.application.ssdp.st")
+      val ssdpMx = jsonText("$.ssdp_mx", "$.application.ssdp.mx")
+      val ssdpUsn = jsonText("$.ssdp_usn", "$.application.ssdp.usn")
+      val dhcpRequestedIp = jsonText("$.dhcp_requested_ip", "$.application.dhcp.requested_ip")
+      val dhcpHostname = jsonText("$.dhcp_hostname", "$.application.dhcp.hostname")
+      val dhcpVendorClass = jsonText("$.dhcp_vendor_class", "$.application.dhcp.vendor_class")
+      val dnsQueryName = jsonText("$.dns_query_name", "$.application.dns.query_names[0]")
+      val mdnsName = jsonText("$.mdns_name", "$.application.mdns.query_names[0]")
+      val sessionKey = jsonText("$.session_key", "$.correlation.session_key")
+      val retransmitKey = jsonText("$.retransmit_key", "$.correlation.retransmit_key")
+      val frameFingerprint = jsonText("$.frame_fingerprint", "$.correlation.frame_fingerprint")
+      val payloadVisibility = jsonText("$.payload_visibility", "$.correlation.payload_visibility")
+      val tsftDeltaUs = jsonInteger("$.tsft_delta_us", "$.correlation.tsft_delta_us")(
+        longMax,
+        longMinMagnitude
+      )
+      val wallClockDeltaMs = jsonInteger(
+        "$.wall_clock_delta_ms",
+        "$.correlation.wall_clock_delta_ms"
+      )(longMax, longMinMagnitude)
+      val largeFrame = jsonBoolean("$.large_frame", "$.anomalies.large_frame")
+      val mixedEncryption = jsonBoolean("$.mixed_encryption", "$.anomalies.mixed_encryption")
+      val dedupeOrReplaySuspect = jsonBoolean(
+        "$.dedupe_or_replay_suspect",
+        "$.anomalies.dedupe_or_replay_suspect"
+      )
+      val rawLen = jsonInteger("$.raw_len", "$.rf.raw_len")(intMax, intMinMagnitude)
+      val frameControlFlags = jsonInteger("$.frame_control_flags")(intMax, intMinMagnitude)
+      val moreData = jsonBoolean("$.more_data", "$.mac.more_data")
+      val retry = jsonBoolean("$.retry", "$.mac.retry")
+      val powerSave = jsonBoolean("$.power_save", "$.mac.power_save")
+      val protectedFlag = jsonBoolean("$.protected", "$.mac.protected")
+      val securityFlags = jsonInteger("$.security_flags")(intMax, intMinMagnitude)
+      val riskScore = jsonDouble("$.risk_score")
+      val identitySource = jsonText("$.identity_source")
+      val tags = jsonArray("$.tags")
+      val wpsDeviceName = jsonText("$.wps_device_name")
+      val wpsManufacturer = jsonText("$.wps_manufacturer")
+      val wpsModelName = jsonText("$.wps_model_name")
+      val deviceFingerprint = jsonText("$.device_fingerprint")
+      val handshakeCaptured = jsonBoolean("$.handshake_captured")
+
+      fr"""UPDATE sync_events
             SET
-              sensor_id = NULLIF(payload->>'$$.sensor_id', ''),
-              location_id = NULLIF(payload->>'$$.location_id', ''),
-              username = NULLIF(payload->>'$$.username', ''),
-              event_type = COALESCE(
-                NULLIF(payload->>'$$.event_type', ''),
-                NULLIF(payload->>'$$.type', '')
-              ),
-              schema_version = CAST(NULLIF(payload->>'$$.schema_version', '') AS SIGNED),
-              frame_type = COALESCE(
-                NULLIF(payload->>'$$.frame_type', ''),
-                NULLIF(payload->>'$$.mac.frame_type', '')
-              ),
-              frame_subtype = COALESCE(
-                NULLIF(payload->>'$$.frame_subtype', ''),
-                NULLIF(payload->>'$$.mac.frame_subtype', '')
-              ),
-              source_mac = LOWER(COALESCE(
-                NULLIF(payload->>'$$.source_mac', ''),
-                NULLIF(payload->>'$$.mac.source_mac', '')
-              )),
-              transmitter_mac = LOWER(COALESCE(
-                NULLIF(payload->>'$$.transmitter_mac', ''),
-                NULLIF(payload->>'$$.mac.transmitter_mac', '')
-              )),
-              receiver_mac = LOWER(COALESCE(
-                NULLIF(payload->>'$$.receiver_mac', ''),
-                NULLIF(payload->>'$$.mac.receiver_mac', '')
-              )),
-              bssid = LOWER(COALESCE(
-                NULLIF(payload->>'$$.bssid', ''),
-                NULLIF(payload->>'$$.mac.bssid', '')
-              )),
-              destination_bssid = LOWER(COALESCE(
-                NULLIF(payload->>'$$.destination_bssid', ''),
-                NULLIF(payload->>'$$.destination_mac', ''),
-                NULLIF(payload->>'$$.mac.destination_mac', ''),
-                NULLIF(payload->>'$$.mac.bssid', '')
-              )),
-              ssid = NULLIF(payload->>'$$.ssid', ''),
-              signal_dbm = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.signal_dbm', ''),
-                NULLIF(payload->>'$$.rf.signal_dbm', '')
-              ), '') AS SIGNED),
-              noise_dbm = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.noise_dbm', ''),
-                NULLIF(payload->>'$$.rf.noise_dbm', '')
-              ), '') AS SIGNED),
-              frequency_mhz = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.frequency_mhz', ''),
-                NULLIF(payload->>'$$.rf.frequency_mhz', '')
-              ), '') AS SIGNED),
-              channel_flags = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.channel_flags', ''),
-                NULLIF(payload->>'$$.rf.channel_flags.raw', '')
-              ), '') AS SIGNED),
-              data_rate_kbps = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.data_rate_kbps', ''),
-                NULLIF(payload->>'$$.rf.data_rate_kbps', '')
-              ), '') AS SIGNED),
-              antenna_id = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.antenna_id', ''),
-                NULLIF(payload->>'$$.rf.antenna_id', '')
-              ), '') AS SIGNED),
-              tsft = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.tsft', ''),
-                NULLIF(payload->>'$$.rf.tsft', '')
-              ), '') AS SIGNED),
-              fragment_number = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.fragment_number', ''),
-                NULLIF(payload->>'$$.mac.fragment_number', '')
-              ), '') AS SIGNED),
-              channel_number = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.channel_number', ''),
-                NULLIF(payload->>'$$.channel', ''),
-                NULLIF(payload->>'$$.rf.channel_number', '')
-              ), '') AS SIGNED),
-              signal_status = COALESCE(
-                NULLIF(payload->>'$$.signal_status', ''),
-                NULLIF(payload->>'$$.rf.signal_status', '')
-              ),
-              adjacent_mac_hint = LOWER(COALESCE(
-                NULLIF(payload->>'$$.adjacent_mac_hint', ''),
-                NULLIF(payload->>'$$.mac.adjacent_mac_hint', '')
-              )),
-              qos_tid = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.qos_tid', ''),
-                NULLIF(payload->>'$$.qos.tid', '')
-              ), '') AS SIGNED),
-              qos_eosp = CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.qos_eosp', ''),
-                NULLIF(payload->>'$$.qos.eosp', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
-              qos_ack_policy = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.qos_ack_policy', ''),
-                NULLIF(payload->>'$$.qos.ack_policy', '')
-              ), '') AS SIGNED),
-              qos_ack_policy_label = COALESCE(
-                NULLIF(payload->>'$$.qos_ack_policy_label', ''),
-                NULLIF(payload->>'$$.qos.ack_policy_label', '')
-              ),
-              qos_amsdu = CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.qos_amsdu', ''),
-                NULLIF(payload->>'$$.qos.amsdu', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
-              llc_oui = COALESCE(
-                NULLIF(payload->>'$$.llc_oui', ''),
-                NULLIF(payload->>'$$.llc_snap.oui', '')
-              ),
-              ethertype = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.ethertype', ''),
-                NULLIF(payload->>'$$.llc_snap.ethertype', '')
-              ), '') AS SIGNED),
-              ethertype_name = COALESCE(
-                NULLIF(payload->>'$$.ethertype_name', ''),
-                NULLIF(payload->>'$$.llc_snap.ethertype_name', '')
-              ),
-              src_ip = COALESCE(
-                NULLIF(payload->>'$$.src_ip', ''),
-                NULLIF(payload->>'$$.network.src_ip', '')
-              ),
-              dst_ip = COALESCE(
-                NULLIF(payload->>'$$.dst_ip', ''),
-                NULLIF(payload->>'$$.network.dst_ip', '')
-              ),
-              ip_ttl = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.ip_ttl', ''),
-                NULLIF(payload->>'$$.network.ttl', '')
-              ), '') AS SIGNED),
-              ip_protocol = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.ip_protocol', ''),
-                NULLIF(payload->>'$$.network.protocol', '')
-              ), '') AS SIGNED),
-              ip_protocol_name = COALESCE(
-                NULLIF(payload->>'$$.ip_protocol_name', ''),
-                NULLIF(payload->>'$$.network.protocol_name', '')
-              ),
-              src_port = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.src_port', ''),
-                NULLIF(payload->>'$$.transport.src_port', '')
-              ), '') AS SIGNED),
-              dst_port = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.dst_port', ''),
-                NULLIF(payload->>'$$.transport.dst_port', '')
-              ), '') AS SIGNED),
-              transport_protocol = COALESCE(
-                NULLIF(payload->>'$$.transport_protocol', ''),
-                NULLIF(payload->>'$$.transport.protocol', '')
-              ),
-              transport_length = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.transport_length', ''),
-                NULLIF(payload->>'$$.transport.length', '')
-              ), '') AS SIGNED),
-              transport_checksum = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.transport_checksum', ''),
-                NULLIF(payload->>'$$.transport.checksum', '')
-              ), '') AS SIGNED),
-              app_protocol = COALESCE(
-                NULLIF(payload->>'$$.app_protocol', ''),
-                NULLIF(payload->>'$$.application.protocol', '')
-              ),
-              ssdp_message_type = COALESCE(
-                NULLIF(payload->>'$$.ssdp_message_type', ''),
-                NULLIF(payload->>'$$.application.ssdp.message_type', '')
-              ),
-              ssdp_st = COALESCE(
-                NULLIF(payload->>'$$.ssdp_st', ''),
-                NULLIF(payload->>'$$.application.ssdp.st', '')
-              ),
-              ssdp_mx = COALESCE(
-                NULLIF(payload->>'$$.ssdp_mx', ''),
-                NULLIF(payload->>'$$.application.ssdp.mx', '')
-              ),
-              ssdp_usn = COALESCE(
-                NULLIF(payload->>'$$.ssdp_usn', ''),
-                NULLIF(payload->>'$$.application.ssdp.usn', '')
-              ),
-              dhcp_requested_ip = COALESCE(
-                NULLIF(payload->>'$$.dhcp_requested_ip', ''),
-                NULLIF(payload->>'$$.application.dhcp.requested_ip', '')
-              ),
-              dhcp_hostname = COALESCE(
-                NULLIF(payload->>'$$.dhcp_hostname', ''),
-                NULLIF(payload->>'$$.application.dhcp.hostname', '')
-              ),
-              dhcp_vendor_class = COALESCE(
-                NULLIF(payload->>'$$.dhcp_vendor_class', ''),
-                NULLIF(payload->>'$$.application.dhcp.vendor_class', '')
-              ),
-              dns_query_name = COALESCE(
-                NULLIF(payload->>'$$.dns_query_name', ''),
-                NULLIF(payload->>'$$.application.dns.query_names[0]', '')
-              ),
-              mdns_name = COALESCE(
-                NULLIF(payload->>'$$.mdns_name', ''),
-                NULLIF(payload->>'$$.application.mdns.query_names[0]', '')
-              ),
-              session_key = COALESCE(
-                NULLIF(payload->>'$$.session_key', ''),
-                NULLIF(payload->>'$$.correlation.session_key', '')
-              ),
-              retransmit_key = COALESCE(
-                NULLIF(payload->>'$$.retransmit_key', ''),
-                NULLIF(payload->>'$$.correlation.retransmit_key', '')
-              ),
-              frame_fingerprint = COALESCE(
-                NULLIF(payload->>'$$.frame_fingerprint', ''),
-                NULLIF(payload->>'$$.correlation.frame_fingerprint', '')
-              ),
-              payload_visibility = COALESCE(
-                NULLIF(payload->>'$$.payload_visibility', ''),
-                NULLIF(payload->>'$$.correlation.payload_visibility', '')
-              ),
-              tsft_delta_us = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.tsft_delta_us', ''),
-                NULLIF(payload->>'$$.correlation.tsft_delta_us', '')
-              ), '') AS SIGNED),
-              wall_clock_delta_ms = CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.wall_clock_delta_ms', ''),
-                NULLIF(payload->>'$$.correlation.wall_clock_delta_ms', '')
-              ), '') AS SIGNED),
-              large_frame = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.large_frame', ''),
-                NULLIF(payload->>'$$.anomalies.large_frame', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              mixed_encryption = CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.mixed_encryption', ''),
-                NULLIF(payload->>'$$.anomalies.mixed_encryption', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END,
-              dedupe_or_replay_suspect = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.dedupe_or_replay_suspect', ''),
-                NULLIF(payload->>'$$.anomalies.dedupe_or_replay_suspect', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              raw_len = COALESCE(CAST(NULLIF(COALESCE(
-                NULLIF(payload->>'$$.raw_len', ''),
-                NULLIF(payload->>'$$.rf.raw_len', '')
-              ), '') AS SIGNED), 0),
-              frame_control_flags = COALESCE(CAST(NULLIF(payload->>'$$.frame_control_flags', '') AS SIGNED), 0),
-              more_data = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.more_data', ''),
-                NULLIF(payload->>'$$.mac.more_data', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              retry = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.retry', ''),
-                NULLIF(payload->>'$$.mac.retry', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              power_save = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.power_save', ''),
-                NULLIF(payload->>'$$.mac.power_save', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              protected = COALESCE(CASE LOWER(COALESCE(
-                NULLIF(payload->>'$$.protected', ''),
-                NULLIF(payload->>'$$.mac.protected', '')
-              )) WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
-              security_flags = COALESCE(CAST(NULLIF(payload->>'$$.security_flags', '') AS SIGNED), 0),
-              risk_score = CAST(NULLIF(payload->>'$$.risk_score', '') AS DOUBLE),
-              identity_source = NULLIF(payload->>'$$.identity_source', ''),
-              tags = CASE
-                WHEN JSON_TYPE(JSON_EXTRACT(payload, '$$.tags')) = 'ARRAY'
-                THEN JSON_EXTRACT(payload, '$$.tags')
-                ELSE NULL
-              END,
-              wps_device_name = NULLIF(payload->>'$$.wps_device_name', ''),
-              wps_manufacturer = NULLIF(payload->>'$$.wps_manufacturer', ''),
-              wps_model_name = NULLIF(payload->>'$$.wps_model_name', ''),
-              device_fingerprint = NULLIF(payload->>'$$.device_fingerprint', ''),
-              handshake_captured = COALESCE(CASE LOWER(NULLIF(payload->>'$$.handshake_captured', ''))
-                WHEN 'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN '0' THEN 0 ELSE NULL END, 0),
+              sensor_id = $sensorId,
+              location_id = $locationId,
+              username = $username,
+              event_type = $eventType,
+              schema_version = COALESCE($schemaVersion, 1),
+              frame_type = $frameType,
+              frame_subtype = $frameSubtype,
+              source_mac = LOWER($sourceMac),
+              transmitter_mac = LOWER($transmitterMac),
+              receiver_mac = LOWER($receiverMac),
+              bssid = LOWER($bssid),
+              destination_bssid = LOWER($destinationBssid),
+              ssid = $ssid,
+              signal_dbm = $signalDbm,
+              noise_dbm = $noiseDbm,
+              frequency_mhz = $frequencyMhz,
+              channel_flags = $channelFlags,
+              data_rate_kbps = $dataRateKbps,
+              antenna_id = $antennaId,
+              tsft = $tsft,
+              fragment_number = $fragmentNumber,
+              channel_number = $channelNumber,
+              signal_status = $signalStatus,
+              adjacent_mac_hint = LOWER($adjacentMacHint),
+              qos_tid = $qosTid,
+              qos_eosp = $qosEosp,
+              qos_ack_policy = $qosAckPolicy,
+              qos_ack_policy_label = $qosAckPolicyLabel,
+              qos_amsdu = $qosAmsdu,
+              llc_oui = $llcOui,
+              ethertype = $ethertype,
+              ethertype_name = $ethertypeName,
+              src_ip = $srcIp,
+              dst_ip = $dstIp,
+              ip_ttl = $ipTtl,
+              ip_protocol = $ipProtocol,
+              ip_protocol_name = $ipProtocolName,
+              src_port = $srcPort,
+              dst_port = $dstPort,
+              transport_protocol = $transportProtocol,
+              transport_length = $transportLength,
+              transport_checksum = $transportChecksum,
+              app_protocol = $appProtocol,
+              ssdp_message_type = $ssdpMessageType,
+              ssdp_st = $ssdpSt,
+              ssdp_mx = $ssdpMx,
+              ssdp_usn = $ssdpUsn,
+              dhcp_requested_ip = $dhcpRequestedIp,
+              dhcp_hostname = $dhcpHostname,
+              dhcp_vendor_class = $dhcpVendorClass,
+              dns_query_name = $dnsQueryName,
+              mdns_name = $mdnsName,
+              session_key = $sessionKey,
+              retransmit_key = $retransmitKey,
+              frame_fingerprint = $frameFingerprint,
+              payload_visibility = $payloadVisibility,
+              tsft_delta_us = $tsftDeltaUs,
+              wall_clock_delta_ms = $wallClockDeltaMs,
+              large_frame = COALESCE($largeFrame, 0),
+              mixed_encryption = $mixedEncryption,
+              dedupe_or_replay_suspect = COALESCE($dedupeOrReplaySuspect, 0),
+              raw_len = COALESCE($rawLen, 0),
+              frame_control_flags = COALESCE($frameControlFlags, 0),
+              more_data = COALESCE($moreData, 0),
+              retry = COALESCE($retry, 0),
+              power_save = COALESCE($powerSave, 0),
+              protected = COALESCE($protectedFlag, 0),
+              security_flags = COALESCE($securityFlags, 0),
+              risk_score = $riskScore,
+              identity_source = $identitySource,
+              tags = $tags,
+              wps_device_name = $wpsDeviceName,
+              wps_manufacturer = $wpsManufacturer,
+              wps_model_name = $wpsModelName,
+              device_fingerprint = $deviceFingerprint,
+              handshake_captured = COALESCE($handshakeCaptured, 0),
               updated_at = CURRENT_TIMESTAMP(6)
             WHERE dedupe_key = $dedupeKey
               AND stream_name = 'wireless.audit'
@@ -1223,13 +1230,13 @@ class TidbRepository(xa: Transactor[IO]):
             NOW(6), NOW(6)
           FROM (
             SELECT DISTINCT
-              LOWER(e.payload->>'$$.source_mac') AS source_mac,
+              e.source_mac,
               e.observed_at,
-              LOWER(COALESCE(NULLIF(TRIM(e.payload->>'$$.destination_bssid'), ''), NULLIF(TRIM(e.payload->>'$$.bssid'), ''))) AS destination_bssid,
-              e.payload->>'$$.ssid' AS ssid,
-              e.payload->>'$$.sensor_id' AS sensor_id,
-              e.payload->>'$$.location_id' AS location_id,
-              CAST(e.payload->>'$$.signal_dbm' AS SIGNED) AS signal_dbm
+              COALESCE(e.destination_bssid, e.bssid) AS destination_bssid,
+              e.ssid,
+              e.sensor_id,
+              e.location_id,
+              e.signal_dbm
             FROM sync_events e
             WHERE e.stream_name = 'wireless.audit'
               AND e.observed_at >= NOW(6) - """ ++ Fragment.const(s"INTERVAL $windowSecs SECOND") ++

@@ -108,6 +108,14 @@ class LockedTopicConsumerSuite extends FunSuite:
       new ExecutionException(new IllegalStateException("topic creation failed"))
     ))
 
+  test("topic provisioning reserves the expanded count for locked sync topics"):
+    val cfg = kafkaConfig
+
+    assertEquals(KafkaComponents.provisionedTopicPartitions(cfg, cfg.scanTopic), 24)
+    assertEquals(KafkaComponents.provisionedTopicPartitions(cfg, cfg.loadTopic + cfg.dlqSuffix), 24)
+    assertEquals(KafkaComponents.provisionedTopicPartitions(cfg, cfg.payloadAuditTopic), 3)
+    assertEquals(KafkaComponents.provisionedTopicPartitions(cfg, "wireless.mac.lookup"), 3)
+
   test("result codec preserves the locked result payload"):
     val expected = TidbResult(
       jobId = "job-1",

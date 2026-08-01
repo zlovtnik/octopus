@@ -376,6 +376,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val record = translatedAudit(rawJson, offset = 1L)
 
     for
+      _ <- parkPendingLoadOutboxes()
       decision <- persist(record, offset = 1L)
       claimedResult <- repository.claimOutbox(
         ownerId = "ack-integration-test",
@@ -405,6 +406,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val record = translatedAudit(rawJson, offset = 2L)
 
     for
+      _ <- parkPendingLoadOutboxes()
       decision <- persist(record, offset = 2L)
       claimedResult <- repository.claimOutbox(
         ownerId = "invalid-batch-integration-test",
@@ -417,14 +419,16 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       )
       _ = assertEquals(acknowledged, Right(true))
       state <- sql"""SELECT o.status, o.published_at IS NOT NULL, o.last_error,
-                            b.status, j.status,
+                            (SELECT b.status FROM sync_batches b
+                             WHERE b.batch_id = ${decision.batchId}),
+                            (SELECT j.status
+                             FROM sync_jobs j
+                             JOIN sync_batches b ON b.job_id = j.job_id
+                             WHERE b.batch_id = ${decision.batchId}),
                             (SELECT COUNT(*) FROM outbox_publish_attempts a
                              WHERE a.outbox_id = o.outbox_id
                                AND a.status = 'failed')
                      FROM outbox_events o
-                     JOIN sync_batches b ON b.outbox_id = o.outbox_id
-                                        AND b.batch_id = ${decision.batchId}
-                     JOIN sync_jobs j ON j.job_id = b.job_id
                      WHERE o.outbox_id = ${claimed.outboxId}
                      """
         .query[(String, Int, String, String, String, Long)]
@@ -639,6 +643,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(decision.disposition, IngestionDisposition.Processed)
       decision
     }
+
+  private def parkPendingLoadOutboxes(): IO[Unit] =
+    sql"""UPDATE outbox_events
+           SET status = 'failed',
+               last_error = 'superseded by integration test isolation',
+               updated_at = CURRENT_TIMESTAMP(6)
+           WHERE destination_topic = 'sync.oracle.load'
+             AND status = 'pending'""".update.run.void.transact(xa)
 
   private def requireRight[A](result: Either[DatabaseError, A]): A =
     result.fold(error => fail(s"${error.operation}: ${error.message}"), identity)

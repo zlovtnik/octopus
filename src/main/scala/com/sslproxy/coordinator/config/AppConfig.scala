@@ -218,6 +218,12 @@ object AppConfig:
 
   private def kafkaErrors(config: KafkaCfg): List[String] =
     List(
+      Option.when(config.maxPollRecords <= 0)(
+        "kafka.max-poll-records must be positive"
+      ),
+      Option.when(config.pollTimeoutMs <= 0L)(
+        "kafka.poll-timeout-ms must be positive"
+      ),
       Option.when(config.topicPartitions <= 0)(
         "kafka.topic-partitions must be positive"
       ),

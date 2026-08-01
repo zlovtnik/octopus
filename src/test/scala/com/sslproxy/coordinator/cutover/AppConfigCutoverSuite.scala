@@ -177,6 +177,7 @@ class AppConfigCutoverSuite extends FunSuite:
     val baseline = AppConfig.load
     val invalid = baseline.copy(
       kafka = baseline.kafka.copy(
+        maxPollRecords = 0,
         lockedBatchSize = baseline.kafka.maxPollRecords + 1,
         lockedBatchWindowMs = 0L
       )
@@ -185,6 +186,7 @@ class AppConfigCutoverSuite extends FunSuite:
     AppConfig.validate(invalid) match
       case Left(error) =>
         val messages = error.errors.toList
+        assert(messages.exists(_.contains("max-poll-records")))
         assert(messages.exists(_.contains("locked-batch-size")))
         assert(messages.exists(_.contains("locked-batch-window-ms")))
       case Right(_) => fail("expected invalid locked consumer batch configuration")

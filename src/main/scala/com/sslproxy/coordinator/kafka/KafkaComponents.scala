@@ -38,11 +38,12 @@ object KafkaComponents:
         val existing = admin.listTopics().names().get()
         if !existing.contains(topic) then
           val replicationFactor = cfg.topicReplicationFactor.toShort
-          val newTopic = new NewTopic(topic, cfg.topicPartitions, replicationFactor)
+          val partitions = provisionedTopicPartitions(cfg, topic)
+          val newTopic = new NewTopic(topic, partitions, replicationFactor)
           try
             admin.createTopics(Collections.singletonList(newTopic)).all().get()
             log.info("topic_provision", "status" -> "created",
-              "topic" -> topic, "partitions" -> cfg.topicPartitions.toString,
+              "topic" -> topic, "partitions" -> partitions.toString,
               "replication" -> replicationFactor.toString)
           catch
             case error if isTopicAlreadyExists(error) =>
@@ -57,6 +58,14 @@ object KafkaComponents:
       case _: TopicExistsException => true
       case execution: ExecutionException => execution.getCause.isInstanceOf[TopicExistsException]
       case _ => false
+
+  private[kafka] def provisionedTopicPartitions(cfg: KafkaCfg, topic: String): Int =
+    val baseTopic =
+      if cfg.dlqSuffix.nonEmpty && topic.endsWith(cfg.dlqSuffix) then
+        topic.dropRight(cfg.dlqSuffix.length)
+      else topic
+    val lockedTopics = Set(cfg.scanTopic, cfg.loadTopic, cfg.resultTopic)
+    if lockedTopics.contains(baseTopic) then cfg.topicPartitions else 3
 
   /** Ensure the topic exists on the broker, then block until it is ready for
     * consuming.  Uses a temporary consumer to probe `partitionsFor` with retry.

@@ -11,8 +11,11 @@ class AppConfigCutoverSuite extends FunSuite:
     val config = AppConfig.load
 
     assertEquals(config.tidb.enabled, false)
-    assertEquals(config.tidb.poolSize, 4)
-    assertEquals(config.kafka.topicPartitions, 5)
+    assertEquals(config.tidb.poolSize, 20)
+    assertEquals(config.tidb.healthcheckReserve, 2)
+    assertEquals(config.kafka.lockedBatchSize, 500)
+    assertEquals(config.kafka.lockedBatchWindowMs, 250L)
+    assertEquals(config.kafka.topicPartitions, 24)
     assertEquals(config.kafka.topicReplicationFactor, 3)
     assertEquals(config.cron.batchDispatchRetryMaxSeconds, 300)
     assertEquals(config.runtime, RuntimeConfig(processorsEnabled = false, consumersEnabled = false))
@@ -169,6 +172,33 @@ class AppConfigCutoverSuite extends FunSuite:
       case Left(error) =>
         assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
       case Right(_) => fail("expected unsafe topic replication rejection")
+
+  test("locked consumer batching must fit within a poll and use a positive window"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      kafka = baseline.kafka.copy(
+        lockedBatchSize = baseline.kafka.maxPollRecords + 1,
+        lockedBatchWindowMs = 0L
+      )
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        val messages = error.errors.toList
+        assert(messages.exists(_.contains("locked-batch-size")))
+        assert(messages.exists(_.contains("locked-batch-window-ms")))
+      case Right(_) => fail("expected invalid locked consumer batch configuration")
+
+  test("TiDB worker reserve must leave at least one pooled connection"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      tidb = enabledTiDb(baseline.tidb).copy(healthcheckReserve = baseline.tidb.poolSize)
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("healthcheck-reserve")))
+      case Right(_) => fail("expected invalid TiDB connection reserve")
 
   test("batch dispatch retry maximum must cover its base backoff"):
     val baseline = AppConfig.load

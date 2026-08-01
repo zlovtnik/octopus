@@ -186,7 +186,8 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `TIDB_DATABASE` | `coordinator` | TiDB database |
 | `TIDB_USER` | `root` | Disabled-mode default; enabled TiDB requires a non-root account |
 | `TIDB_PASSWORD` | *(empty)* | Required when TiDB is enabled |
-| `TIDB_POOL_SIZE` | `4` | Hikari/Doobie connection pool size |
+| `TIDB_POOL_SIZE` | `20` | Hikari/Doobie connection pool size |
+| `TIDB_HEALTHCHECK_RESERVE` | `2` | Pool connections reserved from worker admission for health/schema work |
 
 ### Redpanda Topics
 
@@ -231,6 +232,9 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `SYNC_IDLE_SLEEP_BACKOFF_MS` | `1000` | Backoff when idle |
 | `SYNC_SCAN_FETCH_COUNT` | `500` | Kafka `maxPollRecords` for scan consumer |
 | `SYNC_RESULT_FETCH_COUNT` | `200` | Kafka `maxPollRecords` for result consumer |
+| `COORDINATOR_LOCKED_BATCH_SIZE` | `500` | Maximum records processed and committed per locked-topic partition batch |
+| `COORDINATOR_LOCKED_BATCH_WINDOW_MS` | `250` | Maximum wait used to form a locked-topic batch |
+| `SYNC_REDPANDA_TOPIC_PARTITIONS` | `24` | Partition count for the locked sync topics |
 | `SYNC_SCAN_CONSUMERS_COUNT` | `1` | Concurrent consumers for scan topic |
 | `SYNC_RESULT_CONSUMERS_COUNT` | `1` | Concurrent consumers for result topic |
 | `WIRELESS_CONSUMERS_COUNT` | `1` | Concurrent consumers per wireless handler |
@@ -264,7 +268,8 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `TIDB_DATABASE` | `coordinator` | TiDB database |
 | `TIDB_USER` | `root` | Disabled-mode default; a least-privilege non-root account is required when enabled |
 | `TIDB_PASSWORD` | *(empty)* | Required when enabled |
-| `TIDB_POOL_SIZE` | `4` | Connection pool size |
+| `TIDB_POOL_SIZE` | `20` | Connection pool size |
+| `TIDB_HEALTHCHECK_RESERVE` | `2` | Connections kept outside the worker semaphore for health/schema work |
 | `TIDB_CONNECTION_TIMEOUT_MS` | `5000` | Pool connection timeout |
 | `TIDB_STATEMENT_TIMEOUT_SECS` | `30` | Statement/network timeout |
 | `TIDB_WARN_ONLY` | `false` | Schema validation mode; must remain `false` when enabled |

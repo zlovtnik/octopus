@@ -507,6 +507,53 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     requireDocker()
     new TidbSchemaPreflight(schemaTransactor, schemaConfig).validate()
 
+  test("scan request evidence batch rolls back atomically when one record is invalid"):
+    requireDocker()
+    val group = "octopus-scan-batch-atomic-v1"
+    val first = translatedAudit(
+      """{"observed_at":"2026-07-31T20:10:00Z","host":"batch-first.example"}""",
+      offset = 9101L
+    )
+    val second = translatedAudit(
+      """{"observed_at":"2026-07-31T20:10:01Z","host":"batch-second.example"}""",
+      offset = 9102L
+    )
+    val firstMetadata = BrokerRecordMetadata(
+      topic = "sync.scan.request",
+      partition = 7,
+      offset = 9101L,
+      consumerGroup = group,
+      groupVersion = 1,
+      artifactSha256 = ArtifactSha256,
+      messageKey = None,
+      payloadSha256 = first.sourceRecordSha256
+    )
+    val invalidSecondMetadata = firstMetadata.copy(
+      offset = 9102L,
+      payloadSha256 = "f" * 64
+    )
+
+    for
+      result <- repository.recordScanRequestsWithEvidence(List(
+        first -> firstMetadata,
+        second -> invalidSecondMetadata
+      ))
+      evidenceCount <- sql"""SELECT COUNT(*) FROM ingestion_evidence
+                              WHERE group_id = $group
+                                AND topic = 'sync.scan.request'
+                                AND partition_id = 7
+                                AND record_offset IN (9101, 9102)"""
+        .query[Long].unique.transact(xa)
+      eventCount <- (fr"""SELECT COUNT(*) FROM sync_events
+                            WHERE stream_name = 'proxy.payload_audit'
+                              AND dedupe_key IN (""" ++
+        List(first.dedupeKey, second.dedupeKey).map(value => fr0"$value").intercalate(fr",") ++
+        fr")").query[Long].unique.transact(xa)
+    yield
+      assert(result.isLeft)
+      assertEquals(evidenceCount, 0L)
+      assertEquals(eventCount, 0L)
+
   test("concurrent outbox claims lease each eligible row exactly once"):
     requireDocker()
     val topic = "test.concurrent.claim"

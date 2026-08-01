@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
@@ -37,26 +38,24 @@ object ScanRequestStream:
         case Right(cutoffs) =>
           IO.pure(cutoffs)
       }
-    ) { locked =>
+    ) { lockedRecords =>
       for
-        request <- IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value))
-        _ <- if request.streamName != "proxy.events" then
-          IO(log.debug("scan_request_consumer",
-            "status" -> "skipped",
-            "stream_name" -> request.streamName,
-            "group" -> locked.metadata.consumerGroup,
-            "partition" -> locked.metadata.partition.toString,
-            "offset" -> locked.metadata.offset.toString))
-        else
+        decoded <- lockedRecords.traverse { locked =>
+          IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value)).map(locked -> _)
+        }
+        relevant = decoded.filter { case (_, request) => request.streamName == "proxy.events" }
+        resolved <- relevant.traverse { case (locked, request) =>
+          IO.blocking(payloadResolver.resolve(request)).map((locked, request, _))
+        }
+        decisions <- dbSemaphore.permit.use { _ =>
+          KafkaDatabaseResult.require(
+            repo.recordScanRequestsWithEvidence(
+              resolved.map { case (locked, _, record) => record -> locked.metadata }
+            )
+          )
+        }
+        _ <- resolved.zip(decisions).traverse_ { case ((locked, request, _), decision) =>
           for
-            decision <- dbSemaphore.permit.use { _ =>
-              for
-                resolved <- IO.blocking(payloadResolver.resolve(request))
-                decision <- KafkaDatabaseResult.require(
-                  repo.recordScanRequestWithEvidence(resolved, locked.metadata)
-                )
-              yield decision
-            }
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
             )
@@ -67,5 +66,15 @@ object ScanRequestStream:
               "partition" -> locked.metadata.partition.toString,
               "offset" -> locked.metadata.offset.toString))
           yield ()
+        }
+        _ <- decoded.filter { case (_, request) => request.streamName != "proxy.events" }
+          .traverse_ { case (locked, request) =>
+            IO(log.debug("scan_request_consumer",
+              "status" -> "skipped",
+              "stream_name" -> request.streamName,
+              "group" -> locked.metadata.consumerGroup,
+              "partition" -> locked.metadata.partition.toString,
+              "offset" -> locked.metadata.offset.toString))
+          }
       yield ()
     }

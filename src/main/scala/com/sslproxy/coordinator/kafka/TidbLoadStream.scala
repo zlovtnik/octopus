@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbRepository}
@@ -34,22 +35,30 @@ object TidbLoadStream:
         case Right(cutoffs) =>
           IO.pure(cutoffs)
       }
-    ) { locked =>
+    ) { lockedRecords =>
       dbSemaphore.permit.use { _ =>
         for
-          load <- IO.fromEither(KafkaComponents.deserializeLoad(locked.record.value))
-          _ <- IO(log.info("tidb_load_consumer", "status" -> "processing",
-            "batch_id" -> load.batchId, "stream_name" -> load.streamName,
-            "group" -> locked.metadata.consumerGroup,
-            "partition" -> locked.metadata.partition.toString,
-            "offset" -> locked.metadata.offset.toString))
-          result <- handler.handle(load)
+          decoded <- lockedRecords.traverse { locked =>
+            IO.fromEither(KafkaComponents.deserializeLoad(locked.record.value)).map(locked -> _)
+          }
+          handled <- decoded.traverse { case (locked, load) =>
+            IO(log.info("tidb_load_consumer", "status" -> "processing",
+              "batch_id" -> load.batchId, "stream_name" -> load.streamName,
+              "group" -> locked.metadata.consumerGroup,
+              "partition" -> locked.metadata.partition.toString,
+              "offset" -> locked.metadata.offset.toString)) *>
+              handler.handle(load).map(result => (locked, load, result))
+          }
           _ <- KafkaDatabaseResult.require(
-            repo.recordLoadResultWithEvidence(load, result, locked.metadata)
+            repo.recordLoadResultsWithEvidence(
+              handled.map { case (locked, load, result) => (load, result, locked.metadata) }
+            )
           )
-          _ <- IO(log.info("tidb_load_consumer", "status" -> "durable",
-            "batch_id" -> load.batchId, "result_status" -> result.status,
-            "row_count" -> result.rowCount.toString))
+          _ <- handled.traverse_ { case (_, load, result) =>
+            IO(log.info("tidb_load_consumer", "status" -> "durable",
+              "batch_id" -> load.batchId, "result_status" -> result.status,
+              "row_count" -> result.rowCount.toString))
+          }
         yield ()
       }
     }

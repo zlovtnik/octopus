@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.TidbRepository
@@ -33,18 +34,24 @@ object TidbResultStream:
         case Right(cutoffs) =>
           IO.pure(cutoffs)
       }
-    ) { locked =>
+    ) { lockedRecords =>
       for
-        result <- IO.fromEither(KafkaComponents.deserializeResult(locked.record.value))
+        decoded <- lockedRecords.traverse { locked =>
+          IO.fromEither(KafkaComponents.deserializeResult(locked.record.value)).map(locked -> _)
+        }
         _ <- dbSemaphore.permit.use { _ =>
           KafkaDatabaseResult.require(
-            repo.recordResultWithEvidence(result, locked.metadata)
+            repo.recordResultsWithEvidence(
+              decoded.map { case (locked, result) => result -> locked.metadata }
+            )
           )
         }
-        _ <- IO(log.info("tidb_result_consumer", "status" -> "recorded",
-          "batch_id" -> result.batchId, "result_status" -> result.status,
-          "group" -> locked.metadata.consumerGroup,
-          "partition" -> locked.metadata.partition.toString,
-          "offset" -> locked.metadata.offset.toString))
+        _ <- decoded.traverse_ { case (locked, result) =>
+          IO(log.info("tidb_result_consumer", "status" -> "recorded",
+            "batch_id" -> result.batchId, "result_status" -> result.status,
+            "group" -> locked.metadata.consumerGroup,
+            "partition" -> locked.metadata.partition.toString,
+            "offset" -> locked.metadata.offset.toString))
+        }
       yield ()
     }

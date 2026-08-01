@@ -7,7 +7,7 @@ import com.sslproxy.coordinator.cutover.{CutoffKey, CutoverError, CutoverOffsetE
 import com.sslproxy.coordinator.domain.BrokerRecordMetadata
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
-import fs2.kafka.{CommittableConsumerRecord, CommittableOffset, CommittableOffsetBatch, ConsumerRecord, KafkaConsumer, KafkaProducer, ProducerRecord, ProducerRecords}
+import fs2.kafka.{CommittableConsumerRecord, CommittableOffsetBatch, ConsumerRecord, KafkaConsumer, KafkaProducer, ProducerRecord, ProducerRecords}
 import io.circe.Json
 import org.apache.kafka.common.TopicPartition
 import com.sslproxy.coordinator.observability.StructuredLogger

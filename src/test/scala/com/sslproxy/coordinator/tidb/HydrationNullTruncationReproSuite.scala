@@ -153,9 +153,14 @@ class HydrationNullTruncationReproSuite extends CatsEffectSuite:
         |"retry":null,"power_save":null,"protected":null,"security_flags":null,"risk_score":null,
         |"handshake_captured":null}""".stripMargin.replaceAll("\\s+", "")
     val allNullStrings = allNullInts.replace(":null", ":\"null\"").replace("fuzz-nulls", "fuzz-strings")
+    val oversizedText = io.circe.Json.obj(
+      "sensor_id" -> io.circe.Json.fromString("fuzz-oversized-text"),
+      "adjacent_mac_hint" -> io.circe.Json.fromString("a" * 18)
+    ).noSpaces
     val payloads = List(
       "all-json-null" -> allNullInts,
       "all-quoted-null" -> allNullStrings,
+      "oversized-text" -> oversizedText,
       "nested-containers-null" ->
         """{"sensor_id":"fuzz-nested","rf":null,"mac":null,"qos":null,"network":null,
           |"transport":null,"application":null,"correlation":null,"anomalies":null,

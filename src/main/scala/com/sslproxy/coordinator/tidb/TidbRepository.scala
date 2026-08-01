@@ -447,11 +447,16 @@ class TidbRepository(xa: Transactor[IO]):
   private def coalesceJson(projections: List[Fragment]): Fragment =
     fr0"COALESCE(" ++ projections.intercalate(fr0", ") ++ fr0")"
 
-  private def jsonText(path: String, aliases: String*): Fragment =
+  private def jsonText(maxLength: Int, path: String, aliases: String*): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
-      fr0"CASE WHEN $candidateType = 'STRING' THEN NULLIF($candidateText, '') ELSE NULL END"
+      fr0"""CASE
+           WHEN $candidateType = 'STRING'
+            AND CHAR_LENGTH($candidateText) <= $maxLength
+           THEN NULLIF($candidateText, '')
+           ELSE NULL
+         END"""
     })
 
   private def jsonInteger(
@@ -542,24 +547,25 @@ class TidbRepository(xa: Transactor[IO]):
     val longMinMagnitude = "9223372036854775808"
 
     val project =
-      val sensorId = jsonText("$.sensor_id")
-      val locationId = jsonText("$.location_id")
-      val username = jsonText("$.username")
-      val eventType = jsonText("$.event_type", "$.type")
+      val sensorId = jsonText(64, "$.sensor_id")
+      val locationId = jsonText(128, "$.location_id")
+      val username = jsonText(255, "$.username")
+      val eventType = jsonText(64, "$.event_type", "$.type")
       val schemaVersion = jsonInteger("$.schema_version")()
-      val frameType = jsonText("$.frame_type", "$.mac.frame_type")
-      val frameSubtype = jsonText("$.frame_subtype", "$.mac.frame_subtype")
-      val sourceMac = jsonText("$.source_mac", "$.mac.source_mac")
-      val transmitterMac = jsonText("$.transmitter_mac", "$.mac.transmitter_mac")
-      val receiverMac = jsonText("$.receiver_mac", "$.mac.receiver_mac")
-      val bssid = jsonText("$.bssid", "$.mac.bssid")
+      val frameType = jsonText(32, "$.frame_type", "$.mac.frame_type")
+      val frameSubtype = jsonText(64, "$.frame_subtype", "$.mac.frame_subtype")
+      val sourceMac = jsonText(17, "$.source_mac", "$.mac.source_mac")
+      val transmitterMac = jsonText(17, "$.transmitter_mac", "$.mac.transmitter_mac")
+      val receiverMac = jsonText(17, "$.receiver_mac", "$.mac.receiver_mac")
+      val bssid = jsonText(17, "$.bssid", "$.mac.bssid")
       val destinationBssid = jsonText(
+        17,
         "$.destination_bssid",
         "$.destination_mac",
         "$.mac.destination_mac",
         "$.mac.bssid"
       )
-      val ssid = jsonText("$.ssid")
+      val ssid = jsonText(256, "$.ssid")
       val signalDbm = jsonInteger("$.signal_dbm", "$.rf.signal_dbm")()
       val noiseDbm = jsonInteger("$.noise_dbm", "$.rf.noise_dbm")()
       val frequencyMhz = jsonInteger("$.frequency_mhz", "$.rf.frequency_mhz")()
@@ -569,40 +575,40 @@ class TidbRepository(xa: Transactor[IO]):
       val tsft = jsonInteger("$.tsft", "$.rf.tsft")(longMax, longMinMagnitude)
       val fragmentNumber = jsonInteger("$.fragment_number", "$.mac.fragment_number")()
       val channelNumber = jsonInteger("$.channel_number", "$.channel", "$.rf.channel_number")()
-      val signalStatus = jsonText("$.signal_status", "$.rf.signal_status")
-      val adjacentMacHint = jsonText("$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
+      val signalStatus = jsonText(64, "$.signal_status", "$.rf.signal_status")
+      val adjacentMacHint = jsonText(17, "$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
       val qosTid = jsonInteger("$.qos_tid", "$.qos.tid")()
       val qosEosp = jsonBoolean("$.qos_eosp", "$.qos.eosp")
       val qosAckPolicy = jsonInteger("$.qos_ack_policy", "$.qos.ack_policy")()
-      val qosAckPolicyLabel = jsonText("$.qos_ack_policy_label", "$.qos.ack_policy_label")
+      val qosAckPolicyLabel = jsonText(64, "$.qos_ack_policy_label", "$.qos.ack_policy_label")
       val qosAmsdu = jsonBoolean("$.qos_amsdu", "$.qos.amsdu")
-      val llcOui = jsonText("$.llc_oui", "$.llc_snap.oui")
+      val llcOui = jsonText(16, "$.llc_oui", "$.llc_snap.oui")
       val ethertype = jsonInteger("$.ethertype", "$.llc_snap.ethertype")()
-      val ethertypeName = jsonText("$.ethertype_name", "$.llc_snap.ethertype_name")
-      val srcIp = jsonText("$.src_ip", "$.network.src_ip")
-      val dstIp = jsonText("$.dst_ip", "$.network.dst_ip")
+      val ethertypeName = jsonText(64, "$.ethertype_name", "$.llc_snap.ethertype_name")
+      val srcIp = jsonText(45, "$.src_ip", "$.network.src_ip")
+      val dstIp = jsonText(45, "$.dst_ip", "$.network.dst_ip")
       val ipTtl = jsonInteger("$.ip_ttl", "$.network.ttl")()
       val ipProtocol = jsonInteger("$.ip_protocol", "$.network.protocol")()
-      val ipProtocolName = jsonText("$.ip_protocol_name", "$.network.protocol_name")
+      val ipProtocolName = jsonText(64, "$.ip_protocol_name", "$.network.protocol_name")
       val srcPort = jsonInteger("$.src_port", "$.transport.src_port")()
       val dstPort = jsonInteger("$.dst_port", "$.transport.dst_port")()
-      val transportProtocol = jsonText("$.transport_protocol", "$.transport.protocol")
+      val transportProtocol = jsonText(32, "$.transport_protocol", "$.transport.protocol")
       val transportLength = jsonInteger("$.transport_length", "$.transport.length")()
       val transportChecksum = jsonInteger("$.transport_checksum", "$.transport.checksum")()
-      val appProtocol = jsonText("$.app_protocol", "$.application.protocol")
-      val ssdpMessageType = jsonText("$.ssdp_message_type", "$.application.ssdp.message_type")
-      val ssdpSt = jsonText("$.ssdp_st", "$.application.ssdp.st")
-      val ssdpMx = jsonText("$.ssdp_mx", "$.application.ssdp.mx")
-      val ssdpUsn = jsonText("$.ssdp_usn", "$.application.ssdp.usn")
-      val dhcpRequestedIp = jsonText("$.dhcp_requested_ip", "$.application.dhcp.requested_ip")
-      val dhcpHostname = jsonText("$.dhcp_hostname", "$.application.dhcp.hostname")
-      val dhcpVendorClass = jsonText("$.dhcp_vendor_class", "$.application.dhcp.vendor_class")
-      val dnsQueryName = jsonText("$.dns_query_name", "$.application.dns.query_names[0]")
-      val mdnsName = jsonText("$.mdns_name", "$.application.mdns.query_names[0]")
-      val sessionKey = jsonText("$.session_key", "$.correlation.session_key")
-      val retransmitKey = jsonText("$.retransmit_key", "$.correlation.retransmit_key")
-      val frameFingerprint = jsonText("$.frame_fingerprint", "$.correlation.frame_fingerprint")
-      val payloadVisibility = jsonText("$.payload_visibility", "$.correlation.payload_visibility")
+      val appProtocol = jsonText(64, "$.app_protocol", "$.application.protocol")
+      val ssdpMessageType = jsonText(64, "$.ssdp_message_type", "$.application.ssdp.message_type")
+      val ssdpSt = jsonText(512, "$.ssdp_st", "$.application.ssdp.st")
+      val ssdpMx = jsonText(64, "$.ssdp_mx", "$.application.ssdp.mx")
+      val ssdpUsn = jsonText(512, "$.ssdp_usn", "$.application.ssdp.usn")
+      val dhcpRequestedIp = jsonText(45, "$.dhcp_requested_ip", "$.application.dhcp.requested_ip")
+      val dhcpHostname = jsonText(253, "$.dhcp_hostname", "$.application.dhcp.hostname")
+      val dhcpVendorClass = jsonText(255, "$.dhcp_vendor_class", "$.application.dhcp.vendor_class")
+      val dnsQueryName = jsonText(253, "$.dns_query_name", "$.application.dns.query_names[0]")
+      val mdnsName = jsonText(253, "$.mdns_name", "$.application.mdns.query_names[0]")
+      val sessionKey = jsonText(255, "$.session_key", "$.correlation.session_key")
+      val retransmitKey = jsonText(255, "$.retransmit_key", "$.correlation.retransmit_key")
+      val frameFingerprint = jsonText(255, "$.frame_fingerprint", "$.correlation.frame_fingerprint")
+      val payloadVisibility = jsonText(64, "$.payload_visibility", "$.correlation.payload_visibility")
       val tsftDeltaUs = jsonInteger("$.tsft_delta_us", "$.correlation.tsft_delta_us")(
         longMax,
         longMinMagnitude
@@ -625,12 +631,12 @@ class TidbRepository(xa: Transactor[IO]):
       val protectedFlag = jsonBoolean("$.protected", "$.mac.protected")
       val securityFlags = jsonInteger("$.security_flags")(intMax, intMinMagnitude)
       val riskScore = jsonDouble("$.risk_score")
-      val identitySource = jsonText("$.identity_source")
+      val identitySource = jsonText(64, "$.identity_source")
       val tags = jsonArray("$.tags")
-      val wpsDeviceName = jsonText("$.wps_device_name")
-      val wpsManufacturer = jsonText("$.wps_manufacturer")
-      val wpsModelName = jsonText("$.wps_model_name")
-      val deviceFingerprint = jsonText("$.device_fingerprint")
+      val wpsDeviceName = jsonText(255, "$.wps_device_name")
+      val wpsManufacturer = jsonText(255, "$.wps_manufacturer")
+      val wpsModelName = jsonText(255, "$.wps_model_name")
+      val deviceFingerprint = jsonText(255, "$.device_fingerprint")
       val handshakeCaptured = jsonBoolean("$.handshake_captured")
 
       fr"""UPDATE sync_events

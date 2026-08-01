@@ -153,13 +153,20 @@ class HydrationNullTruncationReproSuite extends CatsEffectSuite:
         |"retry":null,"power_save":null,"protected":null,"security_flags":null,"risk_score":null,
         |"handshake_captured":null}""".stripMargin.replaceAll("\\s+", "")
     val allNullStrings = allNullInts.replace(":null", ":\"null\"").replace("fuzz-nulls", "fuzz-strings")
+    val validAdjacentMacHint = "AA:BB:CC:DD:EE:01~AA:BB:CC:DD:EE:02"
+    val validAdjacentMacPayload = io.circe.Json.obj(
+      "sensor_id" -> io.circe.Json.fromString("fuzz-valid-adjacent-mac"),
+      "adjacent_mac_hint" -> io.circe.Json.fromString(validAdjacentMacHint)
+    ).noSpaces
+    val validAdjacentMacHash = Sha256Utils.sha256Hex(validAdjacentMacPayload)
     val oversizedText = io.circe.Json.obj(
       "sensor_id" -> io.circe.Json.fromString("fuzz-oversized-text"),
-      "adjacent_mac_hint" -> io.circe.Json.fromString("a" * 18)
+      "adjacent_mac_hint" -> io.circe.Json.fromString("a" * 513)
     ).noSpaces
     val payloads = List(
       "all-json-null" -> allNullInts,
       "all-quoted-null" -> allNullStrings,
+      "valid-adjacent-mac-hint" -> validAdjacentMacPayload,
       "oversized-text" -> oversizedText,
       "nested-containers-null" ->
         """{"sensor_id":"fuzz-nested","rf":null,"mac":null,"qos":null,"network":null,
@@ -194,33 +201,40 @@ class HydrationNullTruncationReproSuite extends CatsEffectSuite:
           .stripMargin.replaceAll("\\s+", "")
     )
 
-    payloads.traverse { case (label, payload) =>
-      val hash = Sha256Utils.sha256Hex(payload)
-      val ref = inlineRef(payload)
-      val insert = sql"""INSERT INTO sync_events (
-                           dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
-                           payload, status, producer, payload_archived
-                         ) VALUES (
-                           $hash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:00'),
-                           $ref, $hash, $payload, 'completed', 'ssl-proxy', 0
-                         )""".update.run
-      val candidate = SyncEventHydrationCandidate(
-        hash,
-        "wireless.audit",
-        Timestamp.valueOf(observed),
-        ref,
-        Some(payload)
-      )
-      for
-        _ <- insert.transact(xa)
-        result <- repository.hydrateExistingSyncEvent(candidate, payload)
-      yield (label, result)
-    }.map { results =>
+    for
+      results <- payloads.traverse { case (label, payload) =>
+        val hash = Sha256Utils.sha256Hex(payload)
+        val ref = inlineRef(payload)
+        val insert = sql"""INSERT INTO sync_events (
+                             dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+                             payload, status, producer, payload_archived
+                           ) VALUES (
+                             $hash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:00'),
+                             $ref, $hash, $payload, 'completed', 'ssl-proxy', 0
+                           )""".update.run
+        val candidate = SyncEventHydrationCandidate(
+          hash,
+          "wireless.audit",
+          Timestamp.valueOf(observed),
+          ref,
+          Some(payload)
+        )
+        for
+          _ <- insert.transact(xa)
+          result <- repository.hydrateExistingSyncEvent(candidate, payload)
+        yield (label, result)
+      }
+      storedAdjacentMacHint <- sql"""SELECT adjacent_mac_hint
+                                      FROM sync_events
+                                      WHERE dedupe_key = $validAdjacentMacHash
+                                        AND stream_name = 'wireless.audit'"""
+        .query[Option[String]].unique.transact(xa)
+    yield
       val failures = results.collect { case (label, Left(error)) => s"$label: ${error.message}" }
       assertEquals(failures, Nil, "fuzz battery must hydrate without db errors")
       val notHydrated = results.collect { case (label, Right(false)) => label }
       assertEquals(notHydrated, Nil, "every fuzz row must report hydrated=true")
-    }
+      assertEquals(storedAdjacentMacHint, Some(validAdjacentMacHint.toLowerCase))
 
   private def inlineRef(payload: String): String =
     "inline://json/" + Base64.getUrlEncoder.withoutPadding

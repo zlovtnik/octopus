@@ -576,7 +576,7 @@ class TidbRepository(xa: Transactor[IO]):
       val fragmentNumber = jsonInteger("$.fragment_number", "$.mac.fragment_number")()
       val channelNumber = jsonInteger("$.channel_number", "$.channel", "$.rf.channel_number")()
       val signalStatus = jsonText(64, "$.signal_status", "$.rf.signal_status")
-      val adjacentMacHint = jsonText(17, "$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
+      val adjacentMacHint = jsonText(512, "$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
       val qosTid = jsonInteger("$.qos_tid", "$.qos.tid")()
       val qosEosp = jsonBoolean("$.qos_eosp", "$.qos.eosp")
       val qosAckPolicy = jsonInteger("$.qos_ack_policy", "$.qos.ack_policy")()

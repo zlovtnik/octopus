@@ -9,8 +9,8 @@ import org.slf4j.{Logger, LoggerFactory}
   * Logstash StructuredArguments so the LogstashLogbackEncoder in
   * logback.xml renders them as top-level JSON properties.
   *
-  * Value types are restricted to String/Int/Long/Double/Boolean — no Any,
-  * stays wartremover-clean. If a value doesn't fit, `.toString` it first.
+  * Field values are strings. Convert non-string values with `.toString`
+  * before passing them to this logger.
   */
 final class StructuredLogger private (underlying: Logger):
 

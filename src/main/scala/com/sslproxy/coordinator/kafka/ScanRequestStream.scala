@@ -54,6 +54,11 @@ object ScanRequestStream:
             )
           )
         }
+        _ <- IO.raiseUnless(decisions.sizeIs == resolved.size)(
+          IllegalStateException(
+            s"recordScanRequestsWithEvidence returned ${decisions.size} decisions for ${resolved.size} records"
+          )
+        )
         _ <- resolved.zip(decisions).traverse_ { case ((locked, request, _), decision) =>
           for
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(

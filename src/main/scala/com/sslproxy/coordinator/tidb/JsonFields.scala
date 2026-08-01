@@ -22,6 +22,10 @@ object JsonFields:
   def optionalString(row: Json, field: String): Option[String] =
     row.hcursor.get[String](field).toOption.filter(_.nonEmpty)
 
+  /** Present string, preserving empty values (e.g. hidden SSID); absent/null → None. */
+  def presentString(row: Json, field: String): Option[String] =
+    row.hcursor.get[String](field).toOption
+
   def requiredLong(row: Json, field: String, context: String): Long =
     row.hcursor.get[Long](field) match
       case Right(value) => value

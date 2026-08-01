@@ -188,7 +188,7 @@ object WirelessConsumerService:
         case Left(err) if remaining > 1 =>
           IO(log.warn("probe_flush", "status" -> "retry",
             "attempts_remaining" -> (remaining - 1).toString, "error" -> err.message)) *>
-            IO.sleep(RetryDelay) *>
+            IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
             attemptWithRetry(payload, pgRepo, remaining - 1, dlqTopic, producer, dbSemaphore)
         case Left(err) =>
           IO(log.error("probe_flush", "status" -> "dlq",

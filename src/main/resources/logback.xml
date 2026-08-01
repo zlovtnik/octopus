@@ -9,7 +9,7 @@
       </fieldNames>
     </encoder>
   </appender>
-  <root level="INFO">
+  <root level="${LOG_LEVEL:-INFO}">
     <appender-ref ref="STDOUT" />
   </root>
 </configuration>

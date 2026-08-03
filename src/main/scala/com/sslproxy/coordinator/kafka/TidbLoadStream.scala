@@ -22,6 +22,7 @@ object TidbLoadStream:
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.loadConsumer, cfg.loadTopic, artifact, producer,
+      KafkaComponents.deserializeLoad,
       repo.loadConsumerOffsets(cfg.loadConsumer, cfg.loadTopic).flatMap {
         case Left(err) =>
           IO(log.error("tidb_load_consumer",
@@ -38,10 +39,8 @@ object TidbLoadStream:
     ) { lockedRecords =>
       dbSemaphore.permit.use { _ =>
         for
-          decoded <- lockedRecords.traverse { locked =>
-            IO.fromEither(KafkaComponents.deserializeLoad(locked.record.value)).map(locked -> _)
-          }
-          handled <- decoded.traverse { case (locked, load) =>
+          handled <- lockedRecords.traverse { locked =>
+            val load = locked.decoded
             IO(log.info("tidb_load_consumer", "status" -> "processing",
               "batch_id" -> load.batchId, "stream_name" -> load.streamName,
               "group" -> locked.metadata.consumerGroup,

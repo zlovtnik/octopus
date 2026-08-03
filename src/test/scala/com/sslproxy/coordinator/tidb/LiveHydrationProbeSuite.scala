@@ -11,10 +11,10 @@ import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
 
 class LiveHydrationProbeSuite extends CatsEffectSuite:
-  test("reproduce one production hydration candidate in a temporary table"):
+  test("reproduce production hydration candidates in an isolated scratch database"):
     if !sys.env.get("OCTOPUS_LIVE_HYDRATION_PROBE").contains("true") then
       IO(assume(false, "set OCTOPUS_LIVE_HYDRATION_PROBE=true to enable the live probe"))
-    else resources.use { case (dataSource, executor, database) =>
+    else resources.use { case (dataSource, executor, sourceDatabase, scratchDatabase) =>
       val xa = Transactor.fromDataSource[IO](
         dataSource,
         ExecutionContext.fromExecutorService(executor)
@@ -22,7 +22,7 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       val repository = new TidbRepository(xa)
 
       for
-        seeds <- IO.blocking(seedTemporaryTable(dataSource, database))
+        seeds <- IO.blocking(seedScratchTables(dataSource, sourceDatabase, scratchDatabase))
         results <- seeds.traverse { case (candidate, payload) =>
           repository.hydrateExistingSyncEvent(candidate, payload)
         }
@@ -34,6 +34,15 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
     Resource.make(IO.blocking {
       val database = requiredEnv("OCTOPUS_LIVE_TIDB_DATABASE")
       require(database.matches("[A-Za-z0-9_]+"), "OCTOPUS_LIVE_TIDB_DATABASE must be a safe identifier")
+      val scratchDatabase = requiredEnv("OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE")
+      require(
+        scratchDatabase.matches("[A-Za-z0-9_]+"),
+        "OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE must be a safe identifier"
+      )
+      require(
+        scratchDatabase != database,
+        "OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE must differ from OCTOPUS_LIVE_TIDB_DATABASE"
+      )
       val config = new HikariConfig()
       config.setJdbcUrl(requiredEnv("OCTOPUS_LIVE_TIDB_JDBC_URL"))
       config.setUsername(requiredEnv("OCTOPUS_LIVE_TIDB_USER"))
@@ -41,23 +50,31 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       config.setDriverClassName("com.mysql.cj.jdbc.Driver")
       config.setMaximumPoolSize(1)
       config.setMinimumIdle(1)
-      (new HikariDataSource(config), Executors.newSingleThreadExecutor(), database)
-    }) { case (dataSource, executor, _) =>
+      config.setCatalog(scratchDatabase)
+      (new HikariDataSource(config), Executors.newSingleThreadExecutor(), database, scratchDatabase)
+    }) { case (dataSource, executor, _, scratchDatabase) =>
       IO.blocking {
-        dataSource.close()
-        executor.shutdown()
+        try dropScratchTables(dataSource, scratchDatabase)
+        finally
+          dataSource.close()
+          executor.shutdown()
       }
     }
 
-  private def seedTemporaryTable(
+  private def seedScratchTables(
       dataSource: HikariDataSource,
-      database: String
+      sourceDatabase: String,
+      scratchDatabase: String
   ): List[(SyncEventHydrationCandidate, String)] =
     val connection = dataSource.getConnection
     try
-      val sourceTable = s"`$database`.`sync_events`"
+      connection.setCatalog(scratchDatabase)
+      val sourceTable = s"`$sourceDatabase`.`sync_events`"
+      val scratchTable = s"`$scratchDatabase`.`sync_events`"
+      val sourceTombstones = s"`$sourceDatabase`.`sync_event_tombstones`"
+      val scratchTombstones = s"`$scratchDatabase`.`sync_event_tombstones`"
       val select = connection.prepareStatement(
-        """SELECT dedupe_key, stream_name, observed_at, payload_ref
+        """SELECT dedupe_key, stream_name, observed_at, payload_ref, payload_sha256
           |FROM %s e
           |WHERE payload_archived = 0
           |  AND stream_name = 'wireless.audit'
@@ -74,7 +91,8 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
           result.getString(2),
           result.getTimestamp(3),
           result.getString(4),
-          None
+          None,
+          Option(result.getString(5))
         )
       result.close()
       select.close()
@@ -82,9 +100,10 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       if candidateList.isEmpty then fail("expected production hydration candidates")
 
       val setup = connection.createStatement()
-      setup.execute(s"CREATE TEMPORARY TABLE sync_events_seed LIKE $sourceTable")
+      setup.execute(s"CREATE TABLE $scratchTable LIKE $sourceTable")
+      setup.execute(s"CREATE TABLE $scratchTombstones LIKE $sourceTombstones")
       val copy = connection.prepareStatement(
-        """INSERT INTO sync_events_seed
+        s"""INSERT INTO $scratchTable
           |SELECT * FROM %s
           |WHERE payload_archived = 0
           |  AND stream_name = 'wireless.audit'
@@ -95,12 +114,23 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       )
       copy.executeUpdate()
       copy.close()
-      setup.execute(s"CREATE TEMPORARY TABLE sync_events LIKE $sourceTable")
-      setup.execute("INSERT INTO sync_events SELECT * FROM sync_events_seed")
       setup.close()
 
       val resolver = new TidbPayloadResolver("/unused")
       candidateList.map(candidate => candidate -> resolver.resolvePayload(candidate.payloadRef))
+    finally connection.close()
+
+  private def dropScratchTables(
+      dataSource: HikariDataSource,
+      scratchDatabase: String
+  ): Unit =
+    val connection = dataSource.getConnection
+    try
+      val statement = connection.createStatement()
+      try
+        statement.execute(s"DROP TABLE IF EXISTS `$scratchDatabase`.`sync_event_tombstones`"): Unit
+        statement.execute(s"DROP TABLE IF EXISTS `$scratchDatabase`.`sync_events`"): Unit
+      finally statement.close()
     finally connection.close()
 
   private def requiredEnv(name: String): String =

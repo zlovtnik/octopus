@@ -9,42 +9,32 @@ import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchServ
 import com.sslproxy.coordinator.dispatch.BatchDispatchService.DispatchResult
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.TidbRepository
-import com.sslproxy.coordinator.sink.SchemaIntrospector
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
-class CronScheduler(
+final class CronScheduler private (
     cfg: CronConfig,
     ingestConfig: IngestConfig,
     repo: TidbRepository,
     backpressureService: BackpressureService,
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,
-    schemaIntrospector: SchemaIntrospector,
-    dbSemaphore: Semaphore[IO]
+    verifyCanonicalManifest: IO[Unit],
+    dbSemaphore: Semaphore[IO],
+    loopCounter: Ref[IO, Long],
+    lastShadowAuditMs: Ref[IO, Long]
 ):
   import CronScheduler.log
 
-  private val loopCounter: Ref[IO, Long] = Ref.unsafe[IO, Long](0L)
-  private val lastShadowAuditMs: Ref[IO, Long] = Ref.unsafe[IO, Long](0L)
-
-  private val knownTables: List[String] = List(
-    "proxy_events",
-    "proxy_blocked_host_rollups",
-    "proxy_payload_audit",
-    "wireless_sensors",
-    "wireless_audit_frames",
-    "wireless_bandwidth_windows",
-    "wireless_alerts",
-    "wireless_alerts_ledger",
-    "wireless_client_inventory",
-    "wireless_probe_requests"
-  )
-
   val schemaRefresher: Stream[IO, Unit] =
-    schemaIntrospector.startRefresher(knownTables)
+    Stream.awakeEvery[IO](cfg.schemaRefreshIntervalSeconds.seconds).evalMap { _ =>
+      verifyCanonicalManifest.handleErrorWith { error =>
+        IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
+          IO.raiseError(error)
+      }
+    }
 
   val mainLoop: Stream[IO, Unit] =
     val backpressureStream = Stream
@@ -176,6 +166,32 @@ class CronScheduler(
 
 object CronScheduler:
   private val log = StructuredLogger(getClass)
+
+  def create(
+      cfg: CronConfig,
+      ingestConfig: IngestConfig,
+      repo: TidbRepository,
+      backpressureService: BackpressureService,
+      batchDispatchService: BatchDispatchService,
+      metrics: CoordinatorMetrics,
+      verifyCanonicalManifest: IO[Unit],
+      dbSemaphore: Semaphore[IO]
+  ): IO[CronScheduler] =
+    for
+      loopCounter <- Ref.of[IO, Long](0L)
+      lastShadowAuditMs <- Ref.of[IO, Long](0L)
+    yield new CronScheduler(
+      cfg,
+      ingestConfig,
+      repo,
+      backpressureService,
+      batchDispatchService,
+      metrics,
+      verifyCanonicalManifest,
+      dbSemaphore,
+      loopCounter,
+      lastShadowAuditMs
+    )
 
   private[cron] def drainBatch(
       maxDispatches: Int

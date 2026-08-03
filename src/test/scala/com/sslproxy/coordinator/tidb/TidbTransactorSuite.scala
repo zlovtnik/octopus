@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.tidb
 
 import com.sslproxy.coordinator.config.AppConfig
+import io.circe.parser.parse
 import java.sql.{BatchUpdateException, SQLException, Statement}
 import munit.FunSuite
 
@@ -47,6 +48,18 @@ class TidbTransactorSuite extends FunSuite:
 
     assert(url.contains("sslMode=VERIFY_IDENTITY"))
     assert(!url.contains("sslMode=REQUIRED"))
+
+  test("serialized alert arrays remain JSON arrays in details"):
+    val details = TidbTransactor.jsonDetails(
+      "attack_chain" -> TidbTransactor.parsedJson(Some("[\"deauth\"]")),
+      "explanation" -> TidbTransactor.parsedJson(Some("[\"burst\"]"))
+    )
+    val json = parse(details).fold(error => fail(error.message), identity)
+
+    assertEquals(
+      json.hcursor.downField("attack_chain").downArray.as[String],
+      Right("deauth")
+    )
 
   test("outbox retry delay clamps a non-positive maximum to one second"):
     assertEquals(LeaseSql.retryDelaySeconds(attempt = 3, baseSeconds = 5, maxSeconds = 0), 1)

@@ -7,8 +7,9 @@ import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.concurrent.{ConcurrentHashMap, atomic}
 import atomic.AtomicLong
+import scala.jdk.CollectionConverters.*
 
-class CoordinatorMetrics(registry: MeterRegistry):
+class CoordinatorMetrics(private val registry: MeterRegistry):
   import CoordinatorMetrics.log
 
   private val pendingLedgerGauge: AtomicLong = new AtomicLong(0)
@@ -130,6 +131,22 @@ class CoordinatorMetrics(registry: MeterRegistry):
         "pending_ledger_count" -> pendingLedgerGauge.get().toString,
         "backpressure_active" -> backpressureActiveGauge.get().toString
       ))
+
+  def scrape: String =
+    registry.getMeters.asScala.toList.flatMap { meter =>
+      val id = meter.getId
+      val baseName = id.getName.replace('.', '_').replace('-', '_')
+      val labels = id.getTags.asScala.toList
+        .map(tag => s"${tag.getKey}=\"${escapeLabel(tag.getValue)}\"")
+      val labelText = if labels.isEmpty then "" else labels.mkString("{", ",", "}")
+      meter.measure().asScala.map { measurement =>
+        val suffix = measurement.getStatistic.toString.toLowerCase(java.util.Locale.ROOT)
+        s"${baseName}_$suffix$labelText ${measurement.getValue}"
+      }
+    }.mkString("", "\n", "\n")
+
+  private def escapeLabel(value: String): String =
+    value.replace("\\", "\\\\").replace("\n", "\\n").replace("\"", "\\\"")
 
 object CoordinatorMetrics:
   private val log = StructuredLogger(getClass)

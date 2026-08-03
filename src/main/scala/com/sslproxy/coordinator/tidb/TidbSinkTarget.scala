@@ -14,7 +14,7 @@ enum TidbSinkTarget(val checksumTag: String):
   case WirelessProbeRequests    extends TidbSinkTarget("wireless.probe.flush")
   case WirelessAttackSequence   extends TidbSinkTarget("wireless.alert.attack_sequence")
   case WirelessSequenceAlert    extends TidbSinkTarget("wireless.alert.sequence")
-  case WirelessHandshakeAlert   extends TidbSinkTarget("wifi.alert.handshake")
+  case WirelessHandshakeAlert   extends TidbSinkTarget("wireless.alert.handshake")
 
 object TidbSinkTarget:
   def fromStreamName(streamName: String): Option[TidbSinkTarget] =
@@ -31,5 +31,6 @@ object TidbSinkTarget:
       case "wireless.probe_requests" | "wireless.probe.flush" => Some(WirelessProbeRequests)
       case "wireless.attack_sequence" | "wireless.alert.attack_sequence" => Some(WirelessAttackSequence)
       case "wireless.sequence" | "wireless.alert.sequence" | "wireless.sequence_alert" => Some(WirelessSequenceAlert)
-      case "wifi.alert.handshake" | "wireless.handshake" => Some(WirelessHandshakeAlert)
+      case "wifi.alert.handshake" | "wireless.alert.handshake" | "wireless.handshake" =>
+        Some(WirelessHandshakeAlert)
       case _                                     => None

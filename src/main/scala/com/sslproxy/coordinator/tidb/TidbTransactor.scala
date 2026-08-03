@@ -3,8 +3,9 @@ package com.sslproxy.coordinator.tidb
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.TiDbConfig
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
-import io.circe.Json
+import io.circe.{Json, parser as circeParser}
 import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.tidb.sql.{BatchSinkSql, SchemaChecksSql}
 
 import java.sql.{BatchUpdateException, Connection, PreparedStatement, SQLException, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime, ZoneOffset}
@@ -72,7 +73,7 @@ final class TidbTransactor private (
       val stmt = conn.createStatement()
       try
         stmt.setQueryTimeout(5)
-        val rs = stmt.executeQuery("SELECT 1")
+        val rs = stmt.executeQuery(BatchSinkSql.ConnectivityQuery)
         rs.next()
         ()
       finally stmt.close()
@@ -124,16 +125,7 @@ final class TidbTransactor private (
       blockedRows: List[BlockedEventInsert]
   ): IO[Long] =
     withTransactionRetry("insert_proxy_events") { conn =>
-      val sql =
-        """INSERT INTO proxy_events (
-          |  batch_id, row_sequence, event_timestamp_utc, event_time, event_type, host,
-          |  peer_ip, wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
-          |  bytes_up, bytes_down, status_code, blocked, obfuscation_profile,
-          |  correlation_id, parent_event_id, event_sequence, duration_ms, reason, raw_json
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
       try
         val allRows = rows.zipWithIndex.map { case (r, idx) =>
           Seq[Any](
@@ -161,31 +153,7 @@ final class TidbTransactor private (
   private def doInsertBlockedHostRollups(conn: Connection, rows: List[BlockedEventInsert]): Long =
     if rows.isEmpty then 0L
     else
-      val sql =
-        """INSERT INTO proxy_blocked_host_rollups (
-          |  host, blocked_attempts, blocked_bytes, frequency_hz, verdict, category,
-          |  risk_score, tarpit_held_ms, iat_ms, consecutive_blocks, last_verdict,
-          |  tls_ver, alpn, ja3_lite, resolved_ip, asn_org, updated_at, first_seen
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE
-          |  blocked_attempts = blocked_attempts + 1,
-          |  blocked_bytes = blocked_bytes + VALUES(blocked_bytes),
-          |  frequency_hz = IFNULL(VALUES(frequency_hz), frequency_hz),
-          |  verdict = IFNULL(VALUES(verdict), verdict),
-          |  category = IFNULL(VALUES(category), category),
-          |  risk_score = IFNULL(VALUES(risk_score), risk_score),
-          |  tarpit_held_ms = tarpit_held_ms + IFNULL(VALUES(tarpit_held_ms), 0),
-          |  iat_ms = IFNULL(VALUES(iat_ms), iat_ms),
-          |  consecutive_blocks = IFNULL(VALUES(consecutive_blocks), consecutive_blocks + 1),
-          |  last_verdict = IFNULL(VALUES(last_verdict), IFNULL(VALUES(verdict), last_verdict)),
-          |  tls_ver = IFNULL(VALUES(tls_ver), tls_ver),
-          |  alpn = IFNULL(VALUES(alpn), alpn),
-          |  ja3_lite = IFNULL(VALUES(ja3_lite), ja3_lite),
-          |  resolved_ip = IFNULL(VALUES(resolved_ip), resolved_ip),
-          |  asn_org = IFNULL(VALUES(asn_org), asn_org),
-          |  updated_at = CURRENT_TIMESTAMP(6)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.UpsertBlockedHostRollups)
       try
         val now = Timestamp.from(Instant.now())
         val params = rows.map(r =>
@@ -205,14 +173,7 @@ final class TidbTransactor private (
   // ── proxy_payload_audit ───────────────────────────────────────
   override def insertProxyPayloadAudit(batchId: String, rows: List[ProxyPayloadAuditInsert]): IO[Long] =
     withTransactionRetry("insert_proxy_payload_audit") { conn =>
-      val sql =
-        """INSERT INTO proxy_payload_audit (
-          |  correlation_id, host, direction, captured_at, byte_offset,
-          |  payload_object_key, content_type, http_method, http_status, http_path,
-          |  is_encrypted, truncated, peer_ip, notes
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyPayloadAudit)
       try
         val params = rows.map(r =>
           Seq[Any](
@@ -234,18 +195,7 @@ final class TidbTransactor private (
 
       upsertWirelessSensors(conn, rows)
 
-      val sql =
-        """INSERT INTO wireless_audit_frames (
-          |  batch_id, row_sequence, event_type, observed_at, sensor_id, location_id,
-          |  interface, channel, band, frame_type, frame_subtype, bssid, source_mac,
-          |  destination_mac, transmitter_mac, receiver_mac, destination_bssid, ssid,
-          |  signal_dbm, sequence_number, raw_len, is_retry, is_more_data, is_power_save,
-          |  is_protected, is_to_ds, is_from_ds, is_handshake, security_flags,
-          |  device_id, username, identity_source, tags, anomaly_reasons, raw_json
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessAuditFrames)
       try
         val params = rows.map(r =>
           Seq[Any](
@@ -267,16 +217,6 @@ final class TidbTransactor private (
     }
 
   private def upsertWirelessSensors(conn: Connection, rows: List[WirelessAuditFrameInsert]): Unit =
-    val sensorSql =
-      """INSERT INTO wireless_sensors (
-        |  sensor_id, location_id, interface, reg_domain, first_seen_at, last_seen_at
-        |) VALUES (?, ?, ?, ?, ?, ?)
-        |ON DUPLICATE KEY UPDATE
-        |  location_id = VALUES(location_id),
-        |  interface = VALUES(interface),
-        |  reg_domain = VALUES(reg_domain),
-        |  last_seen_at = VALUES(last_seen_at)""".stripMargin
-
     val sensors = rows.foldLeft(Map.empty[String, WirelessAuditFrameInsert]) { (acc, row) =>
       acc.updated(row.sensorId,
         acc.get(row.sensorId) match
@@ -285,7 +225,7 @@ final class TidbTransactor private (
       )
     }
 
-    val stmt = conn.prepareStatement(sensorSql)
+    val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessSensors)
     try
       for (_, row) <- sensors do
         setParam(stmt, 1, row.sensorId)
@@ -301,18 +241,7 @@ final class TidbTransactor private (
   // ── wireless_bandwidth_windows + alert merge ──────────────────
   override def insertWirelessBandwidth(batchId: String, rows: List[WirelessBandwidthInsert]): IO[Long] =
     withTransactionRetry("insert_wireless_bandwidth") { conn =>
-      val sql =
-        """INSERT INTO wireless_bandwidth_windows (
-          |  batch_id, row_sequence, schema_version, window_start, window_end,
-          |  sensor_id, location_id, interface, channel, band, source_mac, destination_bssid,
-          |  ssid, bytes, frame_count, retry_count, more_data_count, power_save_count,
-          |  strongest_signal_dbm, hist_under_100, hist_100_500, hist_500_1000,
-          |  hist_1000_1500, inter_arrival_p50_ms, external_bssid, threshold_exceeded,
-          |  wall_clock_delta_ms, window_is_partial, published_at
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessBandwidthWindows)
       try
         val params = rows.map(r =>
           Seq[Any](
@@ -339,27 +268,11 @@ final class TidbTransactor private (
     val exceeded = rows.filter(_.thresholdExceeded != 0L)
     if exceeded.isEmpty then return 0L
 
-    val alertSql =
-      """INSERT INTO wireless_alerts (
-        |  alert_type, batch_id, row_sequence, alert_date, detected_at, sensor_id,
-        |  location_id, primary_mac, secondary_mac, ssid, signal_dbm, details_json, raw_json,
-        |  created_at, updated_at, bytes
-        |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        |ON DUPLICATE KEY UPDATE
-        |  batch_id = VALUES(batch_id),
-        |  row_sequence = VALUES(row_sequence),
-        |  detected_at = VALUES(detected_at),
-        |  location_id = VALUES(location_id),
-        |  ssid = VALUES(ssid),
-        |  bytes = VALUES(bytes),
-        |  details_json = VALUES(details_json),
-        |  updated_at = CURRENT_TIMESTAMP(6)""".stripMargin
-
     val grouped = exceeded.groupBy { r =>
       (r.sensorId, r.sourceMac, r.destinationBssid, r.windowStart.toLocalDate)
     }
 
-    val stmt = conn.prepareStatement(alertSql)
+    val stmt = conn.prepareStatement(BatchSinkSql.UpsertBandwidthAlerts)
     try
       var alertCount = 0L
       val now = Timestamp.from(Instant.now())
@@ -413,7 +326,7 @@ final class TidbTransactor private (
           secondaryMac = None,
           ssid = row.ssid,
           signalDbm = row.signalDbm,
-          detailsJson = jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
+          detailsJson = TidbTransactor.jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
           rawJson = row.rawJson
         )
       })
@@ -433,7 +346,7 @@ final class TidbTransactor private (
           secondaryMac = row.targetBssid,
           ssid = row.targetSsid,
           signalDbm = row.signalDbm,
-          detailsJson = jsonDetails(
+          detailsJson = TidbTransactor.jsonDetails(
             "deauth_count" -> row.deauthCount,
             "window_secs" -> row.windowSecs,
             "threshold" -> row.threshold
@@ -457,7 +370,7 @@ final class TidbTransactor private (
           secondaryMac = row.bssid,
           ssid = row.ssid,
           signalDbm = Some(row.observedDbm),
-          detailsJson = jsonDetails(
+          detailsJson = TidbTransactor.jsonDetails(
             "baseline_dbm" -> row.baselineDbm,
             "observed_dbm" -> row.observedDbm,
             "dbm_delta" -> row.dbmDelta,
@@ -482,7 +395,7 @@ final class TidbTransactor private (
           secondaryMac = row.targetBssid,
           ssid = row.ssid,
           signalDbm = None,
-          detailsJson = jsonDetails(
+          detailsJson = TidbTransactor.jsonDetails(
             "attack_tag" -> row.attackTag,
             "reconnect_window_ms" -> row.reconnectWindowMs
           ),
@@ -505,12 +418,12 @@ final class TidbTransactor private (
           secondaryMac = None,
           ssid = row.ssid,
           signalDbm = None,
-          detailsJson = jsonDetails(
-            "attack_chain" -> row.attackChain,
+          detailsJson = TidbTransactor.jsonDetails(
+            "attack_chain" -> TidbTransactor.parsedJson(row.attackChain),
             "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
             "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "factor_breakdown" -> row.factorBreakdown,
-            "explanation" -> row.explanation
+            "factor_breakdown" -> TidbTransactor.parsedJson(row.factorBreakdown),
+            "explanation" -> TidbTransactor.parsedJson(row.explanation)
           ),
           rawJson = row.rawJson
         )
@@ -531,14 +444,14 @@ final class TidbTransactor private (
           secondaryMac = row.bssid,
           ssid = row.ssid,
           signalDbm = None,
-          detailsJson = jsonDetails(
+          detailsJson = TidbTransactor.jsonDetails(
             "session_key" -> row.sessionKey,
             "attack_tag" -> row.attackTag,
-            "sequence" -> row.sequence,
+            "sequence" -> TidbTransactor.parsedJson(row.sequence),
             "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
             "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "factor_breakdown" -> row.factorBreakdown,
-            "explanation" -> row.explanation
+            "factor_breakdown" -> TidbTransactor.parsedJson(row.factorBreakdown),
+            "explanation" -> TidbTransactor.parsedJson(row.explanation)
           ),
           rawJson = row.rawJson
         )
@@ -559,7 +472,7 @@ final class TidbTransactor private (
           secondaryMac = Some(row.bssid),
           ssid = None,
           signalDbm = row.signalDbm,
-          detailsJson = jsonDetails("pmkid_sha256" -> row.pmkidSha256),
+          detailsJson = TidbTransactor.jsonDetails("pmkid_sha256" -> row.pmkidSha256),
           rawJson = None
         )
       })
@@ -571,28 +484,8 @@ final class TidbTransactor private (
       rows: List[WirelessAlertRow]
   ): IO[Long] =
     val now = Timestamp.from(Instant.now())
-    val sql =
-      """INSERT INTO wireless_alerts (
-        |  alert_type, batch_id, row_sequence, detected_at, sensor_id, location_id,
-        |  interface, channel, primary_mac, secondary_mac, ssid, signal_dbm,
-        |  details_json, raw_json, created_at, updated_at
-        |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        |ON DUPLICATE KEY UPDATE
-        |  detected_at = VALUES(detected_at),
-        |  sensor_id = VALUES(sensor_id),
-        |  location_id = VALUES(location_id),
-        |  interface = VALUES(interface),
-        |  channel = VALUES(channel),
-        |  primary_mac = VALUES(primary_mac),
-        |  secondary_mac = VALUES(secondary_mac),
-        |  ssid = VALUES(ssid),
-        |  signal_dbm = VALUES(signal_dbm),
-        |  details_json = VALUES(details_json),
-        |  raw_json = VALUES(raw_json),
-        |  updated_at = VALUES(updated_at)""".stripMargin
-
     withConnection { conn =>
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
       try
         val params = rows.map { row =>
           Seq[Any](
@@ -606,50 +499,13 @@ final class TidbTransactor private (
       finally stmt.close()
     }
 
-  private def jsonDetails(keyValues: (String, Any)*): String =
-    val fields = keyValues.flatMap { case (k, v) =>
-      unwrapJsonValue(v).map(k -> _)
-    }
-    Json.obj(fields*).noSpaces
-
-  private def unwrapJsonValue(v: Any): Option[Json] =
-    v match
-      case null => None
-      case None => None
-      case Some(inner) => unwrapJsonValue(inner)
-      case n: (java.lang.Byte | java.lang.Short | java.lang.Integer | java.lang.Long) =>
-        Some(Json.fromLong(n.longValue))
-      case n: java.lang.Number =>
-        Some(Json.fromDoubleOrString(n.doubleValue))
-      case s: String => Some(Json.fromString(s))
-      case b: Boolean => Some(Json.fromBoolean(b))
-      case other => Some(Json.fromString(other.toString))
-
   private def bandForChannel(channel: Long): String =
     if channel >= 1 && channel <= 14 then "2.4GHz" else "5GHz"
 
   // ── wireless_client_inventory ─────────────────────────────────
   override def insertWirelessClientInventory(batchId: String, rows: List[WirelessClientInventoryInsert]): IO[Long] =
     withTransactionRetry("insert_wireless_client_inventory") { conn =>
-      val sql =
-        """INSERT INTO wireless_client_inventory (
-          |  sensor_id, location_id, snapshot_at, client_mac, bssid, ssid,
-          |  device_id, username, identity_source, last_seen, first_seen,
-          |  signal_dbm, is_authorized, created_at
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE
-          |  location_id = VALUES(location_id),
-          |  bssid = VALUES(bssid),
-          |  ssid = VALUES(ssid),
-          |  device_id = VALUES(device_id),
-          |  username = VALUES(username),
-          |  identity_source = VALUES(identity_source),
-          |  last_seen = VALUES(last_seen),
-          |  first_seen = VALUES(first_seen),
-          |  signal_dbm = VALUES(signal_dbm),
-          |  is_authorized = VALUES(is_authorized)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessClientInventory)
       try
         val params = rows.map(r =>
           Seq[Any](
@@ -668,14 +524,7 @@ final class TidbTransactor private (
   // ── wireless_probe_requests ───────────────────────────────────
   override def insertWirelessProbeRequests(batchId: String, rows: List[WirelessProbeRequestInsert]): IO[Long] =
     withTransactionRetry("insert_wireless_probe_requests") { conn =>
-      val sql =
-        """INSERT INTO wireless_probe_requests (
-          |  batch_id, row_sequence, client_mac, ssid, known_bssid,
-          |  first_seen, last_seen, probe_count, created_at
-          |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
-
-      val stmt = conn.prepareStatement(sql)
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessProbeRequests)
       try
         val params = rows.map(r =>
           Seq[Any](
@@ -692,12 +541,10 @@ final class TidbTransactor private (
   def preflightCheck(requiredTables: List[String]): IO[List[String]] =
     if requiredTables.isEmpty then IO.pure(List.empty)
     else withConnection { conn =>
-      val placeholders = requiredTables.map(_ => "?").mkString(", ")
-      val sql = s"""
-        SELECT TABLE_NAME
-        FROM information_schema.TABLES
-        WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ($placeholders)
-      """.stripMargin.trim
+      val sql = SchemaChecksSql.tableLookup(requiredTables.size).fold(
+        error => throw IllegalArgumentException(error),
+        identity
+      )
 
       val stmt = conn.prepareStatement(sql)
       try
@@ -717,12 +564,10 @@ final class TidbTransactor private (
   ): IO[List[String]] =
     if requiredColumns.isEmpty then IO.pure(List.empty)
     else withConnection { conn =>
-      val predicates = requiredColumns.map(_ => "(TABLE_NAME = ? AND COLUMN_NAME = ?)").mkString(" OR ")
-      val sql = s"""
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-        FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = ? AND ($predicates)
-      """.stripMargin.trim
+      val sql = SchemaChecksSql.columnLookup(requiredColumns.size).fold(
+        error => throw IllegalArgumentException(error),
+        identity
+      )
 
       val stmt = conn.prepareStatement(sql)
       try
@@ -771,6 +616,29 @@ final class TidbTransactor private (
 
 object TidbTransactor:
   private val log = StructuredLogger(getClass)
+
+  private[tidb] def jsonDetails(keyValues: (String, Any)*): String =
+    val fields = keyValues.flatMap { case (key, value) =>
+      unwrapJsonValue(value).map(key -> _)
+    }
+    Json.obj(fields*).noSpaces
+
+  private def unwrapJsonValue(value: Any): Option[Json] =
+    value match
+      case null => None
+      case None => None
+      case Some(inner) => unwrapJsonValue(inner)
+      case json: Json => Some(json)
+      case number: (java.lang.Byte | java.lang.Short | java.lang.Integer | java.lang.Long) =>
+        Some(Json.fromLong(number.longValue))
+      case number: java.lang.Number =>
+        Some(Json.fromDoubleOrString(number.doubleValue))
+      case string: String => Some(Json.fromString(string))
+      case boolean: Boolean => Some(Json.fromBoolean(boolean))
+      case other => Some(Json.fromString(other.toString))
+
+  private[tidb] def parsedJson(value: Option[String]): Option[Json] =
+    value.flatMap(circeParser.parse(_).toOption)
 
   private final case class WirelessAlertRow(
       rowSequence: Long,
@@ -822,7 +690,7 @@ object TidbTransactor:
         hikariConfig.setDriverClassName("com.mysql.cj.jdbc.Driver")
         hikariConfig.setPoolName("tidb-pool")
         hikariConfig.setAutoCommit(true)
-        hikariConfig.setConnectionTestQuery("SELECT 1")
+        hikariConfig.setConnectionTestQuery(BatchSinkSql.ConnectivityQuery)
         hikariConfig.addDataSourceProperty("cachePrepStmts", "true")
         hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250")
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")

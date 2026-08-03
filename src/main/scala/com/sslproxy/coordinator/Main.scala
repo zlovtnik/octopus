@@ -13,14 +13,11 @@ import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.{PayloadAuditConsumer, SyncEventHydrationService}
 import com.sslproxy.coordinator.kafka.{KafkaComponents, ScanRequestStream, TidbLoadStream, TidbResultStream, WirelessConsumerService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
 import doobie.Transactor
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
 import com.sslproxy.coordinator.observability.StructuredLogger
-
-import scala.concurrent.duration.*
 
 object Main extends IOApp.Simple:
   private val log = StructuredLogger(getClass)
@@ -70,41 +67,50 @@ object Main extends IOApp.Simple:
                 cfg.tidb.healthcheckReserve
               ))).flatMap { dbSemaphore =>
                 KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
-                  Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
-                    val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-                    val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
-                    val hydrationService = new SyncEventHydrationService(
+                  val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
+                  val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+                  val hydrationService = new SyncEventHydrationService(
+                    tiDbRepo,
+                    payloadResolver,
+                    metrics,
+                    cfg.cron.scanFetchCount,
+                    dbSemaphore
+                  )
+
+                  val batchDispatchService = new BatchDispatchService(
+                    tiDbRepo,
+                    kafka.producer,
+                    metrics,
+                    java.util.UUID.randomUUID().toString,
+                    List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
+                    cfg.cron.batchDispatchLeaseSeconds,
+                    cfg.cron.scanRetryBackoffSeconds,
+                    cfg.cron.batchDispatchRetryMaxSeconds,
+                    dbSemaphore
+                  )
+
+                  val scheduler = for
+                    backpressureService <- BackpressureService.create(
+                      cfg.backpressure,
+                      cfg.cron.ingestBatchSize,
+                      tiDbRepo.pendingLedgerCount(),
+                      metrics
+                    )
+                    cronScheduler <- CronScheduler.create(
+                      cfg.cron,
+                      cfg.ingest,
                       tiDbRepo,
-                      payloadResolver,
+                      backpressureService,
+                      batchDispatchService,
                       metrics,
-                      cfg.cron.scanFetchCount,
+                      preflight.validate(),
                       dbSemaphore
                     )
+                  yield cronScheduler
 
-                    val backpressureService = new BackpressureService(
-                      cfg.backpressure, cfg.cron.ingestBatchSize,
-                      tiDbRepo.pendingLedgerCount(), metrics
-                    )
+                  Resource.eval(scheduler).flatMap { cronScheduler =>
 
-                    val batchDispatchService = new BatchDispatchService(
-                      tiDbRepo,
-                      kafka.producer,
-                      metrics,
-                      java.util.UUID.randomUUID().toString,
-                      List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
-                      cfg.cron.batchDispatchLeaseSeconds,
-                      cfg.cron.scanRetryBackoffSeconds,
-                      cfg.cron.batchDispatchRetryMaxSeconds,
-                      dbSemaphore
-                    )
-
-                    val cronScheduler = new CronScheduler(
-                      cfg.cron, cfg.ingest, tiDbRepo,
-                      backpressureService, batchDispatchService, metrics,
-                      schemaIntrospector, dbSemaphore
-                    )
-
-                    val healthRoutes = new HealthRoutes(oldTx)
+                    val healthRoutes = new HealthRoutes(oldTx, metrics)
 
                     val httpPort = Port.fromInt(cfg.http.port).getOrElse(
                       sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")

@@ -173,6 +173,25 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
       case Right(_) => fail("expected unsafe topic replication rejection")
 
+  test("development cutover bypass permits a single broker replica"):
+    val baseline = AppConfig.load
+    val development = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 1),
+      runtime = baseline.runtime.copy(environment = "development"),
+      cutover = baseline.cutover.copy(devBypass = true)
+    )
+
+    assertEquals(AppConfig.validate(development), Right(development))
+
+  test("HTTP port must be in the TCP port range"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(http = baseline.http.copy(port = 65536))
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.contains("http.port must be between 1 and 65535"))
+      case Right(_) => fail("expected invalid HTTP port rejection")
+
   test("locked consumer batching must fit within a poll and use a positive window"):
     val baseline = AppConfig.load
     val invalid = baseline.copy(
@@ -264,6 +283,19 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(!messages.exists(_.contains("cutover.artifact-path")))
       case Right(_) => fail("expected invalid staged TiDB configuration rejection")
 
+  test("enabled TiDB rejects local public key retrieval"):
+    val baseline = AppConfig.load
+    val staged = baseline.copy(
+      tidb = enabledTiDb(baseline.tidb).copy(localDevAllowPublicKeyRetrieval = true)
+    )
+
+    AppConfig.validate(staged) match
+      case Left(error) =>
+        assert(error.errors.toList.contains(
+          "tidb.local-dev-allow-public-key-retrieval must be false when TiDB readiness is enabled"
+        ))
+      case Right(_) => fail("expected public key retrieval rejection")
+
   test("proxy.events must remain in both ingest and TiDB load streams"):
     val baseline = AppConfig.load
     val missing = baseline.copy(
@@ -298,6 +330,10 @@ class AppConfigCutoverSuite extends FunSuite:
       config.kafka.resultConsumer,
       config.kafka.payloadAuditConsumer,
       config.kafka.loadConsumer,
+      config.wireless.backlogSaveConsumer,
+      config.wireless.backlogListConsumer,
+      config.wireless.backlogSyncedConsumer,
+      config.wireless.backlogPruneConsumer,
       config.wireless.macLookupConsumer,
       config.wireless.networksAuthorizedConsumer,
       config.wireless.probeFlushConsumer

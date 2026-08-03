@@ -7,7 +7,7 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.{TidbPayloadResolver, TidbRepository}
+import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbPayloadResolver, TidbRepository}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -25,6 +25,7 @@ object ScanRequestStream:
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact, producer,
+      ScanRequestRecord.decodeWire,
       repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).flatMap {
         case Left(err) =>
           IO(log.error("scan_request_consumer",
@@ -39,27 +40,30 @@ object ScanRequestStream:
           IO.pure(cutoffs)
       }
     ) { lockedRecords =>
+      val relevant = lockedRecords.filter(_.decoded.streamName == "proxy.events")
       for
-        decoded <- lockedRecords.traverse { locked =>
-          IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value)).map(locked -> _)
+        resolved <- relevant.traverse { locked =>
+          IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }
-        relevant = decoded.filter { case (_, request) => request.streamName == "proxy.events" }
-        resolved <- relevant.traverse { case (locked, request) =>
-          IO.blocking(payloadResolver.resolve(request)).map((locked, request, _))
+        handled <- resolved.traverse { case (locked, request, record) =>
+          dbSemaphore.permit.use(_ => repo.recordScanRequestWithEvidence(record, locked.metadata)).flatMap {
+            case Right(decision) => IO.pure(Some((locked, request, decision)))
+            case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
+              LockedTopicConsumer.parkNonRetriable(
+                producer,
+                cfg.scanTopic + cfg.dlqSuffix,
+                cfg.scanConsumer,
+                locked.record,
+                error.cause
+              ).as(None)
+            case Left(error) =>
+              IO.raiseError(new RuntimeException(
+                s"${error.operation}: ${Option(error.message).getOrElse("")}",
+                error.cause
+              ))
+          }
         }
-        decisions <- dbSemaphore.permit.use { _ =>
-          KafkaDatabaseResult.require(
-            repo.recordScanRequestsWithEvidence(
-              resolved.map { case (locked, _, record) => record -> locked.metadata }
-            )
-          )
-        }
-        _ <- IO.raiseUnless(decisions.sizeIs == resolved.size)(
-          IllegalStateException(
-            s"recordScanRequestsWithEvidence returned ${decisions.size} decisions for ${resolved.size} records"
-          )
-        )
-        _ <- resolved.zip(decisions).traverse_ { case ((locked, request, _), decision) =>
+        _ <- handled.flatten.traverse_ { case (locked, request, decision) =>
           for
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
@@ -72,11 +76,11 @@ object ScanRequestStream:
               "offset" -> locked.metadata.offset.toString))
           yield ()
         }
-        _ <- decoded.filter { case (_, request) => request.streamName != "proxy.events" }
-          .traverse_ { case (locked, request) =>
+        _ <- lockedRecords.filter(_.decoded.streamName != "proxy.events")
+          .traverse_ { locked =>
             IO(log.debug("scan_request_consumer",
               "status" -> "skipped",
-              "stream_name" -> request.streamName,
+              "stream_name" -> locked.decoded.streamName,
               "group" -> locked.metadata.consumerGroup,
               "partition" -> locked.metadata.partition.toString,
               "offset" -> locked.metadata.offset.toString))

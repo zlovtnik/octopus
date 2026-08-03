@@ -7,15 +7,14 @@ import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.observability.StructuredLogger
 
-class BackpressureService(
+final class BackpressureService private (
     cfg: BackpressureConfig,
     ingestBatchSize: Int,
     pendingLedgerCount: IO[Either[DatabaseError, Long]],
-    metrics: CoordinatorMetrics
+    metrics: CoordinatorMetrics,
+    consumerSuspended: Ref[IO, Boolean]
 ):
   import BackpressureService.log
-
-  private val consumerSuspended: Ref[IO, Boolean] = Ref.unsafe[IO, Boolean](false)
 
   def budget: Long =
     ingestBatchSize.toLong * cfg.budgetMultiplier
@@ -62,3 +61,13 @@ class BackpressureService(
 
 object BackpressureService:
   private val log = StructuredLogger(getClass)
+
+  def create(
+      cfg: BackpressureConfig,
+      ingestBatchSize: Int,
+      pendingLedgerCount: IO[Either[DatabaseError, Long]],
+      metrics: CoordinatorMetrics
+  ): IO[BackpressureService] =
+    Ref.of[IO, Boolean](false).map { state =>
+      new BackpressureService(cfg, ingestBatchSize, pendingLedgerCount, metrics, state)
+    }

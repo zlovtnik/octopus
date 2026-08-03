@@ -4,6 +4,22 @@ import munit.FunSuite
 
 class WirelessConsumerServiceSuite extends FunSuite:
 
+  test("wireless backlog identity requires non-empty dedupe and stream keys") {
+    assert(WirelessConsumerService.parseBacklogIdentity("{}").isLeft)
+    assert(WirelessConsumerService.parseBacklogIdentity(
+      """{"dedupe_key":"","stream_name":"wireless.audit"}"""
+    ).isLeft)
+    val parsed = WirelessConsumerService.parseBacklogIdentity(
+      """{"dedupe_key":"frame-1","stream_name":"wireless.audit","payload":{"x":1}}"""
+    )
+    assertEquals(parsed.map(value => (value._2, value._3)), Right(("frame-1", "wireless.audit")))
+  }
+
+  test("backlog reply topics use the same allowlist as current wireless replies") {
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.list.reply"))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.prune.reply"))
+  }
+
   // ========== extractField ==========
 
   test("extractField returns Some for present non-empty string field"):
@@ -116,3 +132,10 @@ class WirelessConsumerServiceSuite extends FunSuite:
 
   test("hashMac omits malformed input"):
     assertEquals(WirelessConsumerService.hashMac("ab"), None)
+
+  test("normalizeMac validates and canonicalizes lookup values"):
+    assertEquals(
+      WirelessConsumerService.normalizeMac("  AA:BB:CC:DD:EE:FF  "),
+      Some("aa:bb:cc:dd:ee:ff")
+    )
+    assertEquals(WirelessConsumerService.normalizeMac("aa-bb-cc-dd-ee-ff"), None)

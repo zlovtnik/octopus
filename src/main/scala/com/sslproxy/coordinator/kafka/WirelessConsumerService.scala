@@ -10,10 +10,12 @@ import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser.parse as parseJson
+import io.circe.syntax.*
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
 
 object WirelessConsumerService:
@@ -27,6 +29,80 @@ object WirelessConsumerService:
     val bytes = new Array[Byte](32)
     new SecureRandom().nextBytes(bytes)
     bytes
+
+  def backlogSaveStream(
+      cfg: WirelessConfig,
+      kafkaCfg: KafkaCfg,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dbSemaphore: Semaphore[IO]
+  ): Stream[IO, Unit] =
+    val settings = consumerSettings(cfg.backlogSaveConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.backlogSaveTopic, cfg.consumersCount, kafkaCfg) { committable =>
+      handleBacklogSave(
+        committable.record.value,
+        repo,
+        producer,
+        cfg.backlogSaveTopic + cfg.dlqSuffix,
+        dbSemaphore
+      ).as(committable.offset)
+    }
+
+  def backlogListStream(
+      cfg: WirelessConfig,
+      kafkaCfg: KafkaCfg,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dbSemaphore: Semaphore[IO]
+  ): Stream[IO, Unit] =
+    val settings = consumerSettings(cfg.backlogListConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.backlogListTopic, cfg.consumersCount, kafkaCfg) { committable =>
+      handleBacklogList(
+        committable.record.value,
+        cfg.backlogListReplyTopic,
+        repo,
+        producer,
+        cfg.backlogListTopic + cfg.dlqSuffix,
+        dbSemaphore
+      ).as(committable.offset)
+    }
+
+  def backlogSyncedStream(
+      cfg: WirelessConfig,
+      kafkaCfg: KafkaCfg,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dbSemaphore: Semaphore[IO]
+  ): Stream[IO, Unit] =
+    val settings = consumerSettings(cfg.backlogSyncedConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.backlogSyncedTopic, cfg.consumersCount, kafkaCfg) { committable =>
+      handleBacklogSynced(
+        committable.record.value,
+        repo,
+        producer,
+        cfg.backlogSyncedTopic + cfg.dlqSuffix,
+        dbSemaphore
+      ).as(committable.offset)
+    }
+
+  def backlogPruneStream(
+      cfg: WirelessConfig,
+      kafkaCfg: KafkaCfg,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dbSemaphore: Semaphore[IO]
+  ): Stream[IO, Unit] =
+    val settings = consumerSettings(cfg.backlogPruneConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
+    wirelessStream(settings, cfg.backlogPruneTopic, cfg.consumersCount, kafkaCfg) { committable =>
+      handleBacklogPrune(
+        committable.record.value,
+        cfg.backlogPruneReplyTopic,
+        repo,
+        producer,
+        cfg.backlogPruneTopic + cfg.dlqSuffix,
+        dbSemaphore
+      ).as(committable.offset)
+    }
 
   def macLookupStream(
       cfg: WirelessConfig,
@@ -81,9 +157,119 @@ object WirelessConsumerService:
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    macLookupStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore)
+    backlogSaveStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore)
+      .merge(backlogListStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+      .merge(backlogSyncedStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+      .merge(backlogPruneStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+      .merge(macLookupStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
       .merge(networksAuthorizedStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
       .merge(probeFlushStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+
+  private def handleBacklogSave(
+      payload: String,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      dbSemaphore: Semaphore[IO]
+  ): IO[Unit] =
+    parseBacklogIdentity(payload) match
+      case Left(error) => publishInvalidPayload(producer, dlqTopic, payload, "backlog_save", error)
+      case Right((json, dedupeKey, streamName)) =>
+        val stage = json.hcursor.get[String]("failure_stage").getOrElse("pre_publish")
+        if !Set("pre_publish", "post_publish").contains(stage) then
+          publishInvalidPayload(producer, dlqTopic, payload, "backlog_save", "invalid failure_stage")
+        else
+          val storedPayload = json.hcursor.downField("payload").focus.getOrElse(json)
+          retryDatabase("backlog_save", payload, dlqTopic, producer) {
+            dbSemaphore.permit.use(_ => repo.saveWirelessBacklog(dedupeKey, streamName, storedPayload, stage))
+          }(_ => IO.unit)
+
+  private def handleBacklogList(
+      payload: String,
+      defaultReplyTopic: String,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      dbSemaphore: Semaphore[IO]
+  ): IO[Unit] =
+    retryDatabase("backlog_list", payload, dlqTopic, producer) {
+      dbSemaphore.permit.use(_ => repo.listPendingWirelessBacklog(100))
+    } { entries =>
+      val body = Json.obj("entries" -> entries.map { entry =>
+        Json.obj(
+          "dedupe_key" -> entry.dedupeKey.asJson,
+          "stream_name" -> entry.streamName.asJson,
+          "payload" -> entry.payload,
+          "failure_stage" -> entry.failureStage.asJson,
+          "attempt_count" -> entry.attemptCount.asJson,
+          "created_at" -> entry.createdAt.toString.asJson
+        )
+      }.asJson).noSpaces
+      publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic), body)
+    }
+
+  private def handleBacklogSynced(
+      payload: String,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      dbSemaphore: Semaphore[IO]
+  ): IO[Unit] =
+    parseBacklogIdentity(payload) match
+      case Left(error) => publishInvalidPayload(producer, dlqTopic, payload, "backlog_synced", error)
+      case Right((_, dedupeKey, streamName)) =>
+        retryDatabase("backlog_synced", payload, dlqTopic, producer) {
+          dbSemaphore.permit.use(_ => repo.markWirelessBacklogSynced(dedupeKey, streamName))
+        }(_ => IO.unit)
+
+  private def handleBacklogPrune(
+      payload: String,
+      defaultReplyTopic: String,
+      repo: TidbRepository,
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      dbSemaphore: Semaphore[IO]
+  ): IO[Unit] =
+    cats.effect.Clock[IO].realTimeInstant.flatMap { now =>
+      retryDatabase("backlog_prune", payload, dlqTopic, producer) {
+        dbSemaphore.permit.use(_ => repo.pruneWirelessBacklog(now.minus(7L, ChronoUnit.DAYS)))
+      } { pruned =>
+        val body = Json.obj("pruned" -> pruned.asJson, "retention_days" -> 7.asJson).noSpaces
+        publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic), body)
+      }
+    }
+
+  private[kafka] def parseBacklogIdentity(payload: String): Either[String, (Json, String, String)] =
+    for
+      json <- parseJson(Option(payload).getOrElse("")).left.map(_.getMessage)
+      dedupeKey <- json.hcursor.get[String]("dedupe_key").left.map(_.getMessage).filterOrElse(_.nonEmpty, "blank dedupe_key")
+      streamName <- json.hcursor.get[String]("stream_name").left.map(_.getMessage).filterOrElse(_.nonEmpty, "blank stream_name")
+    yield (json, dedupeKey, streamName)
+
+  private def retryDatabase[A](
+      operation: String,
+      payload: String,
+      dlqTopic: String,
+      producer: KafkaProducer[IO, String, String],
+      remaining: Int = MaxRetries
+  )(database: => IO[Either[DatabaseError, A]])(onSuccess: A => IO[Unit]): IO[Unit] =
+    database.flatMap {
+      case Right(value) => onSuccess(value)
+      case Left(_) if remaining > 1 =>
+        IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
+          retryDatabase(operation, payload, dlqTopic, producer, remaining - 1)(database)(onSuccess)
+      case Left(error) => publishDlq(producer, dlqTopic, operation, payload, error)
+    }
+
+  private def publishInvalidPayload(
+      producer: KafkaProducer[IO, String, String],
+      dlqTopic: String,
+      payload: String,
+      operation: String,
+      message: String
+  ): IO[Unit] =
+    val cause = IllegalArgumentException(message)
+    publishDlq(producer, dlqTopic, operation, payload, DatabaseError.Permanent(operation, cause, message))
 
   private def wirelessStream(
       settings: ConsumerSettings[IO, String, String],
@@ -193,7 +379,7 @@ object WirelessConsumerService:
         case Left(err) =>
           IO(log.error("probe_flush", "status" -> "dlq",
             "topic" -> dlqTopic, "error" -> err.message)) *>
-            publishDlq(producer, dlqTopic, payload, err).handleErrorWith { publishError =>
+            publishDlq(producer, dlqTopic, "probe_flush", payload, err).handleErrorWith { publishError =>
               IO(log.error("probe_flush", "status" -> "dlq_publish_failed",
                 "topic" -> dlqTopic, "error" -> errorMessage(publishError)))
             }
@@ -214,7 +400,9 @@ object WirelessConsumerService:
     TopicPattern.matches(topic) && topic != "." && topic != ".."
 
   private[kafka] def isAllowedReplyTopic(topic: String): Boolean =
-    topic == SensorInboxPrefix.dropRight(1) || topic.startsWith(SensorInboxPrefix) ||
+      topic == SensorInboxPrefix.dropRight(1) || topic.startsWith(SensorInboxPrefix) ||
+      topic == "wireless.backlog.list.reply" ||
+      topic == "wireless.backlog.prune.reply" ||
       topic == "wireless.mac.lookup.reply" ||
       topic == "wireless.networks.authorized.reply"
 
@@ -245,6 +433,7 @@ object WirelessConsumerService:
   private def publishDlq(
       producer: KafkaProducer[IO, String, String],
       topic: String,
+      operation: String,
       original: String,
       err: DatabaseError
   ): IO[Unit] =
@@ -253,7 +442,7 @@ object WirelessConsumerService:
       "error" -> Json.fromString(Option(err.message).getOrElse("")),
       "operation" -> Json.fromString(err.operation)
     ).noSpaces
-    val record = ProducerRecords.one(ProducerRecord(topic, "probe_flush", dlqBody))
+    val record = ProducerRecords.one(ProducerRecord(topic, operation, dlqBody))
     producer.produce(record).flatten.void
 
   private def consumerSettings(

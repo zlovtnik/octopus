@@ -27,7 +27,7 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   test("disabled processors are reported disabled") {
     val config = ProcessorConfig(Nil, 1L, 10L)
     ProcessorSupervisor.create(config).flatMap(_.readiness.statuses).map { statuses =>
-      assertEquals(statuses.keySet, ProcessorId.all.toSet)
+      assertEquals(statuses.keySet, ProcessorId.octopusOwned.toSet)
       assert(statuses.values.forall(_.lifecycle == ProcessorLifecycle.Disabled))
     }
   }
@@ -41,11 +41,9 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         Stream.raiseError[IO](TerminalProcessorError("invalid retention policy"))
       )
       supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
-        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).flatMap { statuses =>
-          fiber.cancel.as {
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).map { statuses =>
             assertEquals(statuses(id).lastError, Some("invalid retention policy"))
-          }
-        }
+        }.guarantee(fiber.cancel)
       }
     }
   }
@@ -60,11 +58,9 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         startup = IO.raiseError(TerminalProcessorError("invalid startup configuration"))
       )
       supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
-        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).flatMap { statuses =>
-          fiber.cancel.as {
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).map { statuses =>
             assertEquals(statuses(id).lastError, Some("invalid startup configuration"))
-          }
-        }
+        }.guarantee(fiber.cancel)
       }
     }
   }

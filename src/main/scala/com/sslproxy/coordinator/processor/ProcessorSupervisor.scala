@@ -132,7 +132,7 @@ object ProcessorSupervisor:
       enabled <- IO.fromEither(
         config.enabled.traverse(ProcessorId.fromString).map(_.toSet).left.map(IllegalArgumentException(_))
       )
-      initial = ProcessorId.all.iterator.map { id =>
+      initial = ProcessorId.octopusOwned.iterator.map { id =>
         val lifecycle = if enabled.contains(id) then ProcessorLifecycle.Starting else ProcessorLifecycle.Disabled
         id -> ProcessorStatus(lifecycle, 0, None)
       }.toMap

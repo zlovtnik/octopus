@@ -47,11 +47,15 @@ private[kafka] object CutoverOffsetGuard:
       }
     }
 
-private[kafka] final case class LockedBrokerRecord(
+private[kafka] final case class LockedBrokerRecord[A](
     record: ConsumerRecord[String, String],
+    decoded: A,
     metadata: BrokerRecordMetadata,
     authorization: CutoverOffsetEvidence
 )
+
+private final case class LockedTopicInvariantViolation(message: String)
+    extends IllegalStateException(message)
 
 /** A single-topic/single-group consumer boundary. Each call allocates a new
   * KafkaConsumer and commits a batch only after `process` has durably handled
@@ -62,15 +66,16 @@ private[kafka] final case class LockedBrokerRecord(
 private[kafka] object LockedTopicConsumer:
   private val log = StructuredLogger(getClass)
 
-  def stream(
+  def stream[A](
       cfg: KafkaCfg,
       groupId: String,
       topic: String,
       artifact: VerifiedCutoverArtifact,
       producer: KafkaProducer[IO, String, String],
+      decode: String => Either[Throwable, A],
       bootstrapped: IO[Set[CutoffKey]] = IO.pure(Set.empty)
   )(
-      process: List[LockedBrokerRecord] => IO[Unit]
+      process: List[LockedBrokerRecord[A]] => IO[Unit]
   ): Stream[IO, Unit] =
     Stream.eval(bootstrapped.flatMap(keys => Ref.of[IO, CutoverOffsetGuardState](CutoverOffsetGuardState(keys)))).flatMap { guard =>
       Stream
@@ -94,6 +99,7 @@ private[kafka] object LockedTopicConsumer:
                       committables.toList,
                       producer,
                       cfg.dlqSuffix,
+                      decode,
                       process
                     )
                   }
@@ -121,7 +127,7 @@ private[kafka] object LockedTopicConsumer:
       _ <- consumer.subscribeTo(topic)
     yield ()
 
-  private def processBatch(
+  private def processBatch[A](
       guard: Ref[IO, CutoverOffsetGuardState],
       artifact: VerifiedCutoverArtifact,
       groupId: String,
@@ -129,14 +135,15 @@ private[kafka] object LockedTopicConsumer:
       committables: List[CommittableConsumerRecord[IO, String, String]],
       producer: KafkaProducer[IO, String, String],
       dlqSuffix: String,
-      process: List[LockedBrokerRecord] => IO[Unit]
+      decode: String => Either[Throwable, A],
+      process: List[LockedBrokerRecord[A]] => IO[Unit]
   ): IO[Unit] =
     for
       prepared <- committables.traverse { committable =>
-        prepareRecord(guard, artifact, groupId, expectedTopic, committable.record).attempt.flatMap {
+        prepareRecord(guard, artifact, groupId, expectedTopic, committable.record, decode).attempt.flatMap {
           case Right(locked) => IO.pure(Some(locked))
           case Left(error: CutoverError) => IO.raiseError(error)
-          case Left(error: IllegalStateException) => IO.raiseError(error)
+          case Left(error: LockedTopicInvariantViolation) => IO.raiseError(error)
           case Left(error) =>
             parkNonRetriable(
               producer,
@@ -151,16 +158,17 @@ private[kafka] object LockedTopicConsumer:
       _ <- CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit
     yield ()
 
-  private def prepareRecord(
+  private def prepareRecord[A](
       guard: Ref[IO, CutoverOffsetGuardState],
       artifact: VerifiedCutoverArtifact,
       groupId: String,
       expectedTopic: String,
-      record: ConsumerRecord[String, String]
-  ): IO[LockedBrokerRecord] =
+      record: ConsumerRecord[String, String],
+      decode: String => Either[Throwable, A]
+  ): IO[LockedBrokerRecord[A]] =
     for
       _ <- IO.raiseWhen(record.topic != expectedTopic)(
-        IllegalStateException(
+        LockedTopicInvariantViolation(
           s"consumer group $groupId received unexpected topic ${record.topic}; expected $expectedTopic"
         )
       )
@@ -178,6 +186,7 @@ private[kafka] object LockedTopicConsumer:
             s"partition=${record.partition} offset=${record.offset}"
         )
       )
+      decoded <- IO.fromEither(decode(rawValue))
       metadata = BrokerRecordMetadata(
         topic = record.topic,
         partition = record.partition,
@@ -193,9 +202,9 @@ private[kafka] object LockedTopicConsumer:
         "partition" -> record.partition.toString,
         "offset" -> record.offset.toString,
         "cutoff" -> authorization.cutoffOffset.toString))
-    yield LockedBrokerRecord(record, metadata, authorization)
+    yield LockedBrokerRecord(record, decoded, metadata, authorization)
 
-  private def parkNonRetriable(
+  private[kafka] def parkNonRetriable(
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       groupId: String,

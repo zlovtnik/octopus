@@ -21,10 +21,10 @@ object TidbResult:
       batchId <- cursor.downField("batch_id").as[String]
       status <- cursor.downField("status").as[String]
       rowCount <- cursor.downField("row_count").as[Int]
-      checksum <- cursor.downField("checksum").as[String]
-      retryable <- cursor.downField("retryable").as[Boolean]
-      errorClass <- cursor.downField("error_class").as[String]
-      errorText <- cursor.downField("error_text").as[String]
+      checksum <- cursor.downField("checksum").as[Option[String]].map(_.getOrElse(""))
+      retryable <- cursor.downField("retryable").as[Option[Boolean]].map(_.getOrElse(false))
+      errorClass <- cursor.downField("error_class").as[Option[String]].map(_.getOrElse(""))
+      errorText <- cursor.downField("error_text").as[Option[String]].map(_.getOrElse(""))
       finishedAt <- cursor.downField("finished_at").as[String]
     yield TidbResult(
       jobId,

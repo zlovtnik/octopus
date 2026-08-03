@@ -12,6 +12,7 @@ import io.circe.{Json, parser as circeParser}
 import io.circe.syntax.*
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.tidb.sql.WirelessSql
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -86,7 +87,12 @@ class TidbRepository(xa: Transactor[IO]):
                )
                SELECT UUID(), j.job_id, 0, e.payload_ref, 'pending', 1,
                       0, e.dedupe_key, e.stream_name,
-                      COALESCE(c.cursor_value, '0'), e.dedupe_key,
+                      COALESCE(c.cursor_value, '0'),
+                      CASE
+                        WHEN e.stream_name = 'wireless.audit'
+                        THEN CAST(FLOOR(UNIX_TIMESTAMP(e.observed_at)) AS CHAR)
+                        ELSE e.dedupe_key
+                      END,
                       CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
                FROM sync_events e
                JOIN sync_jobs j
@@ -98,7 +104,9 @@ class TidbRepository(xa: Transactor[IO]):
                   AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
                 ORDER BY e.observed_at, e.stream_name, e.dedupe_key
                 LIMIT $limit
-                ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id"""
+                ON DUPLICATE KEY UPDATE
+                  batch_id = sync_batches.batch_id,
+                  created_at = CURRENT_TIMESTAMP(6)"""
 
         val insertOutbox =
           if loadStreamNames.isEmpty then 0.pure[ConnectionIO]
@@ -305,16 +313,25 @@ class TidbRepository(xa: Transactor[IO]):
       else ().pure[ConnectionIO]
 
     def persistEvidence(meta: BrokerRecordMetadata, disposition: IngestionDisposition): ConnectionIO[Unit] =
-      sql"""INSERT INTO ingestion_evidence (
-              topic, partition_id, record_offset, group_id, group_version,
-              artifact_sha256, message_key, payload_sha256, disposition,
-              dedupe_key, first_seen_at, updated_at
-            ) VALUES (
-              ${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.consumerGroup}, ${meta.groupVersion},
-              ${meta.artifactSha256}, ${meta.messageKey}, ${record.sourceRecordSha256}, ${disposition.databaseValue},
-              ${record.dedupeKey}, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-            )""".update.run.void *>
-        advanceConsumerOffset(meta)
+      for
+        _ <- sql"""INSERT INTO ingestion_evidence (
+                     topic, partition_id, record_offset, group_id, group_version,
+                     artifact_sha256, message_key, payload_sha256, disposition,
+                     dedupe_key, first_seen_at, updated_at
+                   ) VALUES (
+                     ${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.consumerGroup}, ${meta.groupVersion},
+                     ${meta.artifactSha256}, ${meta.messageKey}, ${record.sourceRecordSha256}, ${disposition.databaseValue},
+                     ${record.dedupeKey}, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+                   ) ON DUPLICATE KEY UPDATE
+                     updated_at = CURRENT_TIMESTAMP(6)""".update.run
+        stored <- existingEvidence(meta).flatMap(_.fold(
+          FC.raiseError[(String, String, String)](
+            IllegalStateException("ingestion evidence disappeared after upsert")
+          )
+        )(_.pure[ConnectionIO]))
+        _ <- verifyExisting(meta, stored)
+        _ <- advanceConsumerOffset(meta)
+      yield ()
 
     def createState: ConnectionIO[IngestionDecision] =
       for
@@ -329,7 +346,12 @@ class TidbRepository(xa: Transactor[IO]):
             IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId).pure[ConnectionIO]
           else
             for
-              inserted <- sql"""INSERT INTO sync_events (
+              existed <- sql"""SELECT EXISTS(
+                                  SELECT 1 FROM sync_events
+                                  WHERE dedupe_key = ${record.dedupeKey}
+                                    AND stream_name = ${record.streamName}
+                                )""".query[Int].unique.map(_ == 1)
+              _ <- sql"""INSERT INTO sync_events (
                                    dedupe_key, stream_name, observed_at, payload_ref, payload,
                                    payload_sha256, status, attempt_count, last_error,
                                    producer, event_kind, created_at, updated_at
@@ -346,13 +368,16 @@ class TidbRepository(xa: Transactor[IO]):
                           ) ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id""".update.run
               cursor <- sql"""SELECT cursor_value FROM sync_cursors
                                WHERE stream_name = ${record.streamName}""".query[String].option.map(_.getOrElse("0"))
+              cursorEnd = if record.streamName == "wireless.audit" then
+                observedAt.fold(record.dedupeKey)(_.toInstant.getEpochSecond.toString)
+              else record.dedupeKey
               _ <- sql"""INSERT INTO sync_batches (
                             batch_id, job_id, batch_no, payload_ref, status, row_count,
                             attempt_count, dedupe_key, stream_name, cursor_start, cursor_end,
                             created_at, updated_at
                           ) VALUES (
                             $batchId, $jobId, 0, $payloadRef, 'pending', 1,
-                            0, ${record.dedupeKey}, ${record.streamName}, $cursor, ${record.dedupeKey},
+                            0, ${record.dedupeKey}, ${record.streamName}, $cursor, $cursorEnd,
                             CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
                           ) ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id""".update.run
               load = SyncLoad(
@@ -362,7 +387,7 @@ class TidbRepository(xa: Transactor[IO]):
                 streamName = record.streamName,
                 payloadRef = payloadRef,
                 cursorStart = cursor,
-                cursorEnd = record.dedupeKey,
+                cursorEnd = cursorEnd,
                 attempt = 1
               )
               _ <- sql"""INSERT INTO outbox_events (
@@ -374,7 +399,7 @@ class TidbRepository(xa: Transactor[IO]):
                             'sync.oracle.load', $loadMessageKey, ${load.asJson.noSpaces}, 'pending',
                             0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
                           ) ON DUPLICATE KEY UPDATE outbox_id = outbox_events.outbox_id""".update.run
-              disposition = if inserted == 1 then IngestionDisposition.Processed else IngestionDisposition.Deduplicated
+              disposition = if existed then IngestionDisposition.Deduplicated else IngestionDisposition.Processed
             yield IngestionDecision(disposition, record.dedupeKey, jobId, batchId)
       yield decision
 
@@ -452,13 +477,25 @@ class TidbRepository(xa: Transactor[IO]):
     fr0"COALESCE(" ++ projections.intercalate(fr0", ") ++ fr0")"
 
   private def jsonText(maxLength: Int, path: String, aliases: String*): Fragment =
+    jsonText(maxLength, preserveEmpty = false, path, aliases*)
+
+  private def jsonPresentText(maxLength: Int, path: String, aliases: String*): Fragment =
+    jsonText(maxLength, preserveEmpty = true, path, aliases*)
+
+  private def jsonText(
+      maxLength: Int,
+      preserveEmpty: Boolean,
+      path: String,
+      aliases: String*
+  ): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
+      val projected = if preserveEmpty then candidateText else fr0"NULLIF($candidateText, '')"
       fr0"""CASE
            WHEN $candidateType = 'STRING'
             AND CHAR_LENGTH($candidateText) <= $maxLength
-           THEN NULLIF($candidateText, '')
+           THEN $projected
            ELSE NULL
          END"""
     })
@@ -569,7 +606,7 @@ class TidbRepository(xa: Transactor[IO]):
         "$.mac.destination_mac",
         "$.mac.bssid"
       )
-      val ssid = jsonText(256, "$.ssid")
+      val ssid = jsonPresentText(256, "$.ssid")
       val signalDbm = jsonInteger("$.signal_dbm", "$.rf.signal_dbm")()
       val noiseDbm = jsonInteger("$.noise_dbm", "$.rf.noise_dbm")()
       val frequencyMhz = jsonInteger("$.frequency_mhz", "$.rf.frequency_mhz")()
@@ -858,7 +895,6 @@ class TidbRepository(xa: Transactor[IO]):
     for
       updated <- sql"""UPDATE outbox_events
                        SET status = 'failed',
-                           published_at = CURRENT_TIMESTAMP(6),
                            owner_id = NULL,
                            lease_token = NULL,
                            lease_expires_at = NULL,
@@ -1031,7 +1067,8 @@ class TidbRepository(xa: Transactor[IO]):
                              b.cursor_start, b.cursor_end, b.batch_no,
                              b.attempt_count, b.max_attempts
                       FROM sync_batches b
-                      WHERE b.batch_id = ${result.batchId}"""
+                      WHERE b.batch_id = ${result.batchId}
+                      FOR UPDATE"""
         .query[(String, String, String, String, String, Int, Int, Int)]
         .option
       row <- batch match
@@ -1058,7 +1095,7 @@ class TidbRepository(xa: Transactor[IO]):
                       updated_at = CURRENT_TIMESTAMP(6)
                   WHERE batch_id = ${result.batchId}
                     AND job_id = ${result.jobId}
-                    AND status IN ('dispatched', 'running', 'completed')""".update.run
+                    AND status IN ('pending', 'dispatched', 'running', 'completed')""".update.run
       _ <- if updated == 1 then
         sql"""UPDATE sync_jobs
               SET status = 'completed',
@@ -1069,11 +1106,7 @@ class TidbRepository(xa: Transactor[IO]):
                   WHERE job_id = ${result.jobId}
                     AND status <> 'completed'
                 )""".update.run.void *>
-          sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-                VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
-                ON DUPLICATE KEY UPDATE
-                  cursor_value = GREATEST(sync_cursors.cursor_value, VALUES(cursor_value)),
-                  updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
+          advanceSyncCursor(streamName, cursorEnd)
       else ().pure[ConnectionIO]
     yield ()
 
@@ -1124,7 +1157,8 @@ class TidbRepository(xa: Transactor[IO]):
         sql"""UPDATE sync_jobs
               SET status = 'failed',
                   finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
-              WHERE job_id = $jobId""".update.run.void *>
+              WHERE job_id = $jobId
+                AND status <> 'completed'""".update.run.void *>
         sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
               VALUES ($jobId, ${result.batchId}, ${result.errorClass}, ${result.errorText})""".update.run.void
 
@@ -1159,17 +1193,26 @@ class TidbRepository(xa: Transactor[IO]):
       dedupeKey: String,
       disposition: IngestionDisposition
   ): ConnectionIO[Unit] =
-    sql"""INSERT INTO ingestion_evidence (
-            topic, partition_id, record_offset, group_id, group_version,
-            artifact_sha256, message_key, payload_sha256, disposition,
-            dedupe_key, first_seen_at, updated_at
-          ) VALUES (
-            ${metadata.topic}, ${metadata.partition}, ${metadata.offset}, ${metadata.consumerGroup},
-            ${metadata.groupVersion}, ${metadata.artifactSha256}, ${metadata.messageKey},
-            ${metadata.payloadSha256}, ${disposition.databaseValue}, $dedupeKey,
-            CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-          )""".update.run.void *>
-      advanceConsumerOffset(metadata)
+    for
+      _ <- sql"""INSERT INTO ingestion_evidence (
+                   topic, partition_id, record_offset, group_id, group_version,
+                   artifact_sha256, message_key, payload_sha256, disposition,
+                   dedupe_key, first_seen_at, updated_at
+                 ) VALUES (
+                   ${metadata.topic}, ${metadata.partition}, ${metadata.offset}, ${metadata.consumerGroup},
+                   ${metadata.groupVersion}, ${metadata.artifactSha256}, ${metadata.messageKey},
+                   ${metadata.payloadSha256}, ${disposition.databaseValue}, $dedupeKey,
+                   CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+                 ) ON DUPLICATE KEY UPDATE
+                   updated_at = CURRENT_TIMESTAMP(6)""".update.run
+      stored <- existingBrokerEvidence(metadata).flatMap(_.fold(
+        FC.raiseError[(String, String, String)](
+          IllegalStateException("broker ingestion evidence disappeared after upsert")
+        )
+      )(_.pure[ConnectionIO]))
+      _ <- verifyBrokerEvidence(metadata, dedupeKey, stored)
+      _ <- advanceConsumerOffset(metadata)
+    yield ()
 
   private def advanceConsumerOffset(metadata: BrokerRecordMetadata): ConnectionIO[Unit] =
     val nextOffset = metadata.offset + 1L
@@ -1180,9 +1223,33 @@ class TidbRepository(xa: Transactor[IO]):
             ${metadata.consumerGroup}, ${metadata.topic}, ${metadata.partition}, $nextOffset,
             ${metadata.groupVersion}, ${metadata.artifactSha256}, CURRENT_TIMESTAMP(6)
           ) ON DUPLICATE KEY UPDATE
+            group_version = CASE
+              WHEN VALUES(next_offset) > consumer_offsets.next_offset THEN VALUES(group_version)
+              ELSE consumer_offsets.group_version
+            END,
+            artifact_sha256 = CASE
+              WHEN VALUES(next_offset) > consumer_offsets.next_offset THEN VALUES(artifact_sha256)
+              ELSE consumer_offsets.artifact_sha256
+            END,
             next_offset = GREATEST(consumer_offsets.next_offset, VALUES(next_offset)),
-            group_version = VALUES(group_version),
-            artifact_sha256 = VALUES(artifact_sha256),
+            updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
+
+  private def advanceSyncCursor(streamName: String, cursorEnd: String): ConnectionIO[Unit] =
+    sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
+          VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
+          ON DUPLICATE KEY UPDATE
+            cursor_value = CASE
+              WHEN VALUES(cursor_value) REGEXP '^[0-9]+$$'
+                AND sync_cursors.cursor_value REGEXP '^[0-9]+$$'
+                AND CAST(VALUES(cursor_value) AS DECIMAL(65, 0)) >
+                    CAST(sync_cursors.cursor_value AS DECIMAL(65, 0))
+              THEN VALUES(cursor_value)
+              WHEN NOT (VALUES(cursor_value) REGEXP '^[0-9]+$$')
+                AND NOT (sync_cursors.cursor_value REGEXP '^[0-9]+$$')
+                AND VALUES(cursor_value) > sync_cursors.cursor_value
+              THEN VALUES(cursor_value)
+              ELSE sync_cursors.cursor_value
+            END,
             updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
 
   private def validateBrokerMetadata(metadata: BrokerRecordMetadata): ConnectionIO[Unit] =
@@ -1392,9 +1459,19 @@ class TidbRepository(xa: Transactor[IO]):
         log.info("probe_flush_batch", "status" -> "parsed",
           "batch_id" -> batchId, "probe_count" -> probes.length.toString, "payload_bytes" -> probesJson.length.toString)
 
-        probes.traverse { probe =>
+        val validProbes = probes.flatMap { probe =>
+          probe.hcursor.get[String]("client_mac").toOption
+            .map(_.trim.toLowerCase(java.util.Locale.ROOT))
+            .filter(TidbRepository.MacPattern.matches)
+            .map(probe -> _)
+        }
+        val skipped = probes.size - validProbes.size
+        if skipped > 0 then
+          log.warn("probe_flush_batch", "status" -> "invalid_client_mac_skipped",
+            "batch_id" -> batchId, "skipped_count" -> skipped.toString)
+
+        validProbes.traverse { case (probe, clientMac) =>
           val ssid = probe.hcursor.get[String]("ssid").getOrElse("")
-          val clientMac = probe.hcursor.get[String]("client_mac").getOrElse("")
           val firstSeen = probe.hcursor.get[String]("first_seen").toOption.flatMap(parseTs)
           val lastSeen = probe.hcursor.get[String]("last_seen").toOption.flatMap(parseTs)
           val probeCount = probe.hcursor.get[Long]("probe_count").getOrElse(1L)
@@ -1433,6 +1510,43 @@ class TidbRepository(xa: Transactor[IO]):
         }
     }
 
+  def saveWirelessBacklog(
+      dedupeKey: String,
+      streamName: String,
+      payload: Json,
+      failureStage: String
+  ): IO[Either[DatabaseError, Unit]] =
+    runDb("tidb.save_wireless_backlog") {
+      WirelessSql.upsertBacklog(dedupeKey, streamName, payload, failureStage).update.run.void
+    }
+
+  def listPendingWirelessBacklog(limit: Int = 100): IO[Either[DatabaseError, List[WirelessBacklogEntry]]] =
+    runDb("tidb.list_pending_wireless_backlog") {
+      WirelessSql.oldestPending(limit.max(1).min(100)).query[
+        (String, String, String, String, Int, java.sql.Timestamp)
+      ].to[List].map(_.flatMap { case (dedupeKey, streamName, payload, stage, attempts, createdAt) =>
+        circeParser.parse(payload).toOption.map { json =>
+          WirelessBacklogEntry(dedupeKey, streamName, json, stage, attempts, createdAt.toInstant)
+        }
+      })
+    }
+
+  def markWirelessBacklogSynced(
+      dedupeKey: String,
+      streamName: String
+  ): IO[Either[DatabaseError, Boolean]] =
+    runDb("tidb.mark_wireless_backlog_synced") {
+      WirelessSql.markSynced(dedupeKey, streamName).update.run.map(_ > 0)
+    }
+
+  def pruneWirelessBacklog(
+      cutoff: java.time.Instant,
+      limit: Int = 1000
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.prune_wireless_backlog") {
+      WirelessSql.pruneSynced(java.sql.Timestamp.from(cutoff), limit.max(1).min(5000)).update.run
+    }
+
   private def runDb[A](operation: String)(fa: ConnectionIO[A]): IO[Either[DatabaseError, A]] =
     TidbRepository.retryTransient(operation)(fa.transact(xa))
       .map(Right(_))
@@ -1456,6 +1570,7 @@ class TidbRepository(xa: Transactor[IO]):
 
 object TidbRepository:
   private val log = StructuredLogger(getClass)
+  private val MacPattern = "(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$".r
   private val transactionRetryMaxAttempts = 5
   private val transactionRetryBaseDelay = 25.millis
 

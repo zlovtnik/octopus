@@ -27,7 +27,6 @@ final case class AppConfig(
     cron: CronConfig,
     ingest: IngestConfig,
     backpressure: BackpressureConfig,
-    systemRegistry: SystemRegistryConfig,
     http: HttpConfig,
     sync: SyncConfig,
     wireless: WirelessConfig,
@@ -101,10 +100,6 @@ final case class BackpressureConfig(
     budgetMultiplier: Int,
     adaptivePullChangeThreshold: Int,
     adaptivePullMinRestartIntervalMs: Int
-) derives ConfigReader
-
-final case class SystemRegistryConfig(
-    knownOrigins: List[String]
 ) derives ConfigReader
 
 final case class HttpConfig(
@@ -202,7 +197,12 @@ object AppConfig:
 
   private def processorErrors(config: ProcessorConfig): List[String] =
     val idErrors = config.enabled.flatMap { id =>
-      ProcessorId.fromString(id).fold(error => List(error), _ => List.empty)
+      ProcessorId.fromString(id).fold(
+        error => List(error),
+        processor => Option.when(processor.owner != com.sslproxy.coordinator.processor.ProcessorOwner.Octopus)(
+          s"processor $id is owned by ${processor.owner.value}, not octopus"
+        ).toList
+      )
     }
 
     List(
@@ -333,6 +333,10 @@ object AppConfig:
       config.kafka.resultConsumer,
       config.kafka.payloadAuditConsumer,
       config.kafka.loadConsumer,
+      config.wireless.backlogSaveConsumer,
+      config.wireless.backlogListConsumer,
+      config.wireless.backlogSyncedConsumer,
+      config.wireless.backlogPruneConsumer,
       config.wireless.macLookupConsumer,
       config.wireless.networksAuthorizedConsumer,
       config.wireless.probeFlushConsumer

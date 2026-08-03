@@ -25,8 +25,9 @@ The currently wired binary provides:
   idempotent mark-synced, seven-day prune, MAC lookup, authorized-network
   lookup, and probe flush;
 - JSON hydration and typed JDBC batch sinks for proxy and wireless rows;
-- backpressure, expired outbox-lease recovery, shadow-alert generation, and
-  periodic canonical-manifest verification;
+- persisted processor state/runs, dependency validation, deterministic retry
+  jitter, backpressure, expired outbox-lease recovery, shadow-alert generation,
+  and periodic canonical-manifest verification;
 - `/live`, `/ready`, `/metrics`, `/health`, `/actuator/health`, and
   `/actuator/prometheus` HTTP routes.
 
@@ -137,7 +138,7 @@ it never reverses schema or deletes ingestion evidence.
 | Route | Meaning |
 |---|---|
 | `/live` | process is serving HTTP |
-| `/ready` | TiDB is reachable; startup already verified the canonical manifest |
+| `/ready` | TiDB is reachable and every enabled processor is ready or intentionally disabled |
 | `/metrics` | Prometheus text exposition of Micrometer measurements |
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |

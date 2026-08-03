@@ -19,14 +19,23 @@ final class TidbProcessorStateStore(xa: Transactor[IO]) extends ProcessorStateSt
   def load: DbResultT[IO, Map[ProcessorId, ProcessorStatus]] =
     run("tidb.processor_state.load") {
       ProcessorStateSql.LoadStatesQuery.to[List].map { rows =>
-        rows.flatMap { case (name, lifecycle, failures, error) =>
+        rows.flatMap { case (name, databaseStatus, failures, error) =>
           for
             id <- ProcessorId.fromString(name).toOption
-            parsed <- ProcessorLifecycle.values.find(_.value == lifecycle)
+            parsed <- lifecycle(databaseStatus)
           yield id -> ProcessorStatus(parsed, failures, error)
         }.toMap
       }
     }
+
+  private def lifecycle(databaseStatus: String): Option[ProcessorLifecycle] =
+    databaseStatus match
+      case "disabled" => Some(ProcessorLifecycle.Disabled)
+      case "running"  => Some(ProcessorLifecycle.Starting)
+      case "idle"     => Some(ProcessorLifecycle.Ready)
+      case "degraded" => Some(ProcessorLifecycle.BackingOff)
+      case "failed"   => Some(ProcessorLifecycle.FailedTerminal)
+      case _          => None
 
   def persist(id: ProcessorId, status: ProcessorStatus, observedAt: Instant): DbResultT[IO, Unit] =
     run("tidb.processor_state.persist") {

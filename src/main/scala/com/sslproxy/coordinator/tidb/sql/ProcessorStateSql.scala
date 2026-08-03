@@ -9,7 +9,7 @@ import java.time.Instant
 
 object ProcessorStateSql:
   val LoadStatesQuery: Query0[(String, String, Int, Option[String])] =
-    sql"""SELECT processor_name, COALESCE(checkpoint_value, status),
+    sql"""SELECT processor_name, status,
                   consecutive_failures, last_error
            FROM processor_state"""
       .query[(String, String, Int, Option[String])]
@@ -34,16 +34,15 @@ object ProcessorStateSql:
     val failures = if failedAt.nonEmpty then status.restartCount.max(1) else 0
 
     sql"""INSERT INTO processor_state (
-             processor_name, shard_id, status, checkpoint_value,
+             processor_name, shard_id, status,
              last_started_at, last_succeeded_at, last_failed_at,
              consecutive_failures, last_error, updated_at
            ) VALUES (
-             ${id.value}, 'default', $databaseStatus, ${status.lifecycle.value},
+             ${id.value}, 'default', $databaseStatus,
              $startedAt, $succeededAt, $failedAt,
              $failures, ${status.lastError}, $timestamp
            ) ON DUPLICATE KEY UPDATE
              status = VALUES(status),
-             checkpoint_value = VALUES(checkpoint_value),
              last_started_at = COALESCE(VALUES(last_started_at), last_started_at),
              last_succeeded_at = COALESCE(VALUES(last_succeeded_at), last_succeeded_at),
              last_failed_at = COALESCE(VALUES(last_failed_at), last_failed_at),

@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.tidb.sql
 
-import doobie.{Fragment, Update0}
+import cats.syntax.all.*
+import doobie.Update0
 import doobie.implicits.*
 
 object JobBatchSql:

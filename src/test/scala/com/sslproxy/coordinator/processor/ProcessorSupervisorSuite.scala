@@ -1,7 +1,10 @@
 package com.sslproxy.coordinator.processor
 
-import cats.effect.IO
+import cats.data.EitherT
+import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.config.ProcessorConfig
+import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.persistence.ProcessorStateStore
 import fs2.Stream
 import munit.CatsEffectSuite
 
@@ -81,6 +84,26 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     }
   }
 
+  test("processor runs and terminal state are persisted") {
+    val id = ProcessorId.SyncScanIngestion
+    val config = ProcessorConfig(List(id.value), 1L, 10L)
+    for
+      events <- Ref.of[IO, Vector[String]](Vector.empty)
+      store = RecordingProcessorStateStore(events)
+      supervisor <- ProcessorSupervisor.create(config, store)
+      fiber <- supervisor.run(List(ProcessorWorkload(
+        id,
+        Stream.raiseError[IO](TerminalProcessorError("invalid record"))
+      ))).compile.drain.start
+      _ <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+      recorded <- events.get
+      _ <- fiber.cancel
+    yield
+      assert(recorded.exists(_ == s"state:${id.value}:failed_terminal"))
+      assert(recorded.exists(_.startsWith(s"start:${id.value}:")))
+      assert(recorded.exists(_.contains(":failed_terminal")))
+  }
+
   private def awaitLifecycle(
       supervisor: ProcessorSupervisor,
       id: ProcessorId,
@@ -90,3 +113,25 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       if statuses(id).lifecycle == expected then IO.pure(statuses)
       else IO.sleep(10.millis) *> awaitLifecycle(supervisor, id, expected)
     }.timeout(2.seconds)
+
+  private final class RecordingProcessorStateStore(
+      events: Ref[IO, Vector[String]]
+  ) extends ProcessorStateStore[IO]:
+    def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
+
+    def persist(
+        id: ProcessorId,
+        status: ProcessorStatus,
+        observedAt: java.time.Instant
+    ) = EitherT.liftF(events.update(_ :+ s"state:${id.value}:${status.lifecycle.value}"))
+
+    def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
+      EitherT.liftF(events.update(_ :+ s"start:${id.value}:$runId"))
+
+    def finishRun(
+        runId: String,
+        status: ProcessorRunStatus,
+        errorClass: Option[String],
+        errorText: Option[String],
+        finishedAt: java.time.Instant
+    ) = EitherT.liftF(events.update(_ :+ s"finish:$runId:${status.value}"))

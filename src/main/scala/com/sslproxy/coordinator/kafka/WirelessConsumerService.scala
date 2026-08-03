@@ -117,9 +117,9 @@ object WirelessConsumerService:
   ): IO[Unit] =
     if payload == null || payload.isEmpty then IO.unit
     else
-      extractField(payload, "mac") match
+      extractField(payload, "mac").flatMap(normalizeMac) match
         case None =>
-          IO(log.warn("mac_lookup", "status" -> "skip", "error" -> "missing mac field"))
+          IO(log.warn("mac_lookup", "status" -> "skip", "error" -> "missing or invalid mac field"))
         case Some(mac) =>
           val macHashFields = hashMac(mac).toList.map("mac_hash" -> _)
           IO(log.debug("mac_lookup", (("status" -> "processing") :: macHashFields)*)) *>
@@ -224,10 +224,15 @@ object WirelessConsumerService:
   }
 
   private[kafka] def hashMac(mac: String): Option[String] =
-    Option(mac).map(_.trim.toLowerCase(java.util.Locale.ROOT)).filter(MacPattern.matches).map { normalized =>
+    normalizeMac(mac).map { normalized =>
       val input = MacHashSalt ++ normalized.getBytes(StandardCharsets.UTF_8)
       Sha256Utils.sha256Hex(input).take(24)
     }
+
+  private[kafka] def normalizeMac(mac: String): Option[String] =
+    Option(mac)
+      .map(_.trim.toLowerCase(java.util.Locale.ROOT))
+      .filter(MacPattern.matches)
 
   private def publishReply(
       producer: KafkaProducer[IO, String, String],

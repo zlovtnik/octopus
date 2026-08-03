@@ -195,7 +195,7 @@ class TidbRepository(xa: Transactor[IO]):
             )"""
       }
       (fr"""SELECT e.dedupe_key, e.stream_name, e.observed_at, e.payload_ref,
-                   CAST(e.payload AS CHAR)
+                   CAST(e.payload AS CHAR), e.payload_sha256
             FROM sync_events e
             WHERE e.payload_archived = 0
               AND NOT EXISTS (
@@ -219,7 +219,7 @@ class TidbRepository(xa: Transactor[IO]):
               )""" ++ cursorClause ++
         fr"""ORDER BY e.observed_at, e.stream_name, e.dedupe_key
             LIMIT ${limit.max(1)}""")
-        .query[(String, String, java.sql.Timestamp, String, Option[String])]
+        .query[(String, String, java.sql.Timestamp, String, Option[String], Option[String])]
         .to[List]
         .map(_.map(SyncEventHydrationCandidate.apply.tupled))
     }
@@ -240,6 +240,10 @@ class TidbRepository(xa: Transactor[IO]):
         case Left(error) => FC.raiseError(error)
         case Right(Json.Null) =>
           FC.raiseError(IllegalArgumentException("resolved backfill payload must not be JSON null"))
+        case Right(_) if candidate.streamName == "wireless.audit" &&
+            candidate.payloadJson.nonEmpty &&
+            candidate.payloadSha256.contains(candidate.dedupeKey) =>
+          hydrateWirelessProjection(candidate.dedupeKey).map(_ > 0)
         case Right(_) if candidate.streamName == "wireless.audit" &&
             candidate.dedupeKey != eventPayloadSha256 =>
           FC.raiseError(IllegalArgumentException(

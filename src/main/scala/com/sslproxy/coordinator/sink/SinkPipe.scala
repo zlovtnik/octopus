@@ -30,9 +30,10 @@ final class SinkPipe(
         _        <- logRow(table, ctx, row)
         _        <- sink.upsert(tableMeta, fullRow)
       yield ()).handleErrorWith { err =>
-        val dl = DeadLetter(table = table, ctx = ctx, row = row, error = err.getMessage)
+        val safeError = SinkPipe.sanitizeError(err)
+        val dl = DeadLetter(table = table, ctx = ctx, row = row, error = safeError)
         log.error("sink_pipe", "status" -> "dlq",
-          "table" -> table, "origin" -> ctx.origin, "error" -> err.getMessage)
+          "table" -> table, "origin" -> ctx.origin, "error" -> safeError)
         dlqSink(dl)
       }
     }
@@ -43,7 +44,7 @@ final class SinkPipe(
         validated <- items.traverse { case (_, ctx, row) =>
           registry.validate(ctx).as((ctx, row)).attempt.map {
             case Right(v)         => Right(v)
-            case Left(err)        => Left((ctx, row, err.getMessage))
+            case Left(err)        => Left((ctx, row, SinkPipe.sanitizeError(err)))
           }
         }
         invalid = validated.collect { case Left(info) => info }
@@ -70,10 +71,11 @@ final class SinkPipe(
           sink.batchUpsert(tableMeta, rows).void
         }
       yield ()).handleErrorWith { err =>
+        val safeError = SinkPipe.sanitizeError(err)
         log.error("sink_pipe_batch", "status" -> "dlq",
-          "table" -> table, "count" -> items.size.toString, "error" -> err.getMessage)
+          "table" -> table, "count" -> items.size.toString, "error" -> safeError)
         items.traverse_ { case (table, ctx, row) =>
-          val dl = DeadLetter(table = table, ctx = ctx, row = row, error = err.getMessage)
+          val dl = DeadLetter(table = table, ctx = ctx, row = row, error = safeError)
           dlqSink(dl)
         }
       }
@@ -85,3 +87,19 @@ final class SinkPipe(
 
 object SinkPipe:
   private val log = StructuredLogger(getClass)
+  private val SecretAssignment =
+    "(?i)(password|passwd|pwd|token|secret|api[_-]?key)(\\s*[=:]\\s*)([^\\s;&]+)".r
+  private val UriUserInfo = "(?i)([a-z][a-z0-9+.-]*://[^:/\\s]+:)([^@/\\s]+)(@)".r
+
+  private[sink] def sanitizeError(error: Throwable): String =
+    val message = Option(error.getMessage)
+      .filter(_.nonEmpty)
+      .getOrElse(error.getClass.getSimpleName)
+    val assignmentsRedacted = SecretAssignment.replaceAllIn(
+      message,
+      matched => s"${matched.group(1)}${matched.group(2)}[REDACTED]"
+    )
+    UriUserInfo.replaceAllIn(
+      assignmentsRedacted,
+      matched => s"${matched.group(1)}[REDACTED]${matched.group(3)}"
+    )

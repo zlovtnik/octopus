@@ -189,6 +189,34 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `TIDB_POOL_SIZE` | `20` | Hikari/Doobie connection pool size |
 | `TIDB_HEALTHCHECK_RESERVE` | `2` | Pool connections reserved from worker admission for health/schema work |
 
+### Runtime & Processor Supervision
+
+| Variable | Default | Startup requirement / description |
+|---|---|---|
+| `OCTOPUS_ENVIRONMENT` | `production` | Runtime environment. Must be `development` when `OCTOPUS_CUTOVER_DEV_BYPASS=true`. |
+| `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the supervised processor lane. Requires `TIDB_ENABLED=true` and either a verified cutover configuration or the development bypass. |
+| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer lane. Requires `TIDB_ENABLED=true` and either a verified cutover configuration or the development bypass. |
+| `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated processor IDs. Every ID must be known and unique. |
+| `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Positive initial restart delay for retryable processor failures. |
+| `OCTOPUS_PROCESSOR_RESTART_MAX_DELAY_MS` | `30000` | Maximum restart delay; must be at least the base delay. |
+
+### Signed Cutover
+
+These settings are required when either runtime lane is enabled, except when
+`OCTOPUS_CUTOVER_DEV_BYPASS=true` in the `development` environment.
+
+| Variable | Default | Startup requirement / description |
+|---|---|---|
+| `OCTOPUS_CUTOVER_ARTIFACT_PATH` | *(empty)* | Path to the signed cutover artifact; required for an enabled runtime. |
+| `OCTOPUS_CUTOVER_SIGNATURE_PATH` | *(empty)* | Path to the detached artifact signature; required for an enabled runtime. |
+| `OCTOPUS_CUTOVER_PUBLIC_KEY_PATH` | *(empty)* | Path to the verification public key. Exactly one of this variable and `OCTOPUS_CUTOVER_PUBLIC_KEY_BASE64` is required. |
+| `OCTOPUS_CUTOVER_PUBLIC_KEY_BASE64` | *(empty)* | Base64-encoded verification public key. Exactly one public-key source is required. |
+| `OCTOPUS_CUTOVER_PUBLIC_KEY_SHA256` | *(empty)* | Required lowercase SHA-256 pin for the verification key. |
+| `OCTOPUS_CUTOVER_SCHEMA_VERSION` | `1` | Expected positive artifact schema version. |
+| `OCTOPUS_CUTOVER_CLUSTER_ID` | *(empty)* | Expected Redpanda cluster ID; required for an enabled runtime. |
+| `OCTOPUS_CUTOVER_REQUIRED_CONSUMER_GROUPS` | `[]` | Required, unique, version-suffixed groups; must exactly match every configured active consumer group. |
+| `OCTOPUS_CUTOVER_DEV_BYPASS` | `false` | Development-only bypass; requires `OCTOPUS_ENVIRONMENT=development` and still requires `TIDB_ENABLED=true`. |
+
 ### Redpanda Topics
 
 | Variable | Default | Description |
@@ -276,6 +304,9 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `TIDB_SSL_MODE` | `VERIFY_IDENTITY` | TLS mode; must remain `VERIFY_IDENTITY` when enabled |
 | `TIDB_SSL_CA_PATH` | *(empty)* | CA bundle path; required when enabled |
 | `TIDB_SSL_SERVER_NAME` | *(empty)* | TLS server name; must equal `TIDB_HOST` when enabled |
+| `TIDB_SSL_CLIENT_KEYSTORE_PATH` | *(empty)* | Optional client certificate key-store path; must be configured together with its password |
+| `TIDB_SSL_CLIENT_KEYSTORE_PASSWORD` | *(empty)* | Optional client key-store password; must be configured together with its path |
+| `TIDB_SSL_CLIENT_KEYSTORE_TYPE` | `PKCS12` | Client key-store type; must be `PKCS12` or `JKS` |
 | `TIDB_LOCAL_DEV_ALLOW_PUBLIC_KEY_RETRIEVAL` | `false` | Explicit opt-in for non-TLS local development only |
 
 ### Observability

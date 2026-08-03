@@ -7,5 +7,6 @@ final case class SyncEventHydrationCandidate(
     streamName: String,
     observedAt: Timestamp,
     payloadRef: String,
-    payloadJson: Option[String]
+    payloadJson: Option[String],
+    payloadSha256: Option[String] = None
 )

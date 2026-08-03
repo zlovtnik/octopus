@@ -168,8 +168,12 @@ object AppConfig:
     val errors =
       processorErrors(config.processors) ++
         ingestErrors(config.ingest) ++
-        kafkaErrors(config.kafka) ++
+        kafkaErrors(
+          config.kafka,
+          isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
+        ) ++
         cronErrors(config.cron) ++
+        httpErrors(config.http) ++
         stagedTiDbErrors ++
         runtimeErrors
 
@@ -216,7 +220,7 @@ object AppConfig:
       )
     ).flatten ++ idErrors
 
-  private def kafkaErrors(config: KafkaCfg): List[String] =
+  private def kafkaErrors(config: KafkaCfg, isDevelopment: Boolean): List[String] =
     List(
       Option.when(config.maxPollRecords <= 0)(
         "kafka.max-poll-records must be positive"
@@ -236,8 +240,19 @@ object AppConfig:
       Option.when(config.lockedBatchWindowMs <= 0L)(
         "kafka.locked-batch-window-ms must be positive"
       ),
-      Option.when(config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)(
+      Option.when(
+        (!isDevelopment && config.topicReplicationFactor < 3) ||
+          config.topicReplicationFactor <= 0 ||
+          config.topicReplicationFactor > Short.MaxValue
+      )(
         "kafka.topic-replication-factor must be between 3 and 32767"
+      )
+    ).flatten
+
+  private def httpErrors(config: HttpConfig): List[String] =
+    List(
+      Option.when(config.port <= 0 || config.port > 65535)(
+        "http.port must be between 1 and 65535"
       )
     ).flatten
 
@@ -305,6 +320,9 @@ object AppConfig:
       ),
       Option.when(config.warnOnly)(
         "tidb.warn-only must be false when TiDB readiness is enabled"
+      ),
+      Option.when(config.localDevAllowPublicKeyRetrieval)(
+        "tidb.local-dev-allow-public-key-retrieval must be false when TiDB readiness is enabled"
       )
     ).flatten
 

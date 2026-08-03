@@ -63,9 +63,34 @@ final class SyncEventHydrationService(
       case Right(candidates) =>
         candidates.traverse(hydrateOne).flatMap { results =>
           val nextStats = results.foldLeft(stats)((current, result) => current.add(result))
-          loop(candidates.lastOption, nextStats)
+          candidates.lastOption match
+            case Some(next) if after.forall(cursorAdvances(_, next)) =>
+              loop(Some(next), nextStats)
+            case _ =>
+              complete(nextStats, "non_advancing_cursor")
         }
     }
+
+  private def complete(stats: Stats, status: String): IO[Unit] =
+    IO(metrics.recordSyncEventHydrationBackfill(stats.hydrated, stats.failed)) *>
+      IO(log.info(
+        "sync_event_hydration_backfill",
+        "status" -> status,
+        "scanned" -> stats.scanned.toString,
+        "hydrated" -> stats.hydrated.toString,
+        "skipped" -> stats.skipped.toString,
+        "failed" -> stats.failed.toString
+      ))
+
+  private def cursorAdvances(
+      previous: SyncEventHydrationCandidate,
+      next: SyncEventHydrationCandidate
+  ): Boolean =
+    val observed = next.observedAt.compareTo(previous.observedAt)
+    observed > 0 ||
+      (observed == 0 && next.streamName.compareTo(previous.streamName) > 0) ||
+      (observed == 0 && next.streamName == previous.streamName &&
+        next.dedupeKey.compareTo(previous.dedupeKey) > 0)
 
   private def hydrateOne(
       candidate: SyncEventHydrationCandidate
@@ -98,7 +123,9 @@ final class SyncEventHydrationService(
     }
 
   private def resolveWithRetry(payloadRef: String, attempt: Int): IO[String] =
-    IO.blocking(payloadResolver.resolvePayload(payloadRef)).handleErrorWith {
+    dbSemaphore.permit.use { _ =>
+      IO.blocking(payloadResolver.resolvePayload(payloadRef))
+    }.handleErrorWith {
       case _: TidbPayloadReadException if attempt < 3 =>
         IO.sleep((25L * (1L << (attempt - 1))).millis) *>
           resolveWithRetry(payloadRef, attempt + 1)

@@ -63,6 +63,7 @@ private[tidb] object TidbTls:
     }
 
     val path = Files.createTempFile("octopus-tidb-ca-", ".p12")
+    path.toFile.deleteOnExit()
     setOwnerOnlyPermissions(path)
     val output = new BufferedOutputStream(Files.newOutputStream(path))
     try trustStore.store(output, passwordChars)

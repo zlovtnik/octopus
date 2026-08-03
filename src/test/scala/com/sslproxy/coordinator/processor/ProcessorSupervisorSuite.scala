@@ -16,7 +16,7 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   }
 
   test("enabled processor without a workload fails closed") {
-    val config = ProcessorConfig(List(ProcessorId.EventRetention.value), 1L, 10L)
+    val config = ProcessorConfig(List(ProcessorId.SyncScanIngestion.value), 1L, 10L)
     ProcessorSupervisor.create(config).flatMap { supervisor =>
       supervisor.run(Nil).compile.drain.attempt.map { result =>
         assert(result.isLeft)
@@ -33,7 +33,7 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   }
 
   test("terminal failure is isolated and visible in readiness") {
-    val id = ProcessorId.EventRetention
+    val id = ProcessorId.SyncScanIngestion
     val config = ProcessorConfig(List(id.value), 1L, 10L)
     ProcessorSupervisor.create(config).flatMap { supervisor =>
       val workload = ProcessorWorkload(
@@ -49,7 +49,7 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   }
 
   test("terminal startup failure is isolated and visible in readiness") {
-    val id = ProcessorId.EventRetention
+    val id = ProcessorId.SyncScanIngestion
     val config = ProcessorConfig(List(id.value), 1L, 10L)
     ProcessorSupervisor.create(config).flatMap { supervisor =>
       val workload = ProcessorWorkload(
@@ -71,6 +71,14 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     assertEquals(ProcessorSupervisor.retryDelay(100L, 1000L, 8, 0.0d), 1000.millis)
     assertEquals(ProcessorSupervisor.retryDelay(100L, 1000L, 1, -1.0d), 80.millis)
     assertEquals(ProcessorSupervisor.retryDelay(100L, 1000L, 1, 1.0d), 120.millis)
+  }
+
+  test("enabled processor with a disabled Octopus dependency fails closed") {
+    val config = ProcessorConfig(List(ProcessorId.EventRetention.value), 1L, 10L)
+    ProcessorSupervisor.create(config).attempt.map { result =>
+      assert(result.isLeft)
+      assert(result.swap.exists(_.getMessage.contains("event-retention->sync-result-consumer")))
+    }
   }
 
   private def awaitLifecycle(

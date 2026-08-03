@@ -12,7 +12,7 @@ import io.circe.{Json, parser as circeParser}
 import io.circe.syntax.*
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.util.Sha256Utils
-import com.sslproxy.coordinator.tidb.sql.WirelessSql
+import com.sslproxy.coordinator.tidb.sql.{JobBatchSql, WirelessSql}
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -160,6 +160,16 @@ class TidbRepository(xa: Transactor[IO]):
                               ORDER BY e.observed_at, e.stream_name, e.dedupe_key
                               LIMIT $limit""").update.run
         yield processed.toLong
+    }
+
+  def prepareLoadDispatch(
+      streamNames: List[String],
+      maxAttempts: Int,
+      limit: Int
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.prepare_load_dispatch") {
+      JobBatchSql.prepareLoadDispatch(streamNames, maxAttempts, limit)
+        .fold(0.pure[ConnectionIO])(_.run)
     }
 
   def recordScanRequests(records: List[ResolvedScanRequestRecord]): IO[Either[DatabaseError, Int]] =

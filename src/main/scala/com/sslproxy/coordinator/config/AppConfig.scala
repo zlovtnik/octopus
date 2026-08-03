@@ -158,10 +158,15 @@ object AppConfig:
       if config.tidb.enabled then enabledTiDbErrors(config.tidb)
       else List.empty
     val runtimeErrors =
-      if config.runtime.anyEnabled then activeRuntimeErrors(config)
+      if config.runtime.anyEnabled || config.processors.enabled.nonEmpty then activeRuntimeErrors(config)
       else List.empty
     val errors =
       processorErrors(config.processors) ++
+        List(
+          Option.when(config.processors.enabled.nonEmpty && !config.runtime.processorsEnabled)(
+            "processors.enabled requires runtime.processors-enabled=true"
+          )
+        ).flatten ++
         ingestErrors(config.ingest) ++
         kafkaErrors(
           config.kafka,

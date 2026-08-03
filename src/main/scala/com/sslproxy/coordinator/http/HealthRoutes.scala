@@ -1,6 +1,8 @@
 package com.sslproxy.coordinator.http
 
 import cats.effect.IO
+import cats.syntax.all.*
+import com.sslproxy.coordinator.processor.ProcessorReadiness
 import com.sslproxy.coordinator.tidb.TidbTransactor
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.circe.Json
@@ -8,15 +10,24 @@ import org.http4s.HttpRoutes
 import org.http4s.dsl.io.*
 import org.http4s.circe.*
 
-class HealthRoutes(transactor: TidbTransactor, metrics: CoordinatorMetrics):
+class HealthRoutes(
+    transactor: TidbTransactor,
+    metrics: CoordinatorMetrics,
+    processorReadiness: Option[ProcessorReadiness] = None
+):
 
   private def readinessResponse: IO[org.http4s.Response[IO]] =
-    transactor.healthCheck.flatMap { healthy =>
+    (
+      transactor.healthCheck,
+      processorReadiness.fold(IO.pure(true))(_.ready)
+    ).tupled.flatMap { case (databaseHealthy, processorsHealthy) =>
+      val healthy = databaseHealthy && processorsHealthy
       val status = if healthy then "UP" else "DOWN"
       val json = Json.obj(
         "status" -> Json.fromString(status),
         "components" -> Json.obj(
-          "tidb" -> Json.obj("status" -> Json.fromString(status))
+          "tidb" -> Json.obj("status" -> Json.fromString(if databaseHealthy then "UP" else "DOWN")),
+          "processors" -> Json.obj("status" -> Json.fromString(if processorsHealthy then "UP" else "DOWN"))
         )
       )
       if healthy then Ok(json)

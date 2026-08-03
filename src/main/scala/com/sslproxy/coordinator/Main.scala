@@ -13,6 +13,7 @@ import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.{PayloadAuditConsumer, SyncEventHydrationService}
 import com.sslproxy.coordinator.kafka.{KafkaComponents, ScanRequestStream, TidbLoadStream, TidbResultStream, WirelessConsumerService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorSupervisor, ProcessorWorkload}
 import com.sslproxy.coordinator.tidb.*
 import doobie.Transactor
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -49,8 +50,16 @@ object Main extends IOApp.Simple:
           val tiDbRepo = new TidbRepository(tiDbDoobieTx)
 
           Resource.eval(preflight.validate()).flatMap { _ =>
+            val enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
+            val lockedConsumerProcessorIds = Set(
+              ProcessorId.SyncScanIngestion,
+              ProcessorId.SyncLoadConsumer,
+              ProcessorId.SyncResultConsumer
+            )
+            val cutoverRequired =
+              cfg.runtime.consumersEnabled || enabledProcessorIds.exists(lockedConsumerProcessorIds.contains)
             val artifactIO =
-              if cfg.runtime.consumersEnabled then
+              if cutoverRequired then
                 if cfg.cutover.devBypass then
                   IO(log.warn("startup", "status" -> "cutover_dev_bypass")) *>
                     cats.effect.Clock[IO].realTimeInstant.map(t =>
@@ -109,80 +118,115 @@ object Main extends IOApp.Simple:
                   yield cronScheduler
 
                   Resource.eval(scheduler).flatMap { cronScheduler =>
+                    val processorStateStore = new TidbProcessorStateStore(tiDbDoobieTx)
+                    Resource.eval(ProcessorSupervisor.create(cfg.processors, processorStateStore)).flatMap { supervisor =>
+                      val healthRoutes = new HealthRoutes(oldTx, metrics, Some(supervisor.readiness))
 
-                    val healthRoutes = new HealthRoutes(oldTx, metrics)
-
-                    val httpPort = Port.fromInt(cfg.http.port).getOrElse(
-                      sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
-                    )
-                    val serverResource = EmberServerBuilder.default[IO]
-                      .withPort(httpPort)
-                      .withHost(host"0.0.0.0")
-                      .withHttpApp(healthRoutes.routes.orNotFound)
-                      .build
-
-                    serverResource.flatMap { _ =>
-                      val payloadAuditStream = PayloadAuditConsumer.stream(
-                        cfg.kafka, tiDbRepo, metrics, kafka.producer, dbSemaphore
+                      val httpPort = Port.fromInt(cfg.http.port).getOrElse(
+                        sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
                       )
+                      val serverResource = EmberServerBuilder.default[IO]
+                        .withPort(httpPort)
+                        .withHost(host"0.0.0.0")
+                        .withHttpApp(healthRoutes.routes.orNotFound)
+                        .build
 
-                      val wirelessStreams = WirelessConsumerService.allStreams(
-                        cfg.wireless, cfg.kafka, tiDbRepo, kafka.producer, dbSemaphore
-                      )
+                      serverResource.flatMap { _ =>
+                        val payloadAuditStream = PayloadAuditConsumer.stream(
+                          cfg.kafka, tiDbRepo, metrics, kafka.producer, dbSemaphore
+                        )
+                        val wirelessStreams = WirelessConsumerService.allStreams(
+                          cfg.wireless, cfg.kafka, tiDbRepo, kafka.producer, dbSemaphore
+                        )
 
-                      val processorStreams =
-                        cronScheduler.mainLoop
-                          .merge(cronScheduler.schemaRefresher)
-                          .merge(hydrationService.runOnce.handleErrorWith { error =>
-                            Stream.eval(IO(log.error(
-                              "sync_event_hydration_backfill",
-                              error,
-                              "status" -> "failed"
-                            )))
-                          })
+                        val (scanStream, loadStream, resultStream) = artifactOpt match
+                          case Some(artifact) =>
+                            (
+                              ScanRequestStream.run(
+                                cfg.kafka,
+                                artifact,
+                                tiDbRepo,
+                                payloadResolver,
+                                metrics,
+                                kafka.producer,
+                                dbSemaphore
+                              ),
+                              TidbLoadStream.run(
+                                cfg.kafka, artifact, tiDbRepo, handler, kafka.producer, dbSemaphore
+                              ),
+                              TidbResultStream.run(
+                                cfg.kafka, artifact, tiDbRepo, kafka.producer, dbSemaphore
+                              )
+                            )
+                          case None =>
+                            (Stream.empty[IO], Stream.empty[IO], Stream.empty[IO])
 
-                      artifactOpt match
-                        case Some(artifact) =>
-                          log.info("startup", "status" -> "consumers_enabled",
-                            "artifact_version" -> artifact.artifact.schemaVersion.toString,
-                            "cluster_id" -> artifact.artifact.clusterId,
-                            "scan_topic" -> cfg.kafka.scanTopic,
-                            "scan_group" -> cfg.kafka.scanConsumer,
-                            "load_topic" -> cfg.kafka.loadTopic,
-                            "load_group" -> cfg.kafka.loadConsumer,
-                            "result_topic" -> cfg.kafka.resultTopic,
-                            "result_group" -> cfg.kafka.resultConsumer)
-                        case None =>
-                          log.info("startup", "status" -> "consumers_disabled")
+                        val workloads = List(
+                          ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
+                          ProcessorWorkload(
+                            ProcessorId.SyncJobPlanner,
+                            cronScheduler.jobPlanningStream,
+                            startup = hydrationService.runOnce.compile.drain
+                          ),
+                          ProcessorWorkload(ProcessorId.SyncBacklogRecovery, cronScheduler.backlogRecoveryStream),
+                          ProcessorWorkload(ProcessorId.SyncLoadDispatch, cronScheduler.loadDispatchStream),
+                          ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
+                          ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream),
+                          ProcessorWorkload(ProcessorId.SyncOutboxPublisher, cronScheduler.outboxPublisherStream),
+                          ProcessorWorkload(ProcessorId.RfAlertProjector, cronScheduler.rfAlertStream)
+                        )
 
-                      val consumerStreams = artifactOpt match
-                        case Some(artifact) =>
-                          payloadAuditStream
-                            .merge(wirelessStreams)
-                            .merge(ScanRequestStream.run(
-                              cfg.kafka,
-                              artifact,
-                              tiDbRepo,
-                              payloadResolver,
-                              metrics,
-                              kafka.producer,
-                              dbSemaphore
-                            ))
-                            .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, kafka.producer, dbSemaphore))
-                            .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, kafka.producer, dbSemaphore))
-                        case None =>
-                          Stream.empty
+                        val legacyProcessorStreams =
+                          cronScheduler.mainLoop
+                            .merge(cronScheduler.schemaRefresher)
+                            .merge(hydrationService.runOnce.handleErrorWith { error =>
+                              Stream.eval(IO(log.error(
+                                "sync_event_hydration_backfill",
+                                error,
+                                "status" -> "failed"
+                              )))
+                            })
+                        val processorStreams =
+                          if cfg.processors.enabled.isEmpty then legacyProcessorStreams
+                          else
+                            cronScheduler.supportStream
+                              .merge(cronScheduler.schemaRefresher)
+                              .merge(supervisor.run(workloads))
 
-                      val streams = enabledRuntimeStreams(
-                        cfg.runtime,
-                        processorStreams,
-                        consumerStreams
-                      )
+                        artifactOpt match
+                          case Some(artifact) =>
+                            log.info("startup", "status" -> "consumers_enabled",
+                              "artifact_version" -> artifact.artifact.schemaVersion.toString,
+                              "cluster_id" -> artifact.artifact.clusterId,
+                              "scan_topic" -> cfg.kafka.scanTopic,
+                              "scan_group" -> cfg.kafka.scanConsumer,
+                              "load_topic" -> cfg.kafka.loadTopic,
+                              "load_group" -> cfg.kafka.loadConsumer,
+                              "result_topic" -> cfg.kafka.resultTopic,
+                              "result_group" -> cfg.kafka.resultConsumer)
+                          case None =>
+                            log.info("startup", "status" -> "consumers_disabled")
 
-                      Resource.make(
-                        tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
-                          streams.compile.drain.start
-                      )(_.cancel)
+                        val auxiliaryConsumers =
+                          if cfg.runtime.consumersEnabled then payloadAuditStream.merge(wirelessStreams)
+                          else Stream.empty
+                        val legacyLockedConsumers =
+                          if cfg.runtime.consumersEnabled && cfg.processors.enabled.isEmpty then
+                            scanStream.merge(loadStream).merge(resultStream)
+                          else Stream.empty
+                        val consumerStreams = auxiliaryConsumers.merge(legacyLockedConsumers)
+
+                        val streams = enabledRuntimeStreams(
+                          cfg.runtime,
+                          processorStreams,
+                          consumerStreams
+                        )
+
+                        Resource.make(
+                          tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
+                            streams.compile.drain.start
+                        )(_.cancel)
+                      }
                     }
                   }
                 }

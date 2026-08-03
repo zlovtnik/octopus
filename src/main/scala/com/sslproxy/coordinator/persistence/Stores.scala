@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.persistence
 
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision}
-import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorStatus}
+import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorRunStatus, ProcessorStatus}
 import com.sslproxy.coordinator.tidb.{LeaseIdentity, OutboxFailureDisposition, OutboxRecord}
 
 import java.time.Instant
@@ -32,3 +32,11 @@ trait MaintenanceStore[F[_]]:
 trait ProcessorStateStore[F[_]]:
   def load: DbResultT[F, Map[ProcessorId, ProcessorStatus]]
   def persist(id: ProcessorId, status: ProcessorStatus, observedAt: Instant): DbResultT[F, Unit]
+  def startRun(id: ProcessorId, runId: String, startedAt: Instant): DbResultT[F, Unit]
+  def finishRun(
+      runId: String,
+      status: ProcessorRunStatus,
+      errorClass: Option[String],
+      errorText: Option[String],
+      finishedAt: Instant
+  ): DbResultT[F, Unit]

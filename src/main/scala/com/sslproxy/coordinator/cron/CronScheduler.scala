@@ -36,7 +36,41 @@ final class CronScheduler private (
       }
     }
 
-  val mainLoop: Stream[IO, Unit] =
+  val jobPlanningStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
+      dbSemaphore.permit.use(_ => processIngest())
+    }
+
+  val backlogRecoveryStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
+      dbSemaphore.permit.use(_ => recoverStaleBatches())
+    }
+
+  val loadDispatchStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        repo.prepareLoadDispatch(
+          ingestConfig.loadStreamNames,
+          cfg.batchMaxAttempts,
+          cfg.ingestBatchSize
+        ).flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  val outboxPublisherStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
+      dispatchBatches()
+    }
+
+  val rfAlertStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](10.seconds).evalMap { _ =>
+      dbSemaphore.permit.use(_ => shadowAudit())
+    }
+
+  val supportStream: Stream[IO, Unit] =
     val backpressureStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
@@ -44,30 +78,6 @@ final class CronScheduler private (
           backpressureService.checkAndAct.void
         }.handleErrorWith { err =>
           IO(log.error("cron_backpressure", err, "status" -> "failed"))
-        }
-      }
-
-    val ingestStream = Stream
-      .awakeEvery[IO](cfg.idleSleepMs.millis)
-      .evalMap { _ =>
-        dbSemaphore.permit.use(_ => processIngest()).handleErrorWith { err =>
-          IO(log.error("cron_ingest", err, "status" -> "failed"))
-        }
-      }
-
-    val recoverAndDispatchStream = Stream
-      .awakeEvery[IO](cfg.idleSleepMs.millis)
-      .evalMap { _ =>
-        (dbSemaphore.permit.use(_ => recoverStaleBatches()) >> dispatchBatches()).handleErrorWith { err =>
-          IO(log.error("cron_dispatch", err, "status" -> "failed"))
-        }
-      }
-
-    val shadowAuditStream = Stream
-      .awakeEvery[IO](10.seconds)
-      .evalMap { _ =>
-        dbSemaphore.permit.use(_ => shadowAudit()).handleErrorWith { err =>
-          IO(log.error("cron_shadow_audit", err, "status" -> "failed"))
         }
       }
 
@@ -80,11 +90,20 @@ final class CronScheduler private (
           }
       }
 
-    backpressureStream
-      .merge(ingestStream)
-      .merge(recoverAndDispatchStream)
-      .merge(shadowAuditStream)
-      .merge(metricsStream)
+    backpressureStream.merge(metricsStream)
+
+  val mainLoop: Stream[IO, Unit] =
+    supportStream
+      .merge(resilient(jobPlanningStream, "cron_ingest"))
+      .merge(resilient(backlogRecoveryStream, "cron_recovery"))
+      .merge(resilient(loadDispatchStream, "cron_load_dispatch"))
+      .merge(resilient(outboxPublisherStream, "cron_dispatch"))
+      .merge(resilient(rfAlertStream, "cron_shadow_audit"))
+
+  private def resilient(stream: Stream[IO, Unit], event: String): Stream[IO, Unit] =
+    stream.handleErrorWith { error =>
+      Stream.eval(IO(log.error(event, error, "status" -> "failed"))) ++ resilient(stream, event)
+    }
 
   private def processIngest(): IO[Unit] =
     val budget = backpressureService.budget
@@ -93,7 +112,8 @@ final class CronScheduler private (
       case Left(err) =>
         IO(log.warn("ingest_ledger", "status" -> "pending_count_failed",
           "operation" -> err.operation, "error" -> err.message)) *>
-          IO(metrics.recordIngestInvocation(false))
+          IO(metrics.recordIngestInvocation(false)) *>
+          IO.raiseError(databaseFailure(err))
 
       case Right(pendingCount) =>
         val logPending = IO(log.info("ingest_ledger", "status" -> "pending", "count" -> pendingCount.toString))
@@ -114,7 +134,8 @@ final class CronScheduler private (
             case Left(err) =>
               IO(log.error("ingest_ledger", "status" -> "failed",
                 "operation" -> err.operation, "error" -> err.message)) *>
-                IO(metrics.recordIngestInvocation(false))
+                IO(metrics.recordIngestInvocation(false)) *>
+                IO.raiseError(databaseFailure(err))
 
             case Right(processed) =>
               IO(metrics.recordIngestInvocation(true)) *>
@@ -129,7 +150,8 @@ final class CronScheduler private (
     repo.recoverExpiredOutboxLeases().flatMap {
       case Left(err) =>
         IO(log.error("outbox_lease_recovery", "status" -> "failed",
-          "operation" -> err.operation, "error" -> err.message))
+          "operation" -> err.operation, "error" -> err.message)) *>
+          IO.raiseError(databaseFailure(err))
       case Right(count) =>
         IO.whenA(count > 0)(
           IO(log.info("outbox_lease_recovery", "status" -> "recovered", "count" -> count.toString))
@@ -154,7 +176,8 @@ final class CronScheduler private (
           case Left(err) =>
             IO(log.error("shadow_audit", "status" -> "failed",
               "operation" -> err.operation, "error" -> err.message)) *>
-              lastShadowAuditMs.set(now)
+              lastShadowAuditMs.set(now) *>
+              IO.raiseError(databaseFailure(err))
 
           case Right(alerts) =>
             IO.whenA(alerts.nonEmpty)(
@@ -163,6 +186,9 @@ final class CronScheduler private (
             ) *> lastShadowAuditMs.set(now)
         }
     }
+
+  private def databaseFailure(error: com.sslproxy.coordinator.domain.DatabaseError): RuntimeException =
+    RuntimeException(s"${error.operation}: ${error.message}", error.cause)
 
 object CronScheduler:
   private val log = StructuredLogger(getClass)

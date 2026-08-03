@@ -1,8 +1,12 @@
 package com.sslproxy.coordinator.processor
 
-import cats.effect.{IO, Ref}
+import cats.data.EitherT
+import cats.effect.{Clock, IO, Ref}
+import cats.syntax.all.*
 import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
+import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.persistence.ProcessorStateStore
 import com.sslproxy.coordinator.tidb.TidbErrorClass
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -15,6 +19,12 @@ enum ProcessorLifecycle(val value: String):
   case Ready extends ProcessorLifecycle("ready")
   case BackingOff extends ProcessorLifecycle("backing_off")
   case FailedTerminal extends ProcessorLifecycle("failed_terminal")
+
+enum ProcessorRunStatus(val value: String):
+  case Running extends ProcessorRunStatus("running")
+  case Retrying extends ProcessorRunStatus("retrying")
+  case FailedTerminal extends ProcessorRunStatus("failed_terminal")
+  case Cancelled extends ProcessorRunStatus("cancelled")
 
 final case class ProcessorStatus(
     lifecycle: ProcessorLifecycle,
@@ -41,7 +51,8 @@ final class ProcessorReadiness private[processor] (
 final class ProcessorSupervisor private (
     config: ProcessorConfig,
     enabled: Set[ProcessorId],
-    statusesRef: Ref[IO, Map[ProcessorId, ProcessorStatus]]
+    statusesRef: Ref[IO, Map[ProcessorId, ProcessorStatus]],
+    stateStore: ProcessorStateStore[IO]
 ):
   import ProcessorSupervisor.log
 
@@ -70,26 +81,39 @@ final class ProcessorSupervisor private (
     Stream.eval(runForever(workload, 0))
 
   private def runForever(workload: ProcessorWorkload, restartCount: Int): IO[Unit] =
-    (setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
-      workload.startup *>
-      setStatus(workload.id, ProcessorLifecycle.Ready, restartCount, None) *>
-      workload.stream.compile.drain).attempt.flatMap {
+    val runId = java.util.UUID.randomUUID().toString
+    val execute =
+      (setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
+        workload.startup *>
+        setStatus(workload.id, ProcessorLifecycle.Ready, restartCount, None) *>
+        workload.stream.compile.drain)
+        .onCancel(finishRun(runId, ProcessorRunStatus.Cancelled, None))
+
+    (Clock[IO].realTimeInstant.flatMap { startedAt =>
+      persist(stateStore.startRun(workload.id, runId, startedAt))
+    } *> execute.attempt.flatMap {
         case Right(_) =>
-          retry(workload, restartCount, IllegalStateException("processor stream completed unexpectedly"))
+          val error = IllegalStateException("processor stream completed unexpectedly")
+          finishRun(runId, ProcessorRunStatus.Retrying, Some(error)) *>
+            retry(workload, restartCount, error)
         case Left(error: TerminalProcessorError) =>
           val message = safeMessage(error)
-          setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
+          finishRun(runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
+            setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
             IO(log.error("processor",
               "status" -> "failed_terminal", "processor" -> workload.id.value,
               "error" -> message)) *> IO.never
         case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
           val message = safeMessage(error)
-          setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
+          finishRun(runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
+            setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
             IO(log.error("processor",
               "status" -> "failed_terminal", "processor" -> workload.id.value,
               "error" -> message)) *> IO.never
-        case Left(error) => retry(workload, restartCount, error)
-      }
+        case Left(error) =>
+          finishRun(runId, ProcessorRunStatus.Retrying, Some(error)) *>
+            retry(workload, restartCount, error)
+      })
 
   private def retry(
       workload: ProcessorWorkload,
@@ -119,7 +143,32 @@ final class ProcessorSupervisor private (
       restartCount: Int,
       lastError: Option[String]
   ): IO[Unit] =
-    statusesRef.update(_.updated(id, ProcessorStatus(lifecycle, restartCount, lastError)))
+    val status = ProcessorStatus(lifecycle, restartCount, lastError)
+    Clock[IO].realTimeInstant.flatMap { observedAt =>
+      persist(stateStore.persist(id, status, observedAt)) *>
+        statusesRef.update(_.updated(id, status))
+    }
+
+  private def finishRun(
+      runId: String,
+      status: ProcessorRunStatus,
+      error: Option[Throwable]
+  ): IO[Unit] =
+    Clock[IO].realTimeInstant.flatMap { finishedAt =>
+      persist(stateStore.finishRun(
+        runId,
+        status,
+        error.map(_.getClass.getSimpleName),
+        error.map(safeMessage),
+        finishedAt
+      ))
+    }
+
+  private def persist[A](result: EitherT[IO, DatabaseError, A]): IO[A] =
+    result.value.flatMap {
+      case Right(value) => IO.pure(value)
+      case Left(error) => IO.raiseError(ProcessorPersistenceException(error))
+    }
 
   private def safeMessage(error: Throwable): String =
     Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
@@ -128,16 +177,66 @@ object ProcessorSupervisor:
   private val log = StructuredLogger(getClass)
 
   def create(config: ProcessorConfig): IO[ProcessorSupervisor] =
+    create(config, VolatileProcessorStateStore)
+
+  def create(
+      config: ProcessorConfig,
+      stateStore: ProcessorStateStore[IO]
+  ): IO[ProcessorSupervisor] =
     for
       enabled <- IO.fromEither(
         config.enabled.traverse(ProcessorId.fromString).map(_.toSet).left.map(IllegalArgumentException(_))
       )
+      _ <- IO.fromEither(validateDependencies(enabled))
+      persisted <- liftPersistence(stateStore.load)
       initial = ProcessorId.octopusOwned.iterator.map { id =>
         val lifecycle = if enabled.contains(id) then ProcessorLifecycle.Starting else ProcessorLifecycle.Disabled
-        id -> ProcessorStatus(lifecycle, 0, None)
+        val previous = persisted.get(id)
+        id -> ProcessorStatus(
+          lifecycle,
+          previous.fold(0)(_.restartCount),
+          previous.flatMap(_.lastError)
+        )
       }.toMap
       statuses <- Ref.of[IO, Map[ProcessorId, ProcessorStatus]](initial)
-    yield ProcessorSupervisor(config, enabled, statuses)
+      supervisor = ProcessorSupervisor(config, enabled, statuses, stateStore)
+      now <- Clock[IO].realTimeInstant
+      _ <- initial.toList.traverse_ { case (id, status) =>
+        supervisor.persist(stateStore.persist(id, status, now))
+      }
+    yield supervisor
+
+  private def liftPersistence[A](result: EitherT[IO, DatabaseError, A]): IO[A] =
+    result.value.flatMap {
+      case Right(value) => IO.pure(value)
+      case Left(error) => IO.raiseError(ProcessorPersistenceException(error))
+    }
+
+  private def validateDependencies(enabled: Set[ProcessorId]): Either[IllegalArgumentException, Unit] =
+    val missing = enabled.toList.flatMap { id =>
+      ProcessorCatalog.byId(id).dependencies.filter { dependency =>
+        dependency.owner == ProcessorOwner.Octopus && !enabled.contains(dependency)
+      }.map(dependency => s"${id.value}->${dependency.value}")
+    }.sorted
+    Either.cond(
+      missing.isEmpty,
+      (),
+      IllegalArgumentException(s"enabled processors have disabled dependencies: ${missing.mkString(",")}")
+    )
+
+  private object VolatileProcessorStateStore extends ProcessorStateStore[IO]:
+    def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
+    def persist(id: ProcessorId, status: ProcessorStatus, observedAt: java.time.Instant) =
+      EitherT.rightT[IO, DatabaseError](())
+    def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
+      EitherT.rightT[IO, DatabaseError](())
+    def finishRun(
+        runId: String,
+        status: ProcessorRunStatus,
+        errorClass: Option[String],
+        errorText: Option[String],
+        finishedAt: java.time.Instant
+    ) = EitherT.rightT[IO, DatabaseError](())
 
   private[processor] def retryDelay(
       baseDelayMs: Long,
@@ -154,3 +253,6 @@ object ProcessorSupervisor:
   private def jitterFraction(id: ProcessorId, attempt: Int): Double =
     val bucket = Math.floorMod(id.value.hashCode * 31 + attempt, 401)
     (bucket.toDouble - 200.0d) / 1000.0d
+
+private final case class ProcessorPersistenceException(error: DatabaseError)
+    extends RuntimeException(s"${error.operation}: ${error.message}", error.cause)

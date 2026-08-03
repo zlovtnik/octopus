@@ -7,6 +7,67 @@ import io.circe.Json
 import java.sql.Timestamp
 
 object WirelessSql:
+  def lookupDevice(mac: String): Fragment =
+    sql"""SELECT JSON_OBJECT(
+            'device_id', mac_id,
+            'username', username,
+            'display_name', display_name,
+            'hostname', hostname
+          ) AS device_json
+          FROM devices
+          WHERE LOWER(mac_id) = LOWER($mac)
+          LIMIT 1"""
+
+  val AuthorizedNetworksQuery: Fragment =
+    sql"""SELECT COALESCE(
+            JSON_ARRAYAGG(
+              JSON_OBJECT(
+                'ssid', ssid,
+                'bssid', LOWER(bssid),
+                'location_id', location_id,
+                'label', label,
+                'enabled', enabled
+              )
+            ),
+            '[]'
+          ) AS networks_json
+          FROM wireless_authorized_networks
+          WHERE enabled = TRUE"""
+
+  def upsertClientProbe(
+      ssid: String,
+      clientMac: String,
+      observedBssid: Option[String],
+      firstSeen: Option[Timestamp],
+      lastSeen: Option[Timestamp],
+      probeCount: Long,
+      locationId: Option[String],
+      batchId: String
+  ): Fragment =
+    sql"""INSERT INTO wireless_clients (
+            ssid, client_mac, known_bssid, first_seen, last_seen,
+            probe_count, location_id, last_probe_batch_id
+          ) VALUES (
+            $ssid, $clientMac,
+            (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
+             WHERE LOWER(authorized.ssid) = LOWER($ssid) AND authorized.enabled = TRUE
+               AND ($observedBssid IS NULL OR LOWER(authorized.bssid) = LOWER($observedBssid))
+               AND ($locationId IS NULL OR authorized.location_id = $locationId)
+             HAVING COUNT(*) = 1),
+            $firstSeen, $lastSeen, $probeCount, $locationId, $batchId
+          ) ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(wireless_clients.first_seen, VALUES(first_seen)),
+            last_seen = GREATEST(wireless_clients.last_seen, VALUES(last_seen)),
+            probe_count = CASE
+              WHEN wireless_clients.last_probe_batch_id IS NULL
+                OR wireless_clients.last_probe_batch_id != VALUES(last_probe_batch_id)
+              THEN wireless_clients.probe_count + VALUES(probe_count)
+              ELSE wireless_clients.probe_count
+            END,
+            known_bssid = COALESCE(VALUES(known_bssid), wireless_clients.known_bssid),
+            location_id = COALESCE(VALUES(location_id), wireless_clients.location_id),
+            last_probe_batch_id = VALUES(last_probe_batch_id)"""
+
   def upsertBacklog(
       dedupeKey: String,
       streamName: String,

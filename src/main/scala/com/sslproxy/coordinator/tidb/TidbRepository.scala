@@ -5,14 +5,13 @@ import cats.effect.implicits.*
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.cutover.CutoffKey
-import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord, SyncLoad}
+import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord}
 import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
-import io.circe.syntax.*
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.util.Sha256Utils
-import com.sslproxy.coordinator.tidb.sql.{JobBatchSql, WirelessSql}
+import com.sslproxy.coordinator.tidb.sql.{IngestionSql, JobBatchSql, OutboxSql, ProjectionSql, ResultSql, WirelessProjectionSql, WirelessSql}
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -23,15 +22,12 @@ class TidbRepository(xa: Transactor[IO]):
 
   def checkConnectivity(): IO[Either[DatabaseError, Unit]] =
     runDb("tidb.check_connectivity") {
-      sql"SELECT 1".query[Int].unique.map(_ => ())
+      IngestionSql.ConnectivityQuery.unique.void
     }
 
   def pendingLedgerCount(): IO[Either[DatabaseError, Long]] =
     runDb("tidb.pending_ledger_count") {
-      sql"""SELECT COUNT(*) FROM sync_events
-            WHERE status IN ('pending', 'processing')"""
-        .query[Long]
-        .unique
+      IngestionSql.PendingLedgerCountQuery.unique
     }
 
   def loadConsumerOffsets(
@@ -39,127 +35,24 @@ class TidbRepository(xa: Transactor[IO]):
       topic: String
   ): IO[Either[DatabaseError, Set[CutoffKey]]] =
     runDb("tidb.load_consumer_offsets") {
-      sql"""SELECT partition_id FROM consumer_offsets
-            WHERE group_id = $groupId AND topic = $topic"""
-        .query[Int].to[List].map { partitions =>
+      IngestionSql.consumerPartitions(groupId, topic).to[List].map { partitions =>
           partitions.map(p => CutoffKey(groupId, topic, p)).toSet
-        }
+      }
     }
 
   def processIngestLedger(
       streamNames: List[String],
-      loadStreamNames: List[String],
       scanMaxAttempts: Int,
       scanRetryBackoffSeconds: Int,
       ingestBatchSize: Int
   ): IO[Either[DatabaseError, Long]] =
     runDb("tidb.process_ingest_ledger") {
-      val limit = ingestBatchSize max 1
-      val backoffSecs = scanRetryBackoffSeconds max 1
-
-      if streamNames.isEmpty then 0L.pure[ConnectionIO]
-      else
-        val streamClause = streamNames.map(value => fr0"$value").intercalate(fr",")
-        val loadClause = loadStreamNames.map(value => fr0"$value").intercalate(fr",")
-        val maxAttempts = scanMaxAttempts.max(1)
-        val candidates =
-          fr"""FROM sync_events e
-               WHERE e.stream_name IN (""" ++ streamClause ++ fr""" )
-                 AND e.status IN ('pending', 'failed')
-                 AND e.attempt_count < $maxAttempts
-                 AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
-               ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-               LIMIT $limit"""
-
-        val insertJobs =
-          fr"""INSERT INTO sync_jobs (
-                 job_id, stream_name, dedupe_key, status, attempt_count, created_at
-               )
-               SELECT UUID(), e.stream_name, e.dedupe_key, 'pending', 0, CURRENT_TIMESTAMP(6) """ ++
-            candidates ++
-            fr""" ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id"""
-
-        val insertBatches =
-          fr"""INSERT INTO sync_batches (
-                 batch_id, job_id, batch_no, payload_ref, status, row_count,
-                 attempt_count, dedupe_key, stream_name, cursor_start, cursor_end,
-                 created_at, updated_at
-               )
-               SELECT UUID(), j.job_id, 0, e.payload_ref, 'pending', 1,
-                      0, e.dedupe_key, e.stream_name,
-                      COALESCE(c.cursor_value, '0'),
-                      CASE
-                        WHEN e.stream_name = 'wireless.audit'
-                        THEN CAST(FLOOR(UNIX_TIMESTAMP(e.observed_at)) AS CHAR)
-                        ELSE e.dedupe_key
-                      END,
-                      CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-               FROM sync_events e
-               JOIN sync_jobs j
-                 ON j.stream_name = e.stream_name AND j.dedupe_key = e.dedupe_key
-                LEFT JOIN sync_cursors c ON c.stream_name = e.stream_name
-                WHERE e.status IN ('pending', 'failed')
-                  AND e.stream_name IN (""" ++ streamClause ++ fr""" )
-                  AND e.attempt_count < $maxAttempts
-                  AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
-                ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-                LIMIT $limit
-                ON DUPLICATE KEY UPDATE
-                  batch_id = sync_batches.batch_id,
-                  created_at = CURRENT_TIMESTAMP(6)"""
-
-        val insertOutbox =
-          if loadStreamNames.isEmpty then 0.pure[ConnectionIO]
-          else
-            (fr"""INSERT INTO outbox_events (
-                    outbox_id, source_type, source_id, event_type,
-                    destination_topic, message_key, payload, status,
-                    attempt_count, max_attempts, next_attempt_at, created_at, updated_at
-                  )
-                  SELECT UUID(), 'sync_batch', b.batch_id, 'sync.load.requested',
-                         'sync.oracle.load', CONCAT(b.batch_id, ':', b.attempt_count + 1),
-                         JSON_OBJECT(
-                           'job_id', b.job_id,
-                           'batch_id', b.batch_id,
-                           'batch_no', b.batch_no,
-                           'stream_name', b.stream_name,
-                           'payload_ref', b.payload_ref,
-                           'cursor_start', b.cursor_start,
-                           'cursor_end', b.cursor_end,
-                           'attempt', b.attempt_count + 1
-                         ),
-                         'pending', 0, $maxAttempts, CURRENT_TIMESTAMP(6),
-                         CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                  FROM sync_batches b
-                  WHERE b.status = 'pending'
-                    AND b.stream_name IN (""" ++ loadClause ++ fr""" )
-                  ORDER BY b.created_at, b.batch_id
-                  LIMIT $limit
-                  ON DUPLICATE KEY UPDATE payload = VALUES(payload), updated_at = CURRENT_TIMESTAMP(6)""").update.run
-
-        for
-          _ <- insertJobs.update.run
-          _ <- insertBatches.update.run
-          _ <- insertOutbox
-          processed <- (fr"""UPDATE sync_events e
-                              SET e.status = 'batched',
-                                  e.attempt_count = e.attempt_count + 1,
-                                  e.last_error = NULL,
-                                  e.updated_at = CURRENT_TIMESTAMP(6)
-                              WHERE e.status IN ('pending', 'failed')
-                                AND e.stream_name IN (""" ++ streamClause ++ fr""" )
-                                AND e.attempt_count < $maxAttempts
-                                AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
-                                AND EXISTS (
-                                  SELECT 1 FROM sync_batches b
-                                  WHERE b.stream_name = e.stream_name
-                                    AND b.dedupe_key = e.dedupe_key
-                                    AND b.status = 'pending'
-                                    AND b.created_at >= e.updated_at
-                                )
-                              ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-                              LIMIT $limit""").update.run
-        yield processed.toLong
+      JobBatchSql.processIngestLedger(
+        streamNames,
+        scanMaxAttempts,
+        scanRetryBackoffSeconds,
+        ingestBatchSize
+      )
     }
 
   def prepareLoadDispatch(
@@ -203,42 +96,7 @@ class TidbRepository(xa: Transactor[IO]):
       limit: Int
   ): IO[Either[DatabaseError, List[SyncEventHydrationCandidate]]] =
     runDb("tidb.find_sync_events_needing_hydration") {
-      val cursorClause = after.fold(Fragment.empty) { cursor =>
-        fr"""AND (
-              e.observed_at > ${cursor.observedAt}
-              OR (e.observed_at = ${cursor.observedAt} AND e.stream_name > ${cursor.streamName})
-              OR (e.observed_at = ${cursor.observedAt}
-                  AND e.stream_name = ${cursor.streamName}
-                  AND e.dedupe_key > ${cursor.dedupeKey})
-            )"""
-      }
-      (fr"""SELECT e.dedupe_key, e.stream_name, e.observed_at, e.payload_ref,
-                   CAST(e.payload AS CHAR), e.payload_sha256
-            FROM sync_events e
-            WHERE e.payload_archived = 0
-              AND NOT EXISTS (
-                SELECT 1
-                FROM sync_event_tombstones tombstone
-                WHERE tombstone.dedupe_key = e.dedupe_key
-                  AND tombstone.stream_name = e.stream_name
-                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
-              )
-              AND (
-                e.payload IS NULL
-                OR (
-                  e.stream_name = 'wireless.audit'
-                  AND (
-                    e.event_type IS NULL
-                    OR e.schema_version IS NULL
-                    OR e.sensor_id IS NULL
-                    OR e.wireless_search_text IS NULL
-                  )
-                )
-              )""" ++ cursorClause ++
-        fr"""ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-            LIMIT ${limit.max(1)}""")
-        .query[(String, String, java.sql.Timestamp, String, Option[String], Option[String])]
-        .to[List]
+      IngestionSql.hydrationCandidates(after, limit).to[List]
         .map(_.map(SyncEventHydrationCandidate.apply.tupled))
     }
 
@@ -287,11 +145,8 @@ class TidbRepository(xa: Transactor[IO]):
         .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
     }
     val observedAt = Option(record.observedAt).filter(_.nonEmpty).flatMap(parseTs)
-    val payload = Option(record.payloadJson)
     val jobId = stableUuid(s"job:${record.streamName}:${record.dedupeKey}")
     val batchId = stableUuid(s"batch:${record.streamName}:${record.dedupeKey}")
-    val loadMessageKey = s"$batchId:1"
-    val outboxId = stableUuid(s"outbox:sync.oracle.load:$loadMessageKey")
 
     def validate: ConnectionIO[Unit] =
       if record.streamName.isBlank then FC.raiseError(IllegalArgumentException("scan request stream_name must not be empty"))
@@ -305,14 +160,7 @@ class TidbRepository(xa: Transactor[IO]):
       else ().pure[ConnectionIO]
 
     def existingEvidence(meta: BrokerRecordMetadata): ConnectionIO[Option[(String, String, String)]] =
-      sql"""SELECT payload_sha256, artifact_sha256, dedupe_key
-            FROM ingestion_evidence
-            WHERE topic = ${meta.topic}
-              AND partition_id = ${meta.partition}
-              AND record_offset = ${meta.offset}
-              AND group_id = ${meta.consumerGroup}"""
-        .query[(String, String, String)]
-        .option
+      IngestionSql.existingEvidence(meta).option
 
     def verifyExisting(meta: BrokerRecordMetadata, existing: (String, String, String)): ConnectionIO[Unit] =
       val (payloadSha, cutoverSha, dedupeKey) = existing
@@ -324,16 +172,12 @@ class TidbRepository(xa: Transactor[IO]):
 
     def persistEvidence(meta: BrokerRecordMetadata, disposition: IngestionDisposition): ConnectionIO[Unit] =
       for
-        _ <- sql"""INSERT INTO ingestion_evidence (
-                     topic, partition_id, record_offset, group_id, group_version,
-                     artifact_sha256, message_key, payload_sha256, disposition,
-                     dedupe_key, first_seen_at, updated_at
-                   ) VALUES (
-                     ${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.consumerGroup}, ${meta.groupVersion},
-                     ${meta.artifactSha256}, ${meta.messageKey}, ${record.sourceRecordSha256}, ${disposition.databaseValue},
-                     ${record.dedupeKey}, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                   ) ON DUPLICATE KEY UPDATE
-                     updated_at = CURRENT_TIMESTAMP(6)""".update.run
+        _ <- IngestionSql.persistEvidence(
+          meta,
+          record.sourceRecordSha256,
+          record.dedupeKey,
+          disposition
+        ).run
         stored <- existingEvidence(meta).flatMap(_.fold(
           FC.raiseError[(String, String, String)](
             IllegalStateException("ingestion evidence disappeared after upsert")
@@ -345,70 +189,21 @@ class TidbRepository(xa: Transactor[IO]):
 
     def createState: ConnectionIO[IngestionDecision] =
       for
-        tombstoned <- sql"""SELECT EXISTS(
-                              SELECT 1 FROM sync_event_tombstones
-                              WHERE stream_name = ${record.streamName}
-                                AND dedupe_key = ${record.dedupeKey}
-                                AND expires_at > CURRENT_TIMESTAMP(6)
-                            )""".query[Int].unique.map(_ == 1)
+        tombstoned <- IngestionSql.activeTombstone(record.streamName, record.dedupeKey).unique.map(_ == 1)
         decision <-
           if tombstoned then
             IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId).pure[ConnectionIO]
           else
             for
-              existed <- sql"""SELECT EXISTS(
-                                  SELECT 1 FROM sync_events
-                                  WHERE dedupe_key = ${record.dedupeKey}
-                                    AND stream_name = ${record.streamName}
-                                )""".query[Int].unique.map(_ == 1)
-              _ <- sql"""INSERT INTO sync_events (
-                                   dedupe_key, stream_name, observed_at, payload_ref, payload,
-                                   payload_sha256, status, attempt_count, last_error,
-                                   producer, event_kind, created_at, updated_at
-                                 ) VALUES (
-                                   ${record.dedupeKey}, ${record.streamName}, ${observedAt.orNull}, $payloadRef, $payload,
-                                   ${record.eventPayloadSha256}, 'batched', 1, NULL,
-                                   'ssl-proxy', $eventKind, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                                 ) ON DUPLICATE KEY UPDATE dedupe_key = sync_events.dedupe_key""".update.run
+              existed <- IngestionSql.syncEventExists(record.streamName, record.dedupeKey).unique.map(_ == 1)
+              _ <- IngestionSql.insertSyncEvent(record, observedAt.orNull, eventKind).run
               _ <- hydrateSyncEvent(record, eventKind)
-              _ <- sql"""INSERT INTO sync_jobs (
-                            job_id, stream_name, dedupe_key, status, attempt_count, created_at
-                          ) VALUES (
-                            $jobId, ${record.streamName}, ${record.dedupeKey}, 'pending', 0, CURRENT_TIMESTAMP(6)
-                          ) ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id""".update.run
-              cursor <- sql"""SELECT cursor_value FROM sync_cursors
-                               WHERE stream_name = ${record.streamName}""".query[String].option.map(_.getOrElse("0"))
+              _ <- IngestionSql.insertJob(jobId, record.streamName, record.dedupeKey).run
+              cursor <- IngestionSql.cursor(record.streamName).option.map(_.getOrElse("0"))
               cursorEnd = if record.streamName == "wireless.audit" then
                 observedAt.fold(record.dedupeKey)(_.toInstant.getEpochSecond.toString)
               else record.dedupeKey
-              _ <- sql"""INSERT INTO sync_batches (
-                            batch_id, job_id, batch_no, payload_ref, status, row_count,
-                            attempt_count, dedupe_key, stream_name, cursor_start, cursor_end,
-                            created_at, updated_at
-                          ) VALUES (
-                            $batchId, $jobId, 0, $payloadRef, 'pending', 1,
-                            0, ${record.dedupeKey}, ${record.streamName}, $cursor, $cursorEnd,
-                            CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                          ) ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id""".update.run
-              load = SyncLoad(
-                jobId = jobId,
-                batchId = batchId,
-                batchNo = Some(0),
-                streamName = record.streamName,
-                payloadRef = payloadRef,
-                cursorStart = cursor,
-                cursorEnd = cursorEnd,
-                attempt = 1
-              )
-              _ <- sql"""INSERT INTO outbox_events (
-                            outbox_id, source_type, source_id, event_type,
-                            destination_topic, message_key, payload, status,
-                            attempt_count, max_attempts, next_attempt_at, created_at, updated_at
-                          ) VALUES (
-                            $outboxId, 'sync_batch', $batchId, 'sync.load.requested',
-                            'sync.oracle.load', $loadMessageKey, ${load.asJson.noSpaces}, 'pending',
-                            0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                          ) ON DUPLICATE KEY UPDATE outbox_id = outbox_events.outbox_id""".update.run
+              _ <- IngestionSql.insertBatch(batchId, jobId, record, cursor, cursorEnd).run
               disposition = if existed then IngestionDisposition.Deduplicated else IngestionDisposition.Processed
             yield IngestionDecision(disposition, record.dedupeKey, jobId, batchId)
       yield decision
@@ -451,397 +246,27 @@ class TidbRepository(xa: Transactor[IO]):
         FC.raiseError(IllegalArgumentException("resolved scan event payload must not be JSON null"))
       case Right(_) =>
         for
-          updated <- sql"""UPDATE sync_events
-                           SET payload = $payloadJson,
-                               payload_sha256 = $eventPayloadSha256,
-                               event_kind = COALESCE($eventKind, event_kind),
-                               updated_at = CURRENT_TIMESTAMP(6)
-                           WHERE dedupe_key = $key
-                             AND stream_name = $stream
-                             AND payload_archived = 0
-                             AND (payload IS NULL OR payload_sha256 = $eventPayloadSha256)
-                             AND NOT EXISTS (
-                               SELECT 1
-                               FROM sync_event_tombstones tombstone
-                               WHERE tombstone.dedupe_key = sync_events.dedupe_key
-                                 AND tombstone.stream_name = sync_events.stream_name
-                                 AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
-                             )""".update.run
+          updated <- IngestionSql.hydrateEvent(
+            stream,
+            key,
+            payloadJson,
+            eventPayloadSha256,
+            eventKind
+          ).run
           _ <- if updated > 0 && stream == "wireless.audit" then
             hydrateWirelessProjection(key)
           else 0.pure[ConnectionIO]
         yield updated > 0
 
-  private def jsonExtract(path: String): Fragment =
-    fr0"JSON_EXTRACT(payload, $path)"
-
-  private def jsonType(path: String): Fragment =
-    val extracted = jsonExtract(path)
-    fr0"JSON_TYPE($extracted)"
-
-  private def jsonUnquoted(path: String): Fragment =
-    val extracted = jsonExtract(path)
-    fr0"JSON_UNQUOTE($extracted)"
-
-  private def coalesceJson(projections: List[Fragment]): Fragment =
-    fr0"COALESCE(" ++ projections.intercalate(fr0", ") ++ fr0")"
-
-  private def jsonText(maxLength: Int, path: String, aliases: String*): Fragment =
-    jsonText(maxLength, preserveEmpty = false, path, aliases*)
-
-  private def jsonPresentText(maxLength: Int, path: String, aliases: String*): Fragment =
-    jsonText(maxLength, preserveEmpty = true, path, aliases*)
-
-  private def jsonText(
-      maxLength: Int,
-      preserveEmpty: Boolean,
-      path: String,
-      aliases: String*
-  ): Fragment =
-    coalesceJson((path :: aliases.toList).map { candidate =>
-      val candidateType = jsonType(candidate)
-      val candidateText = jsonUnquoted(candidate)
-      val projected = if preserveEmpty then candidateText else fr0"NULLIF($candidateText, '')"
-      fr0"""CASE
-           WHEN $candidateType = 'STRING'
-            AND CHAR_LENGTH($candidateText) <= $maxLength
-           THEN $projected
-           ELSE NULL
-         END"""
-    })
-
-  private def jsonInteger(
-      path: String,
-      aliases: String*
-  )(
-      positiveMax: String = "2147483647",
-      negativeMagnitudeMax: String = "2147483648"
-  ): Fragment =
-    coalesceJson((path :: aliases.toList).map { candidate =>
-      val candidateType = jsonType(candidate)
-      val candidateText = jsonUnquoted(candidate)
-      val trimmed = fr0"TRIM($candidateText)"
-      val magnitude =
-        fr0"COALESCE(NULLIF(TRIM(LEADING '0' FROM TRIM(LEADING '-' FROM TRIM(LEADING '+' FROM $trimmed))), ''), '0')"
-      val magnitudeLimit =
-        fr0"CASE WHEN LEFT($trimmed, 1) = '-' THEN $negativeMagnitudeMax ELSE $positiveMax END"
-      val safeText =
-        fr0"""CASE
-             WHEN $candidateType IN ('INTEGER', 'UNSIGNED INTEGER', 'STRING')
-              AND REGEXP_LIKE($trimmed, '^[+-]?[0-9]+$$')
-              AND (
-                CHAR_LENGTH($magnitude) < CHAR_LENGTH($magnitudeLimit)
-                OR (
-                  CHAR_LENGTH($magnitude) = CHAR_LENGTH($magnitudeLimit)
-                  AND $magnitude <= $magnitudeLimit
-                )
-              )
-             THEN $trimmed
-             ELSE NULL
-           END"""
-      fr0"CAST($safeText AS SIGNED)"
-    })
-
-  private def jsonDouble(path: String, aliases: String*): Fragment =
-    coalesceJson((path :: aliases.toList).map { candidate =>
-      val candidateType = jsonType(candidate)
-      val candidateText = jsonUnquoted(candidate)
-      val trimmed = fr0"TRIM($candidateText)"
-      val scientific = fr0"REGEXP_LIKE($trimmed, '^[+-]?[0-9]([.][0-9]+)?[eE][+-]?[0-9]{1,3}$$')"
-      val exponent =
-        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', -1) ELSE NULL END AS SIGNED)"
-      val mantissa =
-        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', 1) ELSE NULL END AS DECIMAL(18,16))"
-      val safeText =
-        fr0"""CASE
-             WHEN $candidateType IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'STRING')
-              AND (
-                REGEXP_LIKE($trimmed, '^[+-]?([0-9]{1,308}([.][0-9]*)?|[.][0-9]+)$$')
-                OR (
-                  $scientific
-                  AND $exponent BETWEEN -324 AND 308
-                  AND ($exponent < 308 OR ABS($mantissa) <= 1.7976931348623157)
-                )
-              )
-             THEN $trimmed
-             ELSE NULL
-           END"""
-      fr0"CAST($safeText AS DOUBLE)"
-    })
-
-  private def jsonBoolean(path: String, aliases: String*): Fragment =
-    coalesceJson((path :: aliases.toList).map { candidate =>
-      val candidateType = jsonType(candidate)
-      val candidateText = jsonUnquoted(candidate)
-      fr0"""CASE
-             WHEN $candidateType IN ('BOOLEAN', 'INTEGER', 'UNSIGNED INTEGER', 'STRING') THEN
-               CASE LOWER(TRIM($candidateText))
-                 WHEN 'true' THEN 1
-                 WHEN 'false' THEN 0
-                 WHEN '1' THEN 1
-                 WHEN '0' THEN 0
-                 ELSE NULL
-               END
-             ELSE NULL
-           END"""
-    })
-
-  private def jsonArray(path: String): Fragment =
-    val extracted = jsonExtract(path)
-    val extractedType = jsonType(path)
-    fr0"CASE WHEN $extractedType = 'ARRAY' THEN $extracted ELSE NULL END"
-
   private def hydrateWirelessProjection(dedupeKey: String): ConnectionIO[Int] =
-    val intMax = "2147483647"
-    val intMinMagnitude = "2147483648"
-    val longMax = "9223372036854775807"
-    val longMinMagnitude = "9223372036854775808"
-
-    val project =
-      val sensorId = jsonText(64, "$.sensor_id")
-      val locationId = jsonText(128, "$.location_id")
-      val username = jsonText(255, "$.username")
-      val eventType = jsonText(64, "$.event_type", "$.type")
-      val schemaVersion = jsonInteger("$.schema_version")()
-      val frameType = jsonText(32, "$.frame_type", "$.mac.frame_type")
-      val frameSubtype = jsonText(64, "$.frame_subtype", "$.mac.frame_subtype")
-      val sourceMac = jsonText(17, "$.source_mac", "$.mac.source_mac")
-      val transmitterMac = jsonText(17, "$.transmitter_mac", "$.mac.transmitter_mac")
-      val receiverMac = jsonText(17, "$.receiver_mac", "$.mac.receiver_mac")
-      val bssid = jsonText(17, "$.bssid", "$.mac.bssid")
-      val destinationBssid = jsonText(
-        17,
-        "$.destination_bssid",
-        "$.destination_mac",
-        "$.mac.destination_mac",
-        "$.mac.bssid"
-      )
-      val ssid = jsonPresentText(256, "$.ssid")
-      val signalDbm = jsonInteger("$.signal_dbm", "$.rf.signal_dbm")()
-      val noiseDbm = jsonInteger("$.noise_dbm", "$.rf.noise_dbm")()
-      val frequencyMhz = jsonInteger("$.frequency_mhz", "$.rf.frequency_mhz")()
-      val channelFlags = jsonInteger("$.channel_flags", "$.rf.channel_flags.raw")()
-      val dataRateKbps = jsonInteger("$.data_rate_kbps", "$.rf.data_rate_kbps")()
-      val antennaId = jsonInteger("$.antenna_id", "$.rf.antenna_id")()
-      val tsft = jsonInteger("$.tsft", "$.rf.tsft")(longMax, longMinMagnitude)
-      val fragmentNumber = jsonInteger("$.fragment_number", "$.mac.fragment_number")()
-      val channelNumber = jsonInteger("$.channel_number", "$.channel", "$.rf.channel_number")()
-      val signalStatus = jsonText(64, "$.signal_status", "$.rf.signal_status")
-      val adjacentMacHint = jsonText(512, "$.adjacent_mac_hint", "$.mac.adjacent_mac_hint")
-      val qosTid = jsonInteger("$.qos_tid", "$.qos.tid")()
-      val qosEosp = jsonBoolean("$.qos_eosp", "$.qos.eosp")
-      val qosAckPolicy = jsonInteger("$.qos_ack_policy", "$.qos.ack_policy")()
-      val qosAckPolicyLabel = jsonText(64, "$.qos_ack_policy_label", "$.qos.ack_policy_label")
-      val qosAmsdu = jsonBoolean("$.qos_amsdu", "$.qos.amsdu")
-      val llcOui = jsonText(16, "$.llc_oui", "$.llc_snap.oui")
-      val ethertype = jsonInteger("$.ethertype", "$.llc_snap.ethertype")()
-      val ethertypeName = jsonText(64, "$.ethertype_name", "$.llc_snap.ethertype_name")
-      val srcIp = jsonText(45, "$.src_ip", "$.network.src_ip")
-      val dstIp = jsonText(45, "$.dst_ip", "$.network.dst_ip")
-      val ipTtl = jsonInteger("$.ip_ttl", "$.network.ttl")()
-      val ipProtocol = jsonInteger("$.ip_protocol", "$.network.protocol")()
-      val ipProtocolName = jsonText(64, "$.ip_protocol_name", "$.network.protocol_name")
-      val srcPort = jsonInteger("$.src_port", "$.transport.src_port")()
-      val dstPort = jsonInteger("$.dst_port", "$.transport.dst_port")()
-      val transportProtocol = jsonText(32, "$.transport_protocol", "$.transport.protocol")
-      val transportLength = jsonInteger("$.transport_length", "$.transport.length")()
-      val transportChecksum = jsonInteger("$.transport_checksum", "$.transport.checksum")()
-      val appProtocol = jsonText(64, "$.app_protocol", "$.application.protocol")
-      val ssdpMessageType = jsonText(64, "$.ssdp_message_type", "$.application.ssdp.message_type")
-      val ssdpSt = jsonText(512, "$.ssdp_st", "$.application.ssdp.st")
-      val ssdpMx = jsonText(64, "$.ssdp_mx", "$.application.ssdp.mx")
-      val ssdpUsn = jsonText(512, "$.ssdp_usn", "$.application.ssdp.usn")
-      val dhcpRequestedIp = jsonText(45, "$.dhcp_requested_ip", "$.application.dhcp.requested_ip")
-      val dhcpHostname = jsonText(253, "$.dhcp_hostname", "$.application.dhcp.hostname")
-      val dhcpVendorClass = jsonText(255, "$.dhcp_vendor_class", "$.application.dhcp.vendor_class")
-      val dnsQueryName = jsonText(253, "$.dns_query_name", "$.application.dns.query_names[0]")
-      val mdnsName = jsonText(253, "$.mdns_name", "$.application.mdns.query_names[0]")
-      val sessionKey = jsonText(255, "$.session_key", "$.correlation.session_key")
-      val retransmitKey = jsonText(255, "$.retransmit_key", "$.correlation.retransmit_key")
-      val frameFingerprint = jsonText(255, "$.frame_fingerprint", "$.correlation.frame_fingerprint")
-      val payloadVisibility = jsonText(64, "$.payload_visibility", "$.correlation.payload_visibility")
-      val tsftDeltaUs = jsonInteger("$.tsft_delta_us", "$.correlation.tsft_delta_us")(
-        longMax,
-        longMinMagnitude
-      )
-      val wallClockDeltaMs = jsonInteger(
-        "$.wall_clock_delta_ms",
-        "$.correlation.wall_clock_delta_ms"
-      )(longMax, longMinMagnitude)
-      val largeFrame = jsonBoolean("$.large_frame", "$.anomalies.large_frame")
-      val mixedEncryption = jsonBoolean("$.mixed_encryption", "$.anomalies.mixed_encryption")
-      val dedupeOrReplaySuspect = jsonBoolean(
-        "$.dedupe_or_replay_suspect",
-        "$.anomalies.dedupe_or_replay_suspect"
-      )
-      val rawLen = jsonInteger("$.raw_len", "$.rf.raw_len")(intMax, intMinMagnitude)
-      val frameControlFlags = jsonInteger("$.frame_control_flags")(intMax, intMinMagnitude)
-      val moreData = jsonBoolean("$.more_data", "$.mac.more_data")
-      val retry = jsonBoolean("$.retry", "$.mac.retry")
-      val powerSave = jsonBoolean("$.power_save", "$.mac.power_save")
-      val protectedFlag = jsonBoolean("$.protected", "$.mac.protected")
-      val securityFlags = jsonInteger("$.security_flags")(intMax, intMinMagnitude)
-      val riskScore = jsonDouble("$.risk_score")
-      val identitySource = jsonText(64, "$.identity_source")
-      val tags = jsonArray("$.tags")
-      val wpsDeviceName = jsonText(255, "$.wps_device_name")
-      val wpsManufacturer = jsonText(255, "$.wps_manufacturer")
-      val wpsModelName = jsonText(255, "$.wps_model_name")
-      val deviceFingerprint = jsonText(255, "$.device_fingerprint")
-      val handshakeCaptured = jsonBoolean("$.handshake_captured")
-
-      fr"""UPDATE sync_events
-            SET
-              sensor_id = $sensorId,
-              location_id = $locationId,
-              username = $username,
-              event_type = $eventType,
-              schema_version = COALESCE($schemaVersion, 1),
-              frame_type = $frameType,
-              frame_subtype = $frameSubtype,
-              source_mac = LOWER($sourceMac),
-              transmitter_mac = LOWER($transmitterMac),
-              receiver_mac = LOWER($receiverMac),
-              bssid = LOWER($bssid),
-              destination_bssid = LOWER($destinationBssid),
-              ssid = $ssid,
-              signal_dbm = $signalDbm,
-              noise_dbm = $noiseDbm,
-              frequency_mhz = $frequencyMhz,
-              channel_flags = $channelFlags,
-              data_rate_kbps = $dataRateKbps,
-              antenna_id = $antennaId,
-              tsft = $tsft,
-              fragment_number = $fragmentNumber,
-              channel_number = $channelNumber,
-              signal_status = $signalStatus,
-              adjacent_mac_hint = LOWER($adjacentMacHint),
-              qos_tid = $qosTid,
-              qos_eosp = $qosEosp,
-              qos_ack_policy = $qosAckPolicy,
-              qos_ack_policy_label = $qosAckPolicyLabel,
-              qos_amsdu = $qosAmsdu,
-              llc_oui = $llcOui,
-              ethertype = $ethertype,
-              ethertype_name = $ethertypeName,
-              src_ip = $srcIp,
-              dst_ip = $dstIp,
-              ip_ttl = $ipTtl,
-              ip_protocol = $ipProtocol,
-              ip_protocol_name = $ipProtocolName,
-              src_port = $srcPort,
-              dst_port = $dstPort,
-              transport_protocol = $transportProtocol,
-              transport_length = $transportLength,
-              transport_checksum = $transportChecksum,
-              app_protocol = $appProtocol,
-              ssdp_message_type = $ssdpMessageType,
-              ssdp_st = $ssdpSt,
-              ssdp_mx = $ssdpMx,
-              ssdp_usn = $ssdpUsn,
-              dhcp_requested_ip = $dhcpRequestedIp,
-              dhcp_hostname = $dhcpHostname,
-              dhcp_vendor_class = $dhcpVendorClass,
-              dns_query_name = $dnsQueryName,
-              mdns_name = $mdnsName,
-              session_key = $sessionKey,
-              retransmit_key = $retransmitKey,
-              frame_fingerprint = $frameFingerprint,
-              payload_visibility = $payloadVisibility,
-              tsft_delta_us = $tsftDeltaUs,
-              wall_clock_delta_ms = $wallClockDeltaMs,
-              large_frame = COALESCE($largeFrame, 0),
-              mixed_encryption = $mixedEncryption,
-              dedupe_or_replay_suspect = COALESCE($dedupeOrReplaySuspect, 0),
-              raw_len = COALESCE($rawLen, 0),
-              frame_control_flags = COALESCE($frameControlFlags, 0),
-              more_data = COALESCE($moreData, 0),
-              retry = COALESCE($retry, 0),
-              power_save = COALESCE($powerSave, 0),
-              protected = COALESCE($protectedFlag, 0),
-              security_flags = COALESCE($securityFlags, 0),
-              risk_score = $riskScore,
-              identity_source = $identitySource,
-              tags = $tags,
-              wps_device_name = $wpsDeviceName,
-              wps_manufacturer = $wpsManufacturer,
-              wps_model_name = $wpsModelName,
-              device_fingerprint = $deviceFingerprint,
-              handshake_captured = COALESCE($handshakeCaptured, 0),
-              updated_at = CURRENT_TIMESTAMP(6)
-            WHERE dedupe_key = $dedupeKey
-              AND stream_name = 'wireless.audit'
-              AND payload_archived = 0
-              AND NOT EXISTS (
-                SELECT 1
-                FROM sync_event_tombstones tombstone
-                WHERE tombstone.dedupe_key = sync_events.dedupe_key
-                  AND tombstone.stream_name = sync_events.stream_name
-                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
-              )
-              AND payload IS NOT NULL""".update.run
-
-    project *>
-      sql"""UPDATE sync_events
-            SET wireless_search_text = NULLIF(LOWER(CONCAT_WS(
-                  ' ', sensor_id, source_mac, bssid, destination_bssid, ssid,
-                  wps_device_name, wps_manufacturer, wps_model_name,
-                  device_fingerprint, app_protocol, src_ip, dst_ip, username
-                )), '')
-            WHERE dedupe_key = $dedupeKey
-              AND stream_name = 'wireless.audit'
-              AND payload_archived = 0
-              AND NOT EXISTS (
-                SELECT 1
-                FROM sync_event_tombstones tombstone
-                WHERE tombstone.dedupe_key = sync_events.dedupe_key
-                  AND tombstone.stream_name = sync_events.stream_name
-                  AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
-              )
-              AND payload IS NOT NULL""".update.run
-
+    WirelessProjectionSql.hydrate(dedupeKey)
   def claimOutbox(
       ownerId: String,
       destinationTopics: List[String],
       leaseSeconds: Int
   ): IO[Either[DatabaseError, Option[OutboxRecord]]] =
     runDb("tidb.claim_outbox") {
-      if ownerId.isBlank || destinationTopics.isEmpty then none[OutboxRecord].pure[ConnectionIO]
-      else
-        val token = UUID.randomUUID().toString
-        val topics = destinationTopics.distinct.map(value => fr0"$value").intercalate(fr",")
-        val safeLeaseSeconds = leaseSeconds.max(1)
-        val eligibilityPredicate = Fragment.const(LeaseSql.EligibilityPredicate)
-
-        for
-          updated <- (fr"""UPDATE outbox_events
-                            SET status = 'leased',
-                                owner_id = $ownerId,
-                                lease_token = $token,
-                                fence = fence + 1,
-                                attempt_count = attempt_count + 1,
-                                lease_expires_at = TIMESTAMPADD(SECOND, $safeLeaseSeconds, CURRENT_TIMESTAMP(6)),
-                                updated_at = CURRENT_TIMESTAMP(6)
-                            WHERE destination_topic IN (""" ++ topics ++ fr""" )
-                              AND status = 'pending'
-                              AND """ ++ eligibilityPredicate ++ fr"""
-                              AND attempt_count < max_attempts
-                            ORDER BY created_at, outbox_id
-                            LIMIT 1""").update.run
-          claimed <- if updated == 1 then
-            sql"""SELECT outbox_id, destination_topic, message_key, CAST(payload AS CHAR),
-                         attempt_count, max_attempts, owner_id, lease_token, fence
-                  FROM outbox_events
-                  WHERE owner_id = $ownerId
-                    AND lease_token = $token
-                    AND status = 'leased'"""
-              .query[(String, String, String, String, Int, Int, String, String, Long)]
-              .unique
-              .map { case (id, topic, key, payload, attempts, maxAttempts, owner, leaseToken, fence) =>
-                Some(OutboxRecord(id, topic, key, payload, attempts, maxAttempts, LeaseIdentity(owner, leaseToken, fence)))
-              }
-          else none[OutboxRecord].pure[ConnectionIO]
-        yield claimed
+      OutboxSql.claim(ownerId, destinationTopics, leaseSeconds, UUID.randomUUID().toString)
     }
 
   def acknowledgeOutbox(record: OutboxRecord): IO[Either[DatabaseError, Boolean]] =
@@ -857,74 +282,14 @@ class TidbRepository(xa: Transactor[IO]):
       record: OutboxRecord,
       loadBatchId: Option[String]
   ): ConnectionIO[Boolean] =
-    for
-      updated <- sql"""UPDATE outbox_events
-                       SET status = 'published',
-                           published_at = CURRENT_TIMESTAMP(6),
-                           owner_id = NULL,
-                           lease_token = NULL,
-                           lease_expires_at = NULL,
-                           last_error = NULL,
-                           updated_at = CURRENT_TIMESTAMP(6)
-                       WHERE outbox_id = ${record.outboxId}
-                         AND status = 'leased'
-                         AND owner_id = ${record.lease.ownerId}
-                         AND lease_token = ${record.lease.token}
-                         AND fence = ${record.lease.fence}
-                         AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
-      _ <- if updated == 1 then
-        sql"""INSERT INTO outbox_publish_attempts (
-                outbox_id, attempt_no, status, error_text, attempted_at
-              ) VALUES (
-                ${record.outboxId}, ${record.attemptCount}, 'published', NULL, CURRENT_TIMESTAMP(6)
-              ) ON DUPLICATE KEY UPDATE status = 'published', error_text = NULL,
-                  attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
-      else ().pure[ConnectionIO]
-      _ <- if updated == 1 then loadBatchId.traverse_ { batchId =>
-        sql"""UPDATE sync_batches
-              SET status = 'dispatched',
-                  attempt_count = attempt_count + 1,
-                  outbox_id = ${record.outboxId},
-                  updated_at = CURRENT_TIMESTAMP(6)
-              WHERE batch_id = $batchId
-                AND status IN ('pending', 'dispatched')""".update.run.void *>
-          sql"""UPDATE sync_jobs j
-                JOIN sync_batches b ON b.job_id = j.job_id
-                SET j.status = 'running',
-                    j.started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP(6))
-                WHERE b.batch_id = $batchId
-                  AND j.status IN ('pending', 'running')""".update.run.void
-      } else ().pure[ConnectionIO]
-    yield updated == 1
+    OutboxSql.acknowledge(record, loadBatchId)
 
   private def parkMalformedLoadOutbox(
       record: OutboxRecord,
       error: IllegalArgumentException
   ): ConnectionIO[Boolean] =
     val errorText = s"published load outbox payload was malformed: ${error.getMessage}"
-    for
-      updated <- sql"""UPDATE outbox_events
-                       SET status = 'failed',
-                           owner_id = NULL,
-                           lease_token = NULL,
-                           lease_expires_at = NULL,
-                           last_error = $errorText,
-                           updated_at = CURRENT_TIMESTAMP(6)
-                       WHERE outbox_id = ${record.outboxId}
-                         AND status = 'leased'
-                         AND owner_id = ${record.lease.ownerId}
-                         AND lease_token = ${record.lease.token}
-                         AND fence = ${record.lease.fence}
-                         AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
-      _ <- if updated == 1 then
-        sql"""INSERT INTO outbox_publish_attempts (
-                outbox_id, attempt_no, status, error_text, attempted_at
-              ) VALUES (
-                ${record.outboxId}, ${record.attemptCount}, 'failed', $errorText, CURRENT_TIMESTAMP(6)
-              ) ON DUPLICATE KEY UPDATE status = 'failed', error_text = VALUES(error_text),
-                  attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
-      else ().pure[ConnectionIO]
-    yield updated == 1
+    OutboxSql.parkMalformed(record, errorText)
 
   private def validatedLoadBatchId(record: OutboxRecord): ConnectionIO[Option[String]] =
     if record.destinationTopic != "sync.oracle.load" then none[String].pure[ConnectionIO]
@@ -960,29 +325,7 @@ class TidbRepository(xa: Transactor[IO]):
       val status = if parked then "failed" else "pending"
       val delaySeconds = LeaseSql.retryDelaySeconds(record.attemptCount, retryBaseSeconds, retryMaxSeconds)
 
-      for
-        updated <- sql"""UPDATE outbox_events
-                         SET status = $status,
-                             owner_id = NULL,
-                             lease_token = NULL,
-                             lease_expires_at = NULL,
-                             next_attempt_at = TIMESTAMPADD(SECOND, $delaySeconds, CURRENT_TIMESTAMP(6)),
-                             last_error = $errorText,
-                             updated_at = CURRENT_TIMESTAMP(6)
-                         WHERE outbox_id = ${record.outboxId}
-                           AND status = 'leased'
-                           AND owner_id = ${record.lease.ownerId}
-                           AND lease_token = ${record.lease.token}
-                           AND fence = ${record.lease.fence}""".update.run
-        _ <- if updated == 1 then
-          sql"""INSERT INTO outbox_publish_attempts (
-                  outbox_id, attempt_no, status, error_text, attempted_at
-                ) VALUES (
-                  ${record.outboxId}, ${record.attemptCount}, $status, $errorText, CURRENT_TIMESTAMP(6)
-                ) ON DUPLICATE KEY UPDATE status = VALUES(status), error_text = VALUES(error_text),
-                    attempted_at = CURRENT_TIMESTAMP(6)""".update.run.void
-        else FC.raiseError(IllegalStateException(s"lost outbox lease ${record.outboxId}"))
-      yield disposition
+      OutboxSql.fail(record, status, errorText, delaySeconds).as(disposition)
     }
 
   def enqueueResult(result: TidbResult, attempt: Int): IO[Either[DatabaseError, Unit]] =
@@ -1061,33 +404,18 @@ class TidbRepository(xa: Transactor[IO]):
     val safeAttempt = attempt.max(1)
     val messageKey = s"${result.batchId}:$safeAttempt"
     val outboxId = stableUuid(s"outbox:sync.oracle.result:$messageKey")
-    sql"""INSERT INTO outbox_events (
-            outbox_id, source_type, source_id, event_type,
-            destination_topic, message_key, payload, status,
-            attempt_count, max_attempts, next_attempt_at, created_at, updated_at
-          ) VALUES (
-            $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.result',
-            'sync.oracle.result', $messageKey, ${result.asJson.noSpaces}, 'pending',
-            0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-          ) ON DUPLICATE KEY UPDATE outbox_id = outbox_events.outbox_id""".update.run.void
+    ResultSql.enqueue(result, safeAttempt, outboxId)
 
   private def applyResultTransition(result: TidbResult): ConnectionIO[Unit] =
     for
-      batch <- sql"""SELECT b.job_id, b.stream_name, b.payload_ref,
-                             b.cursor_start, b.cursor_end, b.batch_no,
-                             b.attempt_count, b.max_attempts
-                      FROM sync_batches b
-                      WHERE b.batch_id = ${result.batchId}
-                      FOR UPDATE"""
-        .query[(String, String, String, String, String, Int, Int, Int)]
-        .option
+      batch <- ResultSql.batchForUpdate(result.batchId).option
       row <- batch match
-        case Some(value) if value._1 == result.jobId => value.pure[ConnectionIO]
+        case Some(value) if value.jobId == result.jobId => value.pure[ConnectionIO]
         case Some(value) => FC.raiseError(IllegalStateException(
-          s"result job ${result.jobId} does not own batch ${result.batchId}; expected ${value._1}"
+          s"result job ${result.jobId} does not own batch ${result.batchId}; expected ${value.jobId}"
         ))
         case None => FC.raiseError(IllegalStateException(s"unknown result batch ${result.batchId}"))
-      _ <- if result.status == "success" then completeSuccessfulResult(result, row._2, row._5)
+      _ <- if result.status == "success" then completeSuccessfulResult(result, row.streamName, row.cursorEnd)
            else completeFailedResult(result, row)
     yield ()
 
@@ -1096,93 +424,23 @@ class TidbRepository(xa: Transactor[IO]):
       streamName: String,
       cursorEnd: String
   ): ConnectionIO[Unit] =
-    for
-      updated <- sql"""UPDATE sync_batches
-                  SET status = 'completed',
-                      row_count = ${result.rowCount},
-                      checksum = ${result.checksum},
-                      last_error = NULL,
-                      updated_at = CURRENT_TIMESTAMP(6)
-                  WHERE batch_id = ${result.batchId}
-                    AND job_id = ${result.jobId}
-                    AND status IN ('pending', 'dispatched', 'running', 'completed')""".update.run
-      _ <- if updated == 1 then
-        sql"""UPDATE sync_jobs
-              SET status = 'completed',
-                  finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
-              WHERE job_id = ${result.jobId}
-                AND NOT EXISTS (
-                  SELECT 1 FROM sync_batches
-                  WHERE job_id = ${result.jobId}
-                    AND status <> 'completed'
-                )""".update.run.void *>
-          advanceSyncCursor(streamName, cursorEnd)
-      else ().pure[ConnectionIO]
-    yield ()
+    ResultSql.completeSuccessful(result, streamName, cursorEnd)
 
   private def completeFailedResult(
       result: TidbResult,
-      batch: (String, String, String, String, String, Int, Int, Int)
+      batch: ResultSql.BatchState
   ): ConnectionIO[Unit] =
-    val (jobId, streamName, payloadRef, cursorStart, cursorEnd, batchNo, attempts, maxAttempts) = batch
-    val retry = result.retryable && attempts < maxAttempts
+    val retry = result.retryable && batch.attemptCount < batch.maxAttempts
 
     if retry then
-      val nextAttempt = attempts + 1
-      val messageKey = s"${result.batchId}:$nextAttempt"
-      val outboxId = stableUuid(s"outbox:sync.oracle.load:$messageKey")
-      val load = SyncLoad(
-        jobId,
-        result.batchId,
-        Some(batchNo),
-        streamName,
-        payloadRef,
-        cursorStart,
-        cursorEnd,
-        nextAttempt
-      )
-      sql"""UPDATE sync_batches
-            SET status = 'pending',
-                last_error = ${result.errorText},
-                updated_at = CURRENT_TIMESTAMP(6)
-            WHERE batch_id = ${result.batchId}
-              AND job_id = $jobId
-              AND status IN ('dispatched', 'running', 'pending')""".update.run.void *>
-        sql"""INSERT INTO outbox_events (
-                outbox_id, source_type, source_id, event_type,
-                destination_topic, message_key, payload, status,
-                attempt_count, max_attempts, next_attempt_at, created_at, updated_at
-              ) VALUES (
-                $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.requested',
-                'sync.oracle.load', $messageKey, ${load.asJson.noSpaces}, 'pending',
-                0, $maxAttempts, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-              ) ON DUPLICATE KEY UPDATE outbox_id = outbox_events.outbox_id""".update.run.void
+      ResultSql.scheduleRetry(result, batch)
     else
-      sql"""UPDATE sync_batches
-            SET status = 'failed',
-                last_error = ${result.errorText},
-                updated_at = CURRENT_TIMESTAMP(6)
-            WHERE batch_id = ${result.batchId}
-              AND job_id = $jobId""".update.run.void *>
-        sql"""UPDATE sync_jobs
-              SET status = 'failed',
-                  finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
-              WHERE job_id = $jobId
-                AND status <> 'completed'""".update.run.void *>
-        sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
-              VALUES ($jobId, ${result.batchId}, ${result.errorClass}, ${result.errorText})""".update.run.void
+      ResultSql.completeFailed(result, batch)
 
   private def existingBrokerEvidence(
       metadata: BrokerRecordMetadata
   ): ConnectionIO[Option[(String, String, String)]] =
-    sql"""SELECT payload_sha256, artifact_sha256, dedupe_key
-          FROM ingestion_evidence
-          WHERE group_id = ${metadata.consumerGroup}
-            AND topic = ${metadata.topic}
-            AND partition_id = ${metadata.partition}
-            AND record_offset = ${metadata.offset}"""
-      .query[(String, String, String)]
-      .option
+    IngestionSql.existingEvidence(metadata).option
 
   private def verifyBrokerEvidence(
       metadata: BrokerRecordMetadata,
@@ -1204,17 +462,12 @@ class TidbRepository(xa: Transactor[IO]):
       disposition: IngestionDisposition
   ): ConnectionIO[Unit] =
     for
-      _ <- sql"""INSERT INTO ingestion_evidence (
-                   topic, partition_id, record_offset, group_id, group_version,
-                   artifact_sha256, message_key, payload_sha256, disposition,
-                   dedupe_key, first_seen_at, updated_at
-                 ) VALUES (
-                   ${metadata.topic}, ${metadata.partition}, ${metadata.offset}, ${metadata.consumerGroup},
-                   ${metadata.groupVersion}, ${metadata.artifactSha256}, ${metadata.messageKey},
-                   ${metadata.payloadSha256}, ${disposition.databaseValue}, $dedupeKey,
-                   CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-                 ) ON DUPLICATE KEY UPDATE
-                   updated_at = CURRENT_TIMESTAMP(6)""".update.run
+      _ <- IngestionSql.persistEvidence(
+        metadata,
+        metadata.payloadSha256,
+        dedupeKey,
+        disposition
+      ).run
       stored <- existingBrokerEvidence(metadata).flatMap(_.fold(
         FC.raiseError[(String, String, String)](
           IllegalStateException("broker ingestion evidence disappeared after upsert")
@@ -1225,42 +478,7 @@ class TidbRepository(xa: Transactor[IO]):
     yield ()
 
   private def advanceConsumerOffset(metadata: BrokerRecordMetadata): ConnectionIO[Unit] =
-    val nextOffset = metadata.offset + 1L
-    sql"""INSERT INTO consumer_offsets (
-            group_id, topic, partition_id, next_offset, group_version,
-            artifact_sha256, updated_at
-          ) VALUES (
-            ${metadata.consumerGroup}, ${metadata.topic}, ${metadata.partition}, $nextOffset,
-            ${metadata.groupVersion}, ${metadata.artifactSha256}, CURRENT_TIMESTAMP(6)
-          ) ON DUPLICATE KEY UPDATE
-            group_version = CASE
-              WHEN VALUES(next_offset) > consumer_offsets.next_offset THEN VALUES(group_version)
-              ELSE consumer_offsets.group_version
-            END,
-            artifact_sha256 = CASE
-              WHEN VALUES(next_offset) > consumer_offsets.next_offset THEN VALUES(artifact_sha256)
-              ELSE consumer_offsets.artifact_sha256
-            END,
-            next_offset = GREATEST(consumer_offsets.next_offset, VALUES(next_offset)),
-            updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
-
-  private def advanceSyncCursor(streamName: String, cursorEnd: String): ConnectionIO[Unit] =
-    sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-          VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
-          ON DUPLICATE KEY UPDATE
-            cursor_value = CASE
-              WHEN VALUES(cursor_value) REGEXP '^[0-9]+$$'
-                AND sync_cursors.cursor_value REGEXP '^[0-9]+$$'
-                AND CAST(VALUES(cursor_value) AS DECIMAL(65, 0)) >
-                    CAST(sync_cursors.cursor_value AS DECIMAL(65, 0))
-              THEN VALUES(cursor_value)
-              WHEN NOT (VALUES(cursor_value) REGEXP '^[0-9]+$$')
-                AND NOT (sync_cursors.cursor_value REGEXP '^[0-9]+$$')
-                AND VALUES(cursor_value) > sync_cursors.cursor_value
-              THEN VALUES(cursor_value)
-              ELSE sync_cursors.cursor_value
-            END,
-            updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
+    IngestionSql.advanceConsumerOffset(metadata).run.void
 
   private def validateBrokerMetadata(metadata: BrokerRecordMetadata): ConnectionIO[Unit] =
     if metadata.topic.isBlank then FC.raiseError(IllegalArgumentException("broker topic must not be blank"))
@@ -1290,39 +508,14 @@ class TidbRepository(xa: Transactor[IO]):
 
   def recoverExpiredOutboxLeases(): IO[Either[DatabaseError, Int]] =
     runDb("tidb.recover_expired_outbox_leases") {
-      for
-        parked <- sql"""UPDATE outbox_events
-                         SET status = 'failed',
-                             owner_id = NULL,
-                             lease_token = NULL,
-                             lease_expires_at = NULL,
-                             last_error = 'publish lease expired; max attempts reached',
-                             updated_at = CURRENT_TIMESTAMP(6)
-                         WHERE status = 'leased'
-                           AND lease_expires_at <= CURRENT_TIMESTAMP(6)
-                           AND attempt_count >= max_attempts""".update.run
-        retried <- sql"""UPDATE outbox_events
-                          SET status = 'pending',
-                              owner_id = NULL,
-                              lease_token = NULL,
-                              lease_expires_at = NULL,
-                              next_attempt_at = CURRENT_TIMESTAMP(6),
-                              last_error = 'publish lease expired; retrying',
-                              updated_at = CURRENT_TIMESTAMP(6)
-                          WHERE status = 'leased'
-                            AND lease_expires_at <= CURRENT_TIMESTAMP(6)
-                            AND attempt_count < max_attempts""".update.run
-      yield parked + retried
+      OutboxSql.RecoverExpiredLeases
     }
 
   def ensureCursor(streamName: String): IO[Either[DatabaseError, String]] =
     runDb("tidb.ensure_cursor") {
       for
-        _ <- sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-                   VALUES ($streamName, '0', NOW(6))
-                   ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
-        cursor <- sql"""SELECT cursor_value FROM sync_cursors WHERE stream_name = $streamName"""
-          .query[String].unique
+        _ <- IngestionSql.ensureCursor(streamName).run
+        cursor <- IngestionSql.cursor(streamName).unique
       yield cursor
     }
 
@@ -1334,9 +527,7 @@ class TidbRepository(xa: Transactor[IO]):
         streamNames.parTraverseN(parallelism) { name =>
           dbSemaphore.permit.use { _ =>
             runDb(s"tidb.ensure_cursor_$name") {
-              sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-                    VALUES ($name, '0', NOW(6))
-                    ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
+              IngestionSql.ensureCursor(name).run
             }
           }
         }.map { results =>
@@ -1353,104 +544,17 @@ class TidbRepository(xa: Transactor[IO]):
 
   def generateShadowAlerts(): IO[Either[DatabaseError, List[String]]] =
     runDb("tidb.generate_shadow_alerts") {
-      (fr"""INSERT INTO wireless_shadow_alerts (
-            source_mac, first_occurred_at, last_occurred_at, occurrence_count,
-            destination_bssid, ssid, sensor_id, location_id, signal_dbm,
-            reason, evidence, created_at, updated_at
-          )
-          SELECT
-            w.source_mac, w.observed_at, w.observed_at, 1,
-            w.destination_bssid, w.ssid, w.sensor_id, w.location_id, w.signal_dbm,
-            'strong_wireless_without_proxy_presence',
-            JSON_OBJECT('window_seconds', 60, 'signal_threshold_dbm', -50, 'presence_window_seconds', 300),
-            NOW(6), NOW(6)
-          FROM (
-            SELECT DISTINCT
-              e.source_mac,
-              e.observed_at,
-              COALESCE(e.destination_bssid, e.bssid) AS destination_bssid,
-              e.ssid,
-              e.sensor_id,
-              e.location_id,
-              e.signal_dbm
-            FROM sync_events e
-            WHERE e.stream_name = 'wireless.audit'
-              AND e.observed_at >= NOW(6) - """ ++ Fragment.const(s"INTERVAL $windowSecs SECOND") ++
-            fr""" AND e.payload IS NOT NULL
-          ) w
-          WHERE w.source_mac IS NOT NULL
-            AND w.source_mac REGEXP '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$$'
-            AND w.signal_dbm >= $signalThreshold
-            AND NOT EXISTS (
-              SELECT 1 FROM wireless_authorized_networks awn
-              WHERE awn.enabled = TRUE
-                AND (awn.location_id IS NULL OR awn.location_id = w.location_id)
-                AND (awn.ssid IS NULL OR (w.ssid IS NOT NULL AND awn.ssid = w.ssid))
-                AND (awn.bssid IS NULL OR (w.destination_bssid IS NOT NULL AND awn.bssid = w.destination_bssid))
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM devices d
-              WHERE d.mac_id = w.source_mac AND d.last_seen >= NOW(6) - """ ++ Fragment.const(s"INTERVAL $presenceWindowSecs SECOND") ++
-            fr"""
-          )
-          ON DUPLICATE KEY UPDATE
-            last_occurred_at = GREATEST(wireless_shadow_alerts.last_occurred_at, VALUES(last_occurred_at)),
-            occurrence_count = wireless_shadow_alerts.occurrence_count + 1,
-            destination_bssid = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(destination_bssid), wireless_shadow_alerts.destination_bssid),
-            ssid = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(ssid), wireless_shadow_alerts.ssid),
-            sensor_id = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(sensor_id), wireless_shadow_alerts.sensor_id),
-            location_id = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(location_id), wireless_shadow_alerts.location_id),
-            signal_dbm = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(signal_dbm), wireless_shadow_alerts.signal_dbm),
-            updated_at = NOW(6)""").update.run *>
-        (fr"""SELECT JSON_OBJECT(
-              'event_type', 'shadow_device',
-              'first_occurred_at', first_occurred_at,
-              'last_occurred_at', last_occurred_at,
-              'source_mac', source_mac,
-              'occurrence_count', occurrence_count,
-              'destination_bssid', destination_bssid,
-              'ssid', ssid,
-              'sensor_id', sensor_id,
-              'location_id', location_id,
-              'signal_dbm', signal_dbm,
-              'reason', reason,
-              'evidence', evidence
-            ) AS alert_json
-            FROM wireless_shadow_alerts
-            WHERE updated_at >= NOW(6) - INTERVAL 2 SECOND""").query[String].to[List]
+      ProjectionSql.generateShadowAlerts(windowSecs, signalThreshold, presenceWindowSecs)
     }
 
   def lookupDeviceByMac(mac: String): IO[Either[DatabaseError, Option[String]]] =
     runDb("tidb.lookup_device_by_mac") {
-      sql"""SELECT JSON_OBJECT(
-              'device_id', mac_id,
-              'username', username,
-              'display_name', display_name,
-              'hostname', hostname
-            ) AS device_json
-            FROM devices
-            WHERE LOWER(mac_id) = LOWER($mac)
-            LIMIT 1"""
-        .query[String]
-        .option
+      WirelessSql.lookupDevice(mac).query[String].option
     }
 
   def listAuthorizedNetworks(): IO[Either[DatabaseError, String]] =
     runDb("tidb.list_authorized_networks") {
-      sql"""SELECT COALESCE(
-              JSON_ARRAYAGG(
-                JSON_OBJECT(
-                  'ssid', ssid,
-                  'bssid', LOWER(bssid),
-                  'location_id', location_id,
-                  'label', label,
-                  'enabled', enabled
-                )
-              ),
-              '[]'
-            ) AS networks_json
-            FROM wireless_authorized_networks
-            WHERE enabled = TRUE""".query[String].unique
+      WirelessSql.AuthorizedNetworksQuery.query[String].unique
     }
 
   def flushProbeBatch(probesJson: String): IO[Either[DatabaseError, Int]] =
@@ -1490,28 +594,16 @@ class TidbRepository(xa: Transactor[IO]):
             .orElse(probe.hcursor.get[String]("known_bssid").toOption)
             .orElse(probe.hcursor.get[String]("bssid").toOption)
 
-          sql"""INSERT INTO wireless_clients (ssid, client_mac, known_bssid, first_seen, last_seen,
-                  probe_count, location_id, last_probe_batch_id)
-                VALUES ($ssid, $clientMac,
-                  (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
-                   WHERE LOWER(authorized.ssid) = LOWER($ssid) AND authorized.enabled = TRUE
-                     AND ($observedBssid IS NULL OR LOWER(authorized.bssid) = LOWER($observedBssid))
-                     AND ($locationId IS NULL OR authorized.location_id = $locationId)
-                   HAVING COUNT(*) = 1),
-                  $firstSeen, $lastSeen, $probeCount,
-                  $locationId, $batchId)
-                ON DUPLICATE KEY UPDATE
-                  first_seen = LEAST(wireless_clients.first_seen, VALUES(first_seen)),
-                  last_seen = GREATEST(wireless_clients.last_seen, VALUES(last_seen)),
-                  probe_count = CASE
-                    WHEN wireless_clients.last_probe_batch_id IS NULL
-                      OR wireless_clients.last_probe_batch_id != VALUES(last_probe_batch_id)
-                    THEN wireless_clients.probe_count + VALUES(probe_count)
-                    ELSE wireless_clients.probe_count
-                  END,
-                  known_bssid = COALESCE(VALUES(known_bssid), wireless_clients.known_bssid),
-                  location_id = COALESCE(VALUES(location_id), wireless_clients.location_id),
-                  last_probe_batch_id = VALUES(last_probe_batch_id)""".update.run
+          WirelessSql.upsertClientProbe(
+            ssid,
+            clientMac,
+            observedBssid,
+            firstSeen,
+            lastSeen,
+            probeCount,
+            locationId,
+            batchId
+          ).update.run
         }.map { affectedPerProbe =>
           val totalAffected = affectedPerProbe.sum
           log.info("probe_flush_batch", "status" -> "inserted",

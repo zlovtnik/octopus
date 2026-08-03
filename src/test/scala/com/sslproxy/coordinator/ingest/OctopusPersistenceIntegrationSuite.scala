@@ -638,10 +638,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       payloadSha256 = record.sourceRecordSha256
     )
 
-    repository.recordScanRequestWithEvidence(record, metadata).map { result =>
+    repository.recordScanRequestWithEvidence(record, metadata).flatMap { result =>
       val decision = requireRight(result)
       assertEquals(decision.disposition, IngestionDisposition.Processed)
-      decision
+      repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+        .map(dispatch =>
+          requireRight(dispatch)
+          decision
+        )
     }
 
   private def parkPendingLoadOutboxes(): IO[Unit] =

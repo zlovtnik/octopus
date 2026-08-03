@@ -78,7 +78,7 @@ final case class ProcessorContract(
 object ProcessorCatalog:
   val contracts: List[ProcessorContract] = List(
     continuous(ProcessorId.SyncScanIngestion, List("sync.scan.request"), List("sync_events", "ingestion_evidence"), Nil, "group/topic/partition/offset", "kafka partition", "park/DLQ invalid records", "bounded offset audit"),
-    periodic(ProcessorId.SyncJobPlanner, List("sync_events"), List("sync_jobs", "sync_batches", "outbox_events"), List(ProcessorId.SyncScanIngestion), "stream_name/dedupe_key", "stream", "park exhausted work", "orphan event scan"),
+    periodic(ProcessorId.SyncJobPlanner, List("sync_events"), List("sync_jobs", "sync_batches"), List(ProcessorId.SyncScanIngestion), "stream_name/dedupe_key", "stream", "park exhausted work", "orphan event scan"),
     periodic(ProcessorId.SyncBacklogRecovery, List("expired sync leases"), List("sync_jobs", "sync_batches"), List(ProcessorId.SyncJobPlanner), "job_id/batch_id", "batch", "fail exhausted batch", "lease expiry scan"),
     periodic(ProcessorId.SyncLoadDispatch, List("sync_batches"), List("outbox_events"), List(ProcessorId.SyncJobPlanner), "batch_id/attempt", "batch", "park exhausted dispatch", "batch/outbox audit"),
     continuous(ProcessorId.SyncLoadConsumer, List("sync.oracle.load"), List("domain tables", "sync.oracle.result"), List(ProcessorId.SyncOutboxPublisher), "batch_id/attempt", "kafka partition", "sync result failure", "batch checksum"),

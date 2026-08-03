@@ -42,20 +42,47 @@ class ProcessorCatalogSuite extends FunSuite:
     }
   }
 
-  test("shared manifest has the same IDs and exactly one owner per ID") {
+  test("shared manifest exactly matches runtime processor contracts") {
     val manifest = findRepositoryRoot(Path.of(sys.props("user.dir")))
       .resolve("sql/tidb/contracts/processors.json")
     val json = parse(Files.readString(manifest)).fold(throw _, identity)
     val entries = json.hcursor.downField("processors").as[List[Json]].fold(throw _, identity)
-    val idsAndOwners = entries.map { entry =>
+    val manifestContracts = entries.map { entry =>
       val cursor = entry.hcursor
       val id = cursor.get[String]("id").fold(throw _, identity)
-      val owner = cursor.get[String]("owner").fold(throw _, identity)
-      id -> owner
+      id -> (
+        cursor.get[String]("owner").fold(throw _, identity),
+        cursor.get[String]("family").fold(throw _, identity),
+        cursor.get[String]("mode").fold(throw _, identity),
+        cursor.get[List[String]]("inputs").fold(throw _, identity),
+        cursor.get[List[String]]("outputs").fold(throw _, identity),
+        cursor.get[List[String]]("dependencies").fold(throw _, identity),
+        cursor.get[String]("dedupe_key").fold(throw _, identity),
+        cursor.get[String]("lease_scope").fold(throw _, identity),
+        cursor.get[String]("terminal_behavior").fold(throw _, identity),
+        cursor.get[String]("reconciliation_policy").fold(throw _, identity),
+        cursor.get[Boolean]("default_enabled").fold(throw _, identity)
+      )
     }
 
-    assertEquals(idsAndOwners.map(_._1).distinct.size, idsAndOwners.size)
-    assertEquals(idsAndOwners.toMap, ProcessorId.all.map(id => id.value -> id.owner.value).toMap)
+    val runtimeContracts = ProcessorCatalog.contracts.map { contract =>
+      contract.id.value -> (
+        contract.id.owner.value,
+        contract.id.family.value,
+        contract.mode.value,
+        contract.inputs,
+        contract.outputs,
+        contract.dependencies.map(_.value),
+        contract.dedupeKey,
+        contract.leaseScope,
+        contract.terminalBehavior,
+        contract.reconciliationPolicy,
+        contract.defaultEnabled
+      )
+    }
+
+    assertEquals(manifestContracts.map(_._1).distinct.size, manifestContracts.size)
+    assertEquals(manifestContracts.toMap, runtimeContracts.toMap)
   }
 
   private def findRepositoryRoot(start: Path): Path =

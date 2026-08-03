@@ -7,21 +7,13 @@ import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters.*
 
 class SqlPlacementSuite extends FunSuite:
-  test("orchestration consumers and processors contain no SQL literals"):
+  test("SQL instructions exist only in catalog modules"):
     val sourceRoot = serviceRoot.resolve("src/main/scala/com/sslproxy/coordinator")
-    val guarded = List(
-      sourceRoot.resolve("Main.scala"),
-      sourceRoot.resolve("cron"),
-      sourceRoot.resolve("dispatch"),
-      sourceRoot.resolve("http"),
-      sourceRoot.resolve("ingest"),
-      sourceRoot.resolve("kafka"),
-      sourceRoot.resolve("processor")
-    )
+    val catalogRoot = sourceRoot.resolve("tidb/sql")
     val sqlInterpolator = raw"\b(?:sql|fr|fr0)\s*\"".r
     val instruction = raw"(?is)(?:\"\"\"|\")\s*(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b".r
 
-    val violations = guarded.flatMap(scalaFiles).flatMap { path =>
+    val violations = scalaFiles(sourceRoot).filterNot(_.startsWith(catalogRoot)).flatMap { path =>
       val source = Files.readString(path, StandardCharsets.UTF_8)
       Option.when(sqlInterpolator.findFirstIn(source).nonEmpty || instruction.findFirstIn(source).nonEmpty)(
         serviceRoot.relativize(path).toString

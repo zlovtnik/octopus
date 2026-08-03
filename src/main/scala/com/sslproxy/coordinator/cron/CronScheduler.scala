@@ -126,7 +126,6 @@ final class CronScheduler private (
         logPending *> throttleCheck *>
           repo.processIngestLedger(
             ingestConfig.streamNames,
-            ingestConfig.loadStreamNames,
             cfg.scanMaxAttempts,
             cfg.scanRetryBackoffSeconds,
             cfg.ingestBatchSize

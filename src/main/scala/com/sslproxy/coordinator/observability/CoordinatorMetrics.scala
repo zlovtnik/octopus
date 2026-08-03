@@ -10,7 +10,7 @@ import atomic.AtomicLong
 import scala.jdk.CollectionConverters.*
 
 class CoordinatorMetrics(private val registry: MeterRegistry):
-  import CoordinatorMetrics.log
+  import CoordinatorMetrics.{ProcessorLifecycleValues, log}
 
   private val pendingLedgerGauge: AtomicLong = new AtomicLong(0)
   private val backpressureActiveGauge: AtomicLong = new AtomicLong(0)
@@ -18,6 +18,9 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
 
   private val routeRunningGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val routeSuspendedGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
+  private val processorLifecycleGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
+  private val processorRestartGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
+  private val processorRetryCounters: ConcurrentHashMap[String, Counter] = ConcurrentHashMap()
 
   private val loopAttemptsCounter: Counter = Counter.builder("coordinator.loop.attempts.total")
     .description("Total main loop iterations")
@@ -124,6 +127,38 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
     )
     suspendedHolder.set(if suspended then 1L else 0L)
 
+  def recordProcessorState(processorId: String, lifecycle: String, restartCount: Int): Unit =
+    ProcessorLifecycleValues.foreach { state =>
+      val key = s"$processorId:$state"
+      val holder = processorLifecycleGauges.computeIfAbsent(key, _ =>
+        val value = new AtomicLong(0L)
+        Gauge.builder("coordinator.processor.lifecycle", value, (v: AtomicLong) => v.doubleValue())
+          .tags("processor", processorId, "state", state)
+          .description("One-hot processor lifecycle state")
+          .register(registry)
+        value
+      )
+      holder.set(if state == lifecycle then 1L else 0L)
+    }
+
+    val restartHolder = processorRestartGauges.computeIfAbsent(processorId, _ =>
+      val value = new AtomicLong(0L)
+      Gauge.builder("coordinator.processor.restart.count", value, (v: AtomicLong) => v.doubleValue())
+        .tag("processor", processorId)
+        .description("Current persisted processor restart count")
+        .register(registry)
+      value
+    )
+    restartHolder.set(restartCount.toLong)
+
+  def recordProcessorRetry(processorId: String): Unit =
+    processorRetryCounters.computeIfAbsent(processorId, _ =>
+      Counter.builder("coordinator.processor.retries.total")
+        .tag("processor", processorId)
+        .description("Total supervised processor retries")
+        .register(registry)
+    ).increment()
+
   def heartbeat(): IO[Unit] =
     IO(heartbeatCounter.increment()) *>
       IO(log.info("heartbeat",
@@ -150,5 +185,12 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
 
 object CoordinatorMetrics:
   private val log = StructuredLogger(getClass)
+  private val ProcessorLifecycleValues = List(
+    "disabled",
+    "starting",
+    "ready",
+    "backing_off",
+    "failed_terminal"
+  )
 
   def apply(): CoordinatorMetrics = new CoordinatorMetrics(new SimpleMeterRegistry())

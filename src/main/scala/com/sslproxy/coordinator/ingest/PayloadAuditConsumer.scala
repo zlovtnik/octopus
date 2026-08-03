@@ -7,7 +7,7 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.*
@@ -25,7 +25,7 @@ object PayloadAuditConsumer:
 
   def stream(
       cfg: KafkaCfg,
-      repo: TidbRepository,
+      store: IngestionStore[IO],
       metrics: CoordinatorMetrics,
       dlqProducer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
@@ -42,7 +42,10 @@ object PayloadAuditConsumer:
       )
 
     Stream
-      .eval(KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic))
+      .eval(
+        KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic) *>
+          KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic + cfg.dlqSuffix)
+      )
       .flatMap(_ =>
         Stream.resource(KafkaConsumer.resource(consumerSettings))
       )
@@ -50,7 +53,7 @@ object PayloadAuditConsumer:
         Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
           consumer.stream
             .map(committable => (translateRecord(committable.record), committable.offset))
-            .through(batchWrite(repo, dlqProducer, cfg, metrics, dbSemaphore))
+            .through(batchWrite(store, dlqProducer, cfg, metrics, dbSemaphore))
             .through(commitBatch)
       }
 
@@ -63,7 +66,7 @@ object PayloadAuditConsumer:
     else
       PayloadAudit.parse(rawJson) match
         case Left(err) =>
-          Left(PayloadAuditError.InvalidPayload(rawJson, err.getMessage))
+          Left(PayloadAuditError.InvalidPayload(rawJson, errorMessage(err)))
         case Right(audit) =>
           val payloadBytes = rawJson.getBytes(StandardCharsets.UTF_8)
           val payloadSha256 = Sha256Utils.sha256Hex(payloadBytes)
@@ -90,10 +93,10 @@ object PayloadAuditConsumer:
             payloadRef = payloadRef
           )
           ResolvedScanRequestRecord.from(source, rawJson)
-            .leftMap(error => PayloadAuditError.InvalidPayload(rawJson, error.getMessage))
+            .leftMap(error => PayloadAuditError.InvalidPayload(rawJson, errorMessage(error)))
 
   private def batchWrite(
-      repo: TidbRepository,
+      store: IngestionStore[IO],
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
       metrics: CoordinatorMetrics,
@@ -109,7 +112,7 @@ object PayloadAuditConsumer:
         }
 
         val writeAction = if validRecords.nonEmpty then
-          dbSemaphore.permit.use(_ => repo.recordScanRequests(validRecords)).flatMap {
+          dbSemaphore.permit.use(_ => store.recordScanRequests(validRecords).value).flatMap {
             case Right(count) =>
               IO(metrics.recordPayloadAuditIngested(count)) *>
                 IO(metrics.recordSyncEventHydrated(count.toLong))
@@ -130,6 +133,9 @@ object PayloadAuditConsumer:
   private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =
     _.groupWithin(500, 15.seconds)
       .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
+
+  private def errorMessage(error: Throwable): String =
+    Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
 
   private def publishDlq(
       dlqProducer: KafkaProducer[IO, String, String],

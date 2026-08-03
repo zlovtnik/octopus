@@ -5,6 +5,7 @@ import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.persistence.ProcessorStateStore
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import fs2.Stream
 import munit.CatsEffectSuite
 
@@ -32,6 +33,30 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     ProcessorSupervisor.create(config).flatMap(_.readiness.statuses).map { statuses =>
       assertEquals(statuses.keySet, ProcessorId.octopusOwned.toSet)
       assert(statuses.values.forall(_.lifecycle == ProcessorLifecycle.Disabled))
+    }
+  }
+
+  test("persisted processor lifecycle is exported as metrics") {
+    val config = ProcessorConfig(Nil, 1L, 10L)
+    for
+      events <- Ref.of[IO, Vector[String]](Vector.empty)
+      metrics = CoordinatorMetrics()
+      _ <- ProcessorSupervisor.create(config, RecordingProcessorStateStore(events), Some(metrics))
+      scrape = metrics.scrape
+    yield
+      assert(scrape.contains("coordinator_processor_lifecycle_value"))
+      assert(scrape.contains(s"processor=\"${ProcessorId.EventRetention.value}\""))
+      assert(scrape.contains("state=\"disabled\""))
+      assert(scrape.contains("coordinator_processor_restart_count_value"))
+  }
+
+  test("enabled externally owned processors are included in readiness") {
+    val external = ProcessorId.EmbeddingLeaseRecovery
+    val config = ProcessorConfig(List(external.value), 1L, 10L)
+
+    ProcessorSupervisor.create(config).flatMap(_.readiness.statuses).map { statuses =>
+      assertEquals(statuses(external).lifecycle, ProcessorLifecycle.Starting)
+      assert(statuses.keySet.contains(external))
     }
   }
 
@@ -104,6 +129,25 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       assert(recorded.exists(_.contains(":failed_terminal")))
   }
 
+  test("start-run persistence failures stay local and retry") {
+    val id = ProcessorId.SyncScanIngestion
+    val config = ProcessorConfig(List(id.value), 1L, 10L)
+    for
+      attempts <- Ref.of[IO, Int](0)
+      store = new StartRunOnceFailingStore(attempts)
+      supervisor <- ProcessorSupervisor.create(config, store)
+      fiber <- supervisor.run(List(ProcessorWorkload(
+        id,
+        Stream.raiseError[IO](TerminalProcessorError("invalid record"))
+      ))).compile.drain.start
+      statuses <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+      startAttempts <- attempts.get
+      _ <- fiber.cancel
+    yield
+      assertEquals(statuses(id).lastError, Some("invalid record"))
+      assertEquals(startAttempts, 2)
+  }
+
   private def awaitLifecycle(
       supervisor: ProcessorSupervisor,
       id: ProcessorId,
@@ -135,3 +179,31 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         errorText: Option[String],
         finishedAt: java.time.Instant
     ) = EitherT.liftF(events.update(_ :+ s"finish:$runId:${status.value}"))
+
+  private final class StartRunOnceFailingStore(attempts: Ref[IO, Int])
+      extends ProcessorStateStore[IO]:
+    def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
+
+    def persist(id: ProcessorId, status: ProcessorStatus, observedAt: java.time.Instant) =
+      EitherT.rightT[IO, DatabaseError](())
+
+    def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
+      EitherT(attempts.modify { count =>
+        val result =
+          if count == 0 then
+            Left(DatabaseError.Retryable(
+              "processor.start_run",
+              new java.sql.SQLTransientException("connection timeout"),
+              "connection timeout"
+            ))
+          else Right(())
+        (count + 1, result)
+      })
+
+    def finishRun(
+        runId: String,
+        status: ProcessorRunStatus,
+        errorClass: Option[String],
+        errorText: Option[String],
+        finishedAt: java.time.Instant
+    ) = EitherT.rightT[IO, DatabaseError](())

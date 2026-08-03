@@ -5,7 +5,7 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.persistence.{IngestionStore, ResultStore}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -16,13 +16,14 @@ object TidbResultStream:
   def run(
       cfg: KafkaCfg,
       artifact: VerifiedCutoverArtifact,
-      repo: TidbRepository,
+      ingestionStore: IngestionStore[IO],
+      resultStore: ResultStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.resultConsumer, cfg.resultTopic, artifact, producer,
       KafkaComponents.deserializeResult,
-      repo.loadConsumerOffsets(cfg.resultConsumer, cfg.resultTopic).flatMap {
+      ingestionStore.loadConsumerOffsets(cfg.resultConsumer, cfg.resultTopic).value.flatMap {
         case Left(err) =>
           IO(log.error("tidb_result_consumer",
             "status" -> "offset_load_failed",
@@ -39,9 +40,9 @@ object TidbResultStream:
       for
         _ <- dbSemaphore.permit.use { _ =>
           KafkaDatabaseResult.require(
-            repo.recordResultsWithEvidence(
+            resultStore.recordResultsWithEvidence(
               lockedRecords.map(locked => locked.decoded -> locked.metadata)
-            )
+            ).value
           )
         }
         _ <- lockedRecords.traverse_ { locked =>

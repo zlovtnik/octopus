@@ -20,10 +20,19 @@ final class TidbProcessorStateStore(xa: Transactor[IO]) extends ProcessorStateSt
     run("tidb.processor_state.load") {
       ProcessorStateSql.LoadStatesQuery.to[List].map { rows =>
         rows.flatMap { case (name, databaseStatus, failures, error) =>
-          for
+          val parsed = for
             id <- ProcessorId.fromString(name).toOption
-            parsed <- lifecycle(databaseStatus)
-          yield id -> ProcessorStatus(parsed, failures, error)
+            lifecycle <- lifecycle(databaseStatus)
+          yield id -> ProcessorStatus(lifecycle, failures, error)
+
+          if parsed.isEmpty then
+            log.warn(
+              "processor_state_load",
+              "status" -> "invalid_row",
+              "processor_name" -> name,
+              "lifecycle" -> databaseStatus
+            )
+          parsed
         }.toMap
       }
     }

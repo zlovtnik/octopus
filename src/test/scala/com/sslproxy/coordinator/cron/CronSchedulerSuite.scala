@@ -4,6 +4,9 @@ import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.dispatch.BatchDispatchService.DispatchResult
 import munit.CatsEffectSuite
 
+import java.sql.SQLTransientException
+import scala.concurrent.duration.*
+
 class CronSchedulerSuite extends CatsEffectSuite:
 
   test("drainBatch stops after the first unavailable dispatch"):
@@ -60,3 +63,26 @@ class CronSchedulerSuite extends CatsEffectSuite:
         assertEquals(dispatched, 1)
         assertEquals(notAttempted, Nil)
     }
+
+  test("canonical manifest verification retries transient failures") {
+    Ref.of[IO, Int](0).flatMap { attempts =>
+      val verify = attempts.modify { count =>
+        val result =
+          if count == 0 then IO.raiseError(SQLTransientException("connection timeout"))
+          else IO.unit
+        (count + 1, result)
+      }.flatten
+
+      for
+        _ <- CronScheduler.verifyCanonicalManifestWithRetry(verify, 1.millis)
+        count <- attempts.get
+      yield assertEquals(count, 2)
+    }
+  }
+
+  test("canonical manifest verification fails closed on schema drift") {
+    val mismatch = IllegalStateException("canonical manifest mismatch")
+    CronScheduler.verifyCanonicalManifestWithRetry(IO.raiseError(mismatch), 1.millis).attempt.map {
+      result => assertEquals(result, Left(mismatch))
+    }
+  }

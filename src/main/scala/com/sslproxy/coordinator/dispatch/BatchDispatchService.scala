@@ -2,17 +2,19 @@ package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord, TidbRepository}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
+import com.sslproxy.coordinator.persistence.OutboxStore
+import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord}
 import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
 import com.sslproxy.coordinator.observability.StructuredLogger
+import io.opentelemetry.api.trace.SpanKind
 
 /** Publishes the transactional TiDB outbox. A broker acknowledgement followed
   * by a process crash can produce the same stable message key again; the
   * receiving transaction is therefore required to deduplicate that key.
   */
 final class BatchDispatchService(
-    repo: TidbRepository,
+    store: OutboxStore[IO],
     producer: KafkaProducer[IO, String, String],
     metrics: CoordinatorMetrics,
     ownerId: String,
@@ -25,7 +27,7 @@ final class BatchDispatchService(
   import BatchDispatchService.{DispatchResult, log}
 
   def dispatchNext(): IO[DispatchResult] =
-    dbSemaphore.permit.use(_ => repo.claimOutbox(ownerId, destinationTopics, leaseSeconds)).flatMap {
+    dbSemaphore.permit.use(_ => store.claim(ownerId, destinationTopics, leaseSeconds).value).flatMap {
       case Left(error) =>
         IO(log.error("outbox_claim", "status" -> "db_error",
           "operation" -> error.operation, "error" -> error.message))
@@ -41,13 +43,22 @@ final class BatchDispatchService(
       record.payload
     )
 
-    producer.produce(ProducerRecords.one(brokerRecord)).flatten.attempt.flatMap {
+    CoordinatorTracing.span(
+      "kafka.publish.outbox",
+      SpanKind.PRODUCER,
+      "messaging.system" -> "kafka",
+      "messaging.destination.name" -> record.destinationTopic,
+      "messaging.message.id" -> record.messageKey,
+      "outbox.fence" -> record.lease.fence.toString
+    ) {
+      producer.produce(ProducerRecords.one(brokerRecord)).flatten
+    }.attempt.flatMap {
       case Right(_) => acknowledge(record)
       case Left(error) => fail(record, error)
     }
 
   private def acknowledge(record: OutboxRecord): IO[DispatchResult] =
-    dbSemaphore.permit.use(_ => repo.acknowledgeOutbox(record)).flatMap {
+    dbSemaphore.permit.use(_ => store.acknowledge(record).value).flatMap {
       case Right(true) =>
         IO(metrics.recordBatchDispatched()) *>
           IO(log.info("outbox_publish", "status" -> "published",
@@ -67,7 +78,7 @@ final class BatchDispatchService(
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
     dbSemaphore.permit.use { _ =>
-      repo.failOutbox(record, message, retryBaseSeconds, retryMaxSeconds)
+      store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value
     }.flatMap {
       case Right(disposition) =>
         val status = disposition match

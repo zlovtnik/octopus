@@ -26,27 +26,34 @@ class StructuredLoggerSuite extends FunSuite:
     appender.start()
 
     val logger = LoggerFactory.getLogger("test.structured").asInstanceOf[Logger]
+    val originalLevel = logger.getLevel
     logger.addAppender(appender)
     logger.setLevel(ch.qos.logback.classic.Level.INFO)
 
-    val structuredLogger = StructuredLogger("test.structured")
-    structuredLogger.info(
-      "test_event",
-      "status" -> "ok",
-      "offset" -> "42",
-      "table" -> "users",
-      "error" -> "none"
-    )
+    try
+      val structuredLogger = StructuredLogger("test.structured")
+      structuredLogger.info(
+        "test_event",
+        "status" -> "ok",
+        "offset" -> "42",
+        "table" -> "users",
+        "error" -> "none"
+      )
 
-    appender.stop()
+      appender.stop()
 
-    val lines = new String(baos.toByteArray, "UTF-8").split('\n').filter(_.nonEmpty)
-    assertEquals(lines.length, 1)
+      val lines = new String(baos.toByteArray, "UTF-8").split('\n').filter(_.nonEmpty)
+      assertEquals(lines.length, 1)
 
-    val json = parse(lines(0)).getOrElse(throw new RuntimeException("invalid json"))
-    assertEquals(json.hcursor.downField("status").as[String].toOption, Some("ok"))
-    assertEquals(json.hcursor.downField("offset").as[String].toOption, Some("42"))
-    assertEquals(json.hcursor.downField("table").as[String].toOption, Some("users"))
-    assertEquals(json.hcursor.downField("error").as[String].toOption, Some("none"))
-    assert(json.hcursor.downField("message").as[String].toOption.exists(_.contains("test_event")))
+      val json = parse(lines(0)).getOrElse(throw new RuntimeException("invalid json"))
+      assertEquals(json.hcursor.downField("status").as[String].toOption, Some("ok"))
+      assertEquals(json.hcursor.downField("offset").as[String].toOption, Some("42"))
+      assertEquals(json.hcursor.downField("table").as[String].toOption, Some("users"))
+      assertEquals(json.hcursor.downField("error").as[String].toOption, Some("none"))
+      assert(json.hcursor.downField("message").as[String].toOption.exists(_.contains("test_event")))
+    finally
+      logger.detachAppender(appender)
+      logger.setLevel(originalLevel)
+      appender.stop()
+      encoder.stop()
   }

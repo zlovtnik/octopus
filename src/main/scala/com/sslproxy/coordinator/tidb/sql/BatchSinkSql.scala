@@ -41,7 +41,8 @@ object BatchSinkSql:
       |  correlation_id, host, direction, captured_at, byte_offset,
       |  payload_object_key, content_type, http_method, http_status, http_path,
       |  is_encrypted, truncated, peer_ip, notes
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
+      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      |ON DUPLICATE KEY UPDATE correlation_id = VALUES(correlation_id)""".stripMargin
 
   val InsertWirelessAuditFrames: String =
     """INSERT INTO wireless_audit_frames (

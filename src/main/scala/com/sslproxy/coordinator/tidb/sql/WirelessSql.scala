@@ -101,6 +101,12 @@ object WirelessSql:
           WHERE dedupe_key = $dedupeKey AND stream_name = $streamName
             AND status <> 'synced'"""
 
+  def markFailed(dedupeKey: String, streamName: String, error: String): Fragment =
+    sql"""UPDATE sync_backlog
+          SET status = 'failed', last_error = $error, updated_at = CURRENT_TIMESTAMP(6)
+          WHERE dedupe_key = $dedupeKey AND stream_name = $streamName
+            AND status IN ('pending', 'sync_failed')"""
+
   def pruneSynced(cutoff: Timestamp, limit: Int): Fragment =
     sql"""DELETE FROM sync_backlog
           WHERE status = 'synced' AND updated_at < $cutoff

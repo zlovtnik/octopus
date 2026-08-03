@@ -10,6 +10,7 @@ import com.sslproxy.coordinator.persistence.ProcessorStateStore
 import com.sslproxy.coordinator.tidb.TidbErrorClass
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
 
 import scala.concurrent.duration.*
 
@@ -52,7 +53,8 @@ final class ProcessorSupervisor private (
     config: ProcessorConfig,
     enabled: Set[ProcessorId],
     statusesRef: Ref[IO, Map[ProcessorId, ProcessorStatus]],
-    stateStore: ProcessorStateStore[IO]
+    stateStore: ProcessorStateStore[IO],
+    metrics: Option[CoordinatorMetrics]
 ):
   import ProcessorSupervisor.log
 
@@ -87,33 +89,40 @@ final class ProcessorSupervisor private (
         workload.startup *>
         setStatus(workload.id, ProcessorLifecycle.Ready, restartCount, None) *>
         workload.stream.compile.drain)
-        .onCancel(finishRun(runId, ProcessorRunStatus.Cancelled, None))
+        .onCancel(bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Cancelled, None))
 
-    (Clock[IO].realTimeInstant.flatMap { startedAt =>
+    val cycle = Clock[IO].realTimeInstant.flatMap { startedAt =>
       persist(stateStore.startRun(workload.id, runId, startedAt))
     } *> execute.attempt.flatMap {
         case Right(_) =>
           val error = IllegalStateException("processor stream completed unexpectedly")
-          finishRun(runId, ProcessorRunStatus.Retrying, Some(error)) *>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
             retry(workload, restartCount, error)
         case Left(error: TerminalProcessorError) =>
           val message = safeMessage(error)
-          finishRun(runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
             setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
             IO(log.error("processor",
               "status" -> "failed_terminal", "processor" -> workload.id.value,
               "error" -> message)) *> IO.never
+        case Left(error: ProcessorPersistenceException) =>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
+            retry(workload, restartCount, error)
         case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
           val message = safeMessage(error)
-          finishRun(runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
             setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
             IO(log.error("processor",
               "status" -> "failed_terminal", "processor" -> workload.id.value,
               "error" -> message)) *> IO.never
         case Left(error) =>
-          finishRun(runId, ProcessorRunStatus.Retrying, Some(error)) *>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
             retry(workload, restartCount, error)
-      })
+      }
+
+    cycle.handleErrorWith { error =>
+      retryAfterSupervisionFailure(workload, restartCount, error)
+    }
 
   private def retry(
       workload: ProcessorWorkload,
@@ -129,11 +138,40 @@ final class ProcessorSupervisor private (
     )
     val message = safeMessage(error)
 
-    setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message)) *>
+    IO(metrics.foreach(_.recordProcessorRetry(workload.id.value))) *>
+      setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message)) *>
       IO(log.warn("processor",
         "status" -> "backing_off", "processor" -> workload.id.value,
         "restart_count" -> nextRestart.toString, "delay_ms" -> delay.toMillis.toString,
         "error" -> message)) *>
+      IO.sleep(delay) *>
+      runForever(workload, nextRestart)
+
+  private def retryAfterSupervisionFailure(
+      workload: ProcessorWorkload,
+      restartCount: Int,
+      error: Throwable
+  ): IO[Unit] =
+    val nextRestart = restartCount + 1
+    val delay = ProcessorSupervisor.retryDelay(
+      config.restartBaseDelayMs,
+      config.restartMaxDelayMs,
+      nextRestart,
+      ProcessorSupervisor.jitterFraction(workload.id, nextRestart)
+    )
+    val message = safeMessage(error)
+
+    IO(metrics.foreach(_.recordProcessorRetry(workload.id.value))) *>
+      setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message))
+      .handleErrorWith { statusError =>
+        logBookkeepingFailure(workload.id, "set_status", statusError)
+      } *>
+      IO(log.error("processor",
+        error,
+        "status" -> "supervision_retry",
+        "processor" -> workload.id.value,
+        "restart_count" -> nextRestart.toString,
+        "delay_ms" -> delay.toMillis.toString)) *>
       IO.sleep(delay) *>
       runForever(workload, nextRestart)
 
@@ -146,7 +184,8 @@ final class ProcessorSupervisor private (
     val status = ProcessorStatus(lifecycle, restartCount, lastError)
     Clock[IO].realTimeInstant.flatMap { observedAt =>
       persist(stateStore.persist(id, status, observedAt)) *>
-        statusesRef.update(_.updated(id, status))
+        statusesRef.update(_.updated(id, status)) *>
+        IO(metrics.foreach(_.recordProcessorState(id.value, lifecycle.value, restartCount)))
     }
 
   private def finishRun(
@@ -164,6 +203,29 @@ final class ProcessorSupervisor private (
       ))
     }
 
+  private def bestEffortFinishRun(
+      id: ProcessorId,
+      runId: String,
+      status: ProcessorRunStatus,
+      error: Option[Throwable]
+  ): IO[Unit] =
+    finishRun(runId, status, error).handleErrorWith { finishError =>
+      logBookkeepingFailure(id, "finish_run", finishError)
+    }
+
+  private def logBookkeepingFailure(
+      id: ProcessorId,
+      operation: String,
+      error: Throwable
+  ): IO[Unit] =
+    IO(log.error(
+      "processor_bookkeeping",
+      error,
+      "status" -> "failed",
+      "processor" -> id.value,
+      "operation" -> operation
+    ))
+
   private def persist[A](result: EitherT[IO, DatabaseError, A]): IO[A] =
     result.value.flatMap {
       case Right(value) => IO.pure(value)
@@ -177,11 +239,18 @@ object ProcessorSupervisor:
   private val log = StructuredLogger(getClass)
 
   def create(config: ProcessorConfig): IO[ProcessorSupervisor] =
-    create(config, VolatileProcessorStateStore)
+    create(config, VolatileProcessorStateStore, None)
 
   def create(
       config: ProcessorConfig,
       stateStore: ProcessorStateStore[IO]
+  ): IO[ProcessorSupervisor] =
+    create(config, stateStore, None)
+
+  def create(
+      config: ProcessorConfig,
+      stateStore: ProcessorStateStore[IO],
+      metrics: Option[CoordinatorMetrics]
   ): IO[ProcessorSupervisor] =
     for
       enabled <- IO.fromEither(
@@ -189,7 +258,7 @@ object ProcessorSupervisor:
       )
       _ <- IO.fromEither(validateDependencies(enabled))
       persisted <- liftPersistence(stateStore.load)
-      initial = ProcessorId.octopusOwned.iterator.map { id =>
+      initial = (ProcessorId.octopusOwned.toSet ++ enabled).iterator.map { id =>
         val lifecycle = if enabled.contains(id) then ProcessorLifecycle.Starting else ProcessorLifecycle.Disabled
         val previous = persisted.get(id)
         id -> ProcessorStatus(
@@ -199,10 +268,11 @@ object ProcessorSupervisor:
         )
       }.toMap
       statuses <- Ref.of[IO, Map[ProcessorId, ProcessorStatus]](initial)
-      supervisor = ProcessorSupervisor(config, enabled, statuses, stateStore)
+      supervisor = ProcessorSupervisor(config, enabled, statuses, stateStore, metrics)
       now <- Clock[IO].realTimeInstant
       _ <- initial.toList.traverse_ { case (id, status) =>
-        supervisor.persist(stateStore.persist(id, status, now))
+        supervisor.persist(stateStore.persist(id, status, now)) *>
+          IO(metrics.foreach(_.recordProcessorState(id.value, status.lifecycle.value, status.restartCount)))
       }
     yield supervisor
 

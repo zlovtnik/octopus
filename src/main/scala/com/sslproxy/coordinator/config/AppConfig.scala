@@ -32,6 +32,7 @@ final case class AppConfig(
     wireless: WirelessConfig,
     runtime: RuntimeConfig,
     processors: ProcessorConfig,
+    archive: ArchiveConfig,
     cutover: CutoverConfig
 ) derives ConfigReader
 
@@ -120,7 +121,29 @@ final case class RuntimeConfig(
 final case class ProcessorConfig(
     enabled: List[String],
     restartBaseDelayMs: Long,
-    restartMaxDelayMs: Long
+    restartMaxDelayMs: Long,
+    batchSize: Int = 250,
+    intervalSeconds: Int = 10,
+    embeddingModel: String = "sentence-transformers/all-MiniLM-L6-v2",
+    eventDuplicateDistance: Double = 0.05d,
+    behaviorSimilarityThreshold: Double = 0.88d,
+    sequenceDistanceThreshold: Double = 0.10d
+) derives ConfigReader
+
+final case class ArchiveConfig(
+    enabled: Boolean = false,
+    endpoint: String = "http://minio:9000",
+    accessKey: String = "",
+    secretKey: String = "",
+    bucket: String = "ssl-proxy-wireless-raw-archive",
+    region: String = "us-east-1",
+    hotDays: Int = 7,
+    eventRetentionDays: Int = 30,
+    searchRetentionDays: Int = 30,
+    tombstoneRetentionDays: Int = 45,
+    batchSize: Int = 100,
+    intervalMs: Long = 300000L,
+    maintenanceIntervalMs: Long = 3600000L
 ) derives ConfigReader
 
 final case class CutoverConfig(
@@ -168,6 +191,7 @@ object AppConfig:
           )
         ).flatten ++
         ingestErrors(config.ingest) ++
+        archiveErrors(config.archive, config.processors) ++
         kafkaErrors(
           config.kafka,
           isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
@@ -222,8 +246,51 @@ object AppConfig:
       ),
       Option.when(config.restartMaxDelayMs < config.restartBaseDelayMs)(
         "processors.restart-max-delay-ms must be at least processors.restart-base-delay-ms"
+      ),
+      Option.when(config.batchSize <= 0)(
+        "processors.batch-size must be positive"
+      ),
+      Option.when(config.intervalSeconds <= 0)(
+        "processors.interval-seconds must be positive"
+      ),
+      Option.when(config.embeddingModel.trim.isEmpty)(
+        "processors.embedding-model must not be blank"
+      ),
+      Option.when(config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d)(
+        "processors.event-duplicate-distance must be between 0 and 2"
+      ),
+      Option.when(config.behaviorSimilarityThreshold < -1.0d || config.behaviorSimilarityThreshold > 1.0d)(
+        "processors.behavior-similarity-threshold must be between -1 and 1"
+      ),
+      Option.when(config.sequenceDistanceThreshold < 0.0d || config.sequenceDistanceThreshold > 2.0d)(
+        "processors.sequence-distance-threshold must be between 0 and 2"
       )
     ).flatten ++ idErrors
+
+  private def archiveErrors(config: ArchiveConfig, processors: ProcessorConfig): List[String] =
+    val eventRetentionEnabled = processors.enabled.contains(ProcessorId.EventRetention.value)
+    List(
+      Option.when(eventRetentionEnabled && !config.enabled)(
+        "event-retention requires archive.enabled=true"
+      ),
+      Option.when(config.enabled && config.endpoint.trim.isEmpty)("archive.endpoint must not be blank"),
+      Option.when(config.enabled && config.accessKey.trim.isEmpty)("archive.access-key must not be blank"),
+      Option.when(config.enabled && config.secretKey.trim.isEmpty)("archive.secret-key must not be blank"),
+      Option.when(config.enabled && config.bucket.trim.isEmpty)("archive.bucket must not be blank"),
+      Option.when(config.hotDays <= 0)("archive.hot-days must be positive"),
+      Option.when(config.eventRetentionDays < config.hotDays)(
+        "archive.event-retention-days must be at least archive.hot-days"
+      ),
+      Option.when(config.searchRetentionDays <= 0)(
+        "archive.search-retention-days must be positive"
+      ),
+      Option.when(config.tombstoneRetentionDays < config.eventRetentionDays)(
+        "archive.tombstone-retention-days must be at least archive.event-retention-days"
+      ),
+      Option.when(config.batchSize <= 0)("archive.batch-size must be positive"),
+      Option.when(config.intervalMs <= 0L)("archive.interval-ms must be positive"),
+      Option.when(config.maintenanceIntervalMs <= 0L)("archive.maintenance-interval-ms must be positive")
+    ).flatten
 
   private def kafkaErrors(config: KafkaCfg, isDevelopment: Boolean): List[String] =
     List(

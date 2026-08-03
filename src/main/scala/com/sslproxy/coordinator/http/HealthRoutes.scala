@@ -10,15 +10,18 @@ import org.http4s.HttpRoutes
 import org.http4s.dsl.io.*
 import org.http4s.circe.*
 
+import scala.concurrent.duration.*
+
 class HealthRoutes(
     transactor: TidbTransactor,
     metrics: CoordinatorMetrics,
-    processorReadiness: Option[ProcessorReadiness] = None
+    processorReadiness: Option[ProcessorReadiness] = None,
+    databaseCheckTimeout: FiniteDuration = 5.seconds
 ):
 
   private def readinessResponse: IO[org.http4s.Response[IO]] =
     (
-      transactor.healthCheck,
+      HealthRoutes.withTimeout(transactor.healthCheck, databaseCheckTimeout),
       processorReadiness.fold(IO.pure(true))(_.ready)
     ).tupled.flatMap { case (databaseHealthy, processorsHealthy) =>
       val healthy = databaseHealthy && processorsHealthy
@@ -52,3 +55,10 @@ class HealthRoutes(
     case GET -> Root / "actuator" / "prometheus" =>
       Ok(metrics.scrape)
   }
+
+object HealthRoutes:
+  private[http] def withTimeout(
+      healthCheck: IO[Boolean],
+      timeout: FiniteDuration
+  ): IO[Boolean] =
+    healthCheck.timeoutTo(timeout, IO.pure(false))

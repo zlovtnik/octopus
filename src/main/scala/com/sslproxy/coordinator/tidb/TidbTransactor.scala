@@ -313,8 +313,7 @@ final class TidbTransactor private (
   // ── wireless alerts (4 alert types) ────────────────────────────
 
   override def insertWirelessRogueAp(batchId: String, rows: List[WirelessRogueApInsert]): IO[Long] =
-    withRetry("insert_wireless_rogue_ap") {
-      mergeWirelessAlerts(batchId, "rogue_ap", rows.map { row =>
+    mergeWirelessAlerts(batchId, "rogue_ap", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -329,12 +328,10 @@ final class TidbTransactor private (
           detailsJson = TidbTransactor.jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
           rawJson = row.rawJson
         )
-      })
-    }
+    })
 
   override def insertWirelessDeauthFlood(batchId: String, rows: List[WirelessDeauthFloodInsert]): IO[Long] =
-    withRetry("insert_wireless_deauth_flood") {
-      mergeWirelessAlerts(batchId, "deauth_flood", rows.map { row =>
+    mergeWirelessAlerts(batchId, "deauth_flood", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -353,12 +350,10 @@ final class TidbTransactor private (
           ),
           rawJson = row.rawJson
         )
-      })
-    }
+    })
 
   override def insertWirelessSignalAnomaly(batchId: String, rows: List[WirelessSignalAnomalyInsert]): IO[Long] =
-    withRetry("insert_wireless_signal_anomaly") {
-      mergeWirelessAlerts(batchId, "signal_anomaly", rows.map { row =>
+    mergeWirelessAlerts(batchId, "signal_anomaly", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -378,12 +373,10 @@ final class TidbTransactor private (
           ),
           rawJson = None
         )
-      })
-    }
+    })
 
   override def insertWirelessPmfAttack(batchId: String, rows: List[WirelessPmfAttackInsert]): IO[Long] =
-    withRetry("insert_wireless_pmf_attack") {
-      mergeWirelessAlerts(batchId, "pmf_attack", rows.map { row =>
+    mergeWirelessAlerts(batchId, "pmf_attack", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -401,12 +394,10 @@ final class TidbTransactor private (
           ),
           rawJson = None
         )
-      })
-    }
+    })
 
   override def insertWirelessAttackSequence(batchId: String, rows: List[WirelessAttackSequenceInsert]): IO[Long] =
-    withRetry("insert_wireless_attack_sequence") {
-      mergeWirelessAlerts(batchId, "attack_sequence", rows.map { row =>
+    mergeWirelessAlerts(batchId, "attack_sequence", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -427,12 +418,10 @@ final class TidbTransactor private (
           ),
           rawJson = row.rawJson
         )
-      })
-    }
+    })
 
   override def insertWirelessSequenceAlert(batchId: String, rows: List[WirelessSequenceAlertInsert]): IO[Long] =
-    withRetry("insert_wireless_sequence_alert") {
-      mergeWirelessAlerts(batchId, "sequence_alert", rows.map { row =>
+    mergeWirelessAlerts(batchId, "sequence_alert", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -455,12 +444,10 @@ final class TidbTransactor private (
           ),
           rawJson = row.rawJson
         )
-      })
-    }
+    })
 
   override def insertWirelessHandshakeAlert(batchId: String, rows: List[WirelessHandshakeAlertInsert]): IO[Long] =
-    withRetry("insert_wireless_handshake_alert") {
-      mergeWirelessAlerts(batchId, "handshake", rows.map { row =>
+    mergeWirelessAlerts(batchId, "handshake", rows.map { row =>
         WirelessAlertRow(
           rowSequence = row.rowSequence,
           detectedAt = row.detectedAt,
@@ -475,8 +462,7 @@ final class TidbTransactor private (
           detailsJson = TidbTransactor.jsonDetails("pmkid_sha256" -> row.pmkidSha256),
           rawJson = None
         )
-      })
-    }
+    })
 
   private def mergeWirelessAlerts(
       batchId: String,
@@ -484,7 +470,7 @@ final class TidbTransactor private (
       rows: List[WirelessAlertRow]
   ): IO[Long] =
     val now = Timestamp.from(Instant.now())
-    withConnection { conn =>
+    withTransactionRetry(s"merge_wireless_$alertType") { conn =>
       val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
       try
         val params = rows.map { row =>

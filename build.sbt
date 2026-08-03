@@ -57,6 +57,8 @@ val slf4jVersion = "2.0.18"
 val pureconfigVersion = "0.17.8"
 val micrometerVersion = "1.13.2"
 val testcontainersVersion = "1.20.6"
+val minioVersion = "9.0.3"
+val openTelemetryVersion = "1.62.0"
 
 lazy val root = (project in file("."))
   .settings(
@@ -81,6 +83,11 @@ lazy val root = (project in file("."))
       "com.mysql" % "mysql-connector-j" % mysqlJdbcVersion,
       "com.zaxxer" % "HikariCP" % hikariCpVersion,
       "io.micrometer" % "micrometer-core" % micrometerVersion,
+      "io.minio" % "minio" % minioVersion,
+      "com.squareup.okhttp3" % "okhttp-jvm" % "5.3.2",
+      "io.opentelemetry" % "opentelemetry-sdk" % openTelemetryVersion,
+      "io.opentelemetry" % "opentelemetry-exporter-otlp" % openTelemetryVersion,
+      "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % openTelemetryVersion,
       "org.typelevel" %% "log4cats-slf4j" % log4CatsVersion,
       "ch.qos.logback" % "logback-classic" % "1.5.38",
       "net.logstash.logback" % "logstash-logback-encoder" % "9.0",

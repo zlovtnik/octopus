@@ -162,6 +162,18 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.contains("unknown processor id: sync-job-planer"))
       case Right(_) => fail("expected unknown processor rejection")
 
+  test("event retention fails closed unless archival is enabled"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      processors = baseline.processors.copy(enabled = List("event-retention")),
+      runtime = baseline.runtime.copy(processorsEnabled = true)
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.contains("event-retention requires archive.enabled=true"))
+      case Right(_) => fail("expected event retention without archival to be rejected")
+
   test("topic auto-provisioning rejects an unsafe replication factor"):
     val baseline = AppConfig.load
     val invalid = baseline.copy(

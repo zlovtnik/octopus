@@ -10,7 +10,8 @@ import fs2.Stream
 import fs2.kafka.{CommittableConsumerRecord, CommittableOffsetBatch, ConsumerRecord, KafkaConsumer, KafkaProducer, ProducerRecord, ProducerRecords}
 import io.circe.Json
 import org.apache.kafka.common.TopicPartition
-import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
+import io.opentelemetry.api.trace.SpanKind
 
 import scala.concurrent.duration.*
 
@@ -154,8 +155,17 @@ private[kafka] object LockedTopicConsumer:
             ).as(None)
         }
       }
-      _ <- process(prepared.flatten)
-      _ <- CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit
+      _ <- CoordinatorTracing.span(
+        "kafka.consume.durable_batch",
+        SpanKind.CONSUMER,
+        "messaging.system" -> "kafka",
+        "messaging.destination.name" -> expectedTopic,
+        "messaging.consumer.group.name" -> groupId,
+        "messaging.batch.message_count" -> committables.size.toString
+      ) {
+        process(prepared.flatten) *>
+          CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit
+      }
     yield ()
 
   private def prepareRecord[A](
@@ -223,7 +233,14 @@ private[kafka] object LockedTopicConsumer:
     ).noSpaces
     val key = Option(record.key).getOrElse(s"${record.partition}:${record.offset}")
 
-    producer.produce(ProducerRecords.one(ProducerRecord(dlqTopic, key, body))).flatten.void *>
+    CoordinatorTracing.span(
+      "kafka.publish.dlq",
+      SpanKind.PRODUCER,
+      "messaging.system" -> "kafka",
+      "messaging.destination.name" -> dlqTopic
+    ) {
+      producer.produce(ProducerRecords.one(ProducerRecord(dlqTopic, key, body))).flatten.void
+    } *>
       IO(log.error("locked_consumer_record",
         "status" -> "parked",
         "group" -> groupId,

@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.persistence.WirelessStore
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.*
@@ -33,7 +33,7 @@ object WirelessConsumerService:
   def backlogSaveStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -41,7 +41,7 @@ object WirelessConsumerService:
     wirelessStream(settings, cfg.backlogSaveTopic, cfg.consumersCount, kafkaCfg) { committable =>
       handleBacklogSave(
         committable.record.value,
-        repo,
+        store,
         producer,
         cfg.backlogSaveTopic + cfg.dlqSuffix,
         dbSemaphore
@@ -51,7 +51,7 @@ object WirelessConsumerService:
   def backlogListStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -60,7 +60,7 @@ object WirelessConsumerService:
       handleBacklogList(
         committable.record.value,
         cfg.backlogListReplyTopic,
-        repo,
+        store,
         producer,
         cfg.backlogListTopic + cfg.dlqSuffix,
         dbSemaphore
@@ -70,7 +70,7 @@ object WirelessConsumerService:
   def backlogSyncedStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -78,7 +78,7 @@ object WirelessConsumerService:
     wirelessStream(settings, cfg.backlogSyncedTopic, cfg.consumersCount, kafkaCfg) { committable =>
       handleBacklogSynced(
         committable.record.value,
-        repo,
+        store,
         producer,
         cfg.backlogSyncedTopic + cfg.dlqSuffix,
         dbSemaphore
@@ -88,7 +88,7 @@ object WirelessConsumerService:
   def backlogPruneStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -97,7 +97,7 @@ object WirelessConsumerService:
       handleBacklogPrune(
         committable.record.value,
         cfg.backlogPruneReplyTopic,
-        repo,
+        store,
         producer,
         cfg.backlogPruneTopic + cfg.dlqSuffix,
         dbSemaphore
@@ -107,20 +107,20 @@ object WirelessConsumerService:
   def macLookupStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     val settings = consumerSettings(cfg.macLookupConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
     wirelessStream(settings, cfg.macLookupTopic, cfg.consumersCount, kafkaCfg) { committable =>
       val payload = committable.record.value
-      handleMacLookup(payload, cfg.macLookupReplyTopic, pgRepo, producer, dbSemaphore).as(committable.offset)
+      handleMacLookup(payload, cfg.macLookupReplyTopic, store, producer, dbSemaphore).as(committable.offset)
     }
 
   def networksAuthorizedStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -130,7 +130,7 @@ object WirelessConsumerService:
       handleNetworksAuthorized(
         payload,
         cfg.networksAuthorizedReplyTopic,
-        pgRepo,
+        store,
         producer,
         dbSemaphore
       ).as(committable.offset)
@@ -139,7 +139,7 @@ object WirelessConsumerService:
   def probeFlushStream(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
@@ -147,27 +147,27 @@ object WirelessConsumerService:
     val dlqTopic = cfg.probeFlushTopic + cfg.dlqSuffix
     wirelessStream(settings, cfg.probeFlushTopic, cfg.consumersCount, kafkaCfg) { committable =>
       val payload = committable.record.value
-      handleProbeFlush(payload, pgRepo, producer, dlqTopic, dbSemaphore).as(committable.offset)
+      handleProbeFlush(payload, store, producer, dlqTopic, dbSemaphore).as(committable.offset)
     }
 
   def allStreams(
       cfg: WirelessConfig,
       kafkaCfg: KafkaCfg,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    backlogSaveStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore)
-      .merge(backlogListStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
-      .merge(backlogSyncedStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
-      .merge(backlogPruneStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
-      .merge(macLookupStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
-      .merge(networksAuthorizedStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
-      .merge(probeFlushStream(cfg, kafkaCfg, pgRepo, producer, dbSemaphore))
+    backlogSaveStream(cfg, kafkaCfg, store, producer, dbSemaphore)
+      .merge(backlogListStream(cfg, kafkaCfg, store, producer, dbSemaphore))
+      .merge(backlogSyncedStream(cfg, kafkaCfg, store, producer, dbSemaphore))
+      .merge(backlogPruneStream(cfg, kafkaCfg, store, producer, dbSemaphore))
+      .merge(macLookupStream(cfg, kafkaCfg, store, producer, dbSemaphore))
+      .merge(networksAuthorizedStream(cfg, kafkaCfg, store, producer, dbSemaphore))
+      .merge(probeFlushStream(cfg, kafkaCfg, store, producer, dbSemaphore))
 
   private def handleBacklogSave(
       payload: String,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       dbSemaphore: Semaphore[IO]
@@ -181,19 +181,19 @@ object WirelessConsumerService:
         else
           val storedPayload = json.hcursor.downField("payload").focus.getOrElse(json)
           retryDatabase("backlog_save", payload, dlqTopic, producer) {
-            dbSemaphore.permit.use(_ => repo.saveWirelessBacklog(dedupeKey, streamName, storedPayload, stage))
+            dbSemaphore.permit.use(_ => store.saveBacklog(dedupeKey, streamName, storedPayload, stage).value)
           }(_ => IO.unit)
 
   private def handleBacklogList(
       payload: String,
       defaultReplyTopic: String,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
     retryDatabase("backlog_list", payload, dlqTopic, producer) {
-      dbSemaphore.permit.use(_ => repo.listPendingWirelessBacklog(100))
+      dbSemaphore.permit.use(_ => store.listPendingBacklog(100).value)
     } { entries =>
       val body = Json.obj("entries" -> entries.map { entry =>
         Json.obj(
@@ -210,7 +210,7 @@ object WirelessConsumerService:
 
   private def handleBacklogSynced(
       payload: String,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       dbSemaphore: Semaphore[IO]
@@ -219,20 +219,20 @@ object WirelessConsumerService:
       case Left(error) => publishInvalidPayload(producer, dlqTopic, payload, "backlog_synced", error)
       case Right((_, dedupeKey, streamName)) =>
         retryDatabase("backlog_synced", payload, dlqTopic, producer) {
-          dbSemaphore.permit.use(_ => repo.markWirelessBacklogSynced(dedupeKey, streamName))
+          dbSemaphore.permit.use(_ => store.markBacklogSynced(dedupeKey, streamName).value)
         }(_ => IO.unit)
 
   private def handleBacklogPrune(
       payload: String,
       defaultReplyTopic: String,
-      repo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
     cats.effect.Clock[IO].realTimeInstant.flatMap { now =>
       retryDatabase("backlog_prune", payload, dlqTopic, producer) {
-        dbSemaphore.permit.use(_ => repo.pruneWirelessBacklog(now.minus(7L, ChronoUnit.DAYS)))
+        dbSemaphore.permit.use(_ => store.pruneBacklog(now.minus(7L, ChronoUnit.DAYS)).value)
       } { pruned =>
         val body = Json.obj("pruned" -> pruned.asJson, "retention_days" -> 7.asJson).noSpaces
         publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic), body)
@@ -258,7 +258,11 @@ object WirelessConsumerService:
       case Left(_) if remaining > 1 =>
         IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
           retryDatabase(operation, payload, dlqTopic, producer, remaining - 1)(database)(onSuccess)
-      case Left(error) => publishDlq(producer, dlqTopic, operation, payload, error)
+      case Left(error) =>
+        publishDlq(producer, dlqTopic, operation, payload, error).handleErrorWith { publishError =>
+          IO(log.error(operation, "status" -> "dlq_publish_failed",
+            "topic" -> dlqTopic, "error" -> errorMessage(publishError)))
+        }
     }
 
   private def publishInvalidPayload(
@@ -280,7 +284,10 @@ object WirelessConsumerService:
       process: CommittableConsumerRecord[IO, String, String] => IO[CommittableOffset[IO]]
   ): Stream[IO, Unit] =
     Stream
-      .eval(KafkaComponents.waitForTopic(kafkaCfg, topic))
+      .eval(
+        KafkaComponents.waitForTopic(kafkaCfg, topic) *>
+          KafkaComponents.waitForTopic(kafkaCfg, topic + kafkaCfg.dlqSuffix)
+      )
       .flatMap(_ =>
         Stream.resource(fs2.kafka.KafkaConsumer.resource(settings))
       )
@@ -297,7 +304,7 @@ object WirelessConsumerService:
   private def handleMacLookup(
       payload: String,
       defaultReplyTopic: String,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
@@ -309,7 +316,7 @@ object WirelessConsumerService:
         case Some(mac) =>
           val macHashFields = hashMac(mac).toList.map("mac_hash" -> _)
           IO(log.debug("mac_lookup", (("status" -> "processing") :: macHashFields)*)) *>
-            dbSemaphore.permit.use(_ => pgRepo.lookupDeviceByMac(mac)).attempt.flatMap {
+            dbSemaphore.permit.use(_ => store.lookupDeviceByMac(mac).value).attempt.flatMap {
               case Left(err) =>
                 IO(log.warn("mac_lookup", "status" -> "skip",
                   "error" -> errorMessage(err)))
@@ -330,13 +337,13 @@ object WirelessConsumerService:
   private def handleNetworksAuthorized(
       payload: String,
       defaultReplyTopic: String,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
     if payload == null || payload.isEmpty then IO.unit
     else
-      dbSemaphore.permit.use(_ => pgRepo.listAuthorizedNetworks()).flatMap {
+      dbSemaphore.permit.use(_ => store.listAuthorizedNetworks.value).flatMap {
         case Right(reply) =>
           val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
           IO(log.info("networks_authorized", "status" -> "ok", "reply_topic" -> replyTopic)) *>
@@ -350,24 +357,24 @@ object WirelessConsumerService:
 
   private def handleProbeFlush(
       payload: String,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String,
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
     if payload == null || payload.isEmpty then IO.unit
-    else attemptWithRetry(payload, pgRepo, MaxRetries, dlqTopic, producer, dbSemaphore)
+    else attemptWithRetry(payload, store, MaxRetries, dlqTopic, producer, dbSemaphore)
 
   private def attemptWithRetry(
       payload: String,
-      pgRepo: TidbRepository,
+      store: WirelessStore[IO],
       remaining: Int,
       dlqTopic: String,
       producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): IO[Unit] =
     IO(log.info("probe_flush", "status" -> "processing", "payload_bytes" -> payload.length.toString)) *>
-      dbSemaphore.permit.use(_ => pgRepo.flushProbeBatch(payload)).flatMap {
+      dbSemaphore.permit.use(_ => store.flushProbeBatch(payload).value).flatMap {
         case Right(count) =>
           IO(log.info("probe_flush", "status" -> "ok",
             "records_inserted" -> count.toString, "payload_bytes" -> payload.length.toString))
@@ -375,7 +382,7 @@ object WirelessConsumerService:
           IO(log.warn("probe_flush", "status" -> "retry",
             "attempts_remaining" -> (remaining - 1).toString, "error" -> err.message)) *>
             IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
-            attemptWithRetry(payload, pgRepo, remaining - 1, dlqTopic, producer, dbSemaphore)
+            attemptWithRetry(payload, store, remaining - 1, dlqTopic, producer, dbSemaphore)
         case Left(err) =>
           IO(log.error("probe_flush", "status" -> "dlq",
             "topic" -> dlqTopic, "error" -> err.message)) *>

@@ -19,3 +19,16 @@ class TidbResultSuite extends FunSuite:
     val payload = """{"status":"success","row_count":2}"""
 
     assert(decode[TidbResult](payload).isLeft)
+
+  test("decoder derives retryability from a retryable error class"):
+    val payload =
+      """{"job_id":"job-1","batch_id":"batch-1","status":"failed","row_count":0,"error_class":"retryable","finished_at":"2026-08-03T12:00:00Z"}"""
+
+    val result = decode[TidbResult](payload).fold(error => fail(error.getMessage), identity)
+    assertEquals(result.retryable, true)
+
+  test("decoder rejects retryability that conflicts with the error class"):
+    val payload =
+      """{"job_id":"job-1","batch_id":"batch-1","status":"failed","row_count":0,"retryable":false,"error_class":"retryable","finished_at":"2026-08-03T12:00:00Z"}"""
+
+    assert(decode[TidbResult](payload).isLeft)

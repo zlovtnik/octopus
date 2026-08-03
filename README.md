@@ -28,14 +28,26 @@ The currently wired binary provides:
 - persisted processor state/runs, dependency validation, deterministic retry
   jitter, backpressure, expired outbox-lease recovery, shadow-alert generation,
   and periodic canonical-manifest verification;
+- idempotent wireless frame normalization across frame, radio, QoS, network,
+  application, identity, and security tables, plus device/client inventory;
+- deterministic wireless search-document text, checksums, tokens, tags,
+  version supersession, and one embedding job per document/model/checksum;
+- fenced, disabled-by-default wireless payload archival and event retention,
+  including deterministic MinIO object keys, hash verification, durable archive
+  metadata, archive-before-delete enforcement, tombstones, and retention runs;
+- fenced search-document retention, stale worker cleanup, and scheduled
+  wireless projection reconciliation with durable findings;
+- pure, deterministic behavior-window, timing percentile/jitter, 13-token
+  sequence, baseline, vector-similarity, clustering, DNS-threat, and AP-risk
+  transformations with TiDB projection writers;
+- approved-merge identity membership and infrastructure graph projection;
 - `/live`, `/ready`, `/metrics`, `/health`, `/actuator/health`, and
-  `/actuator/prometheus` HTTP routes.
+  `/actuator/prometheus` HTTP routes;
+- OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
+  and every TiDB durable operation, with error recording and bounded SDK shutdown.
 
-MinIO archival, retention execution, search-document preparation, and
-projection/intelligence families
-are represented in the shared contract but are not yet wired into this binary.
-They must remain disabled until their implementations and integration suites
-land. Octopus does not currently export OTLP spans.
+All 26 Octopus-owned processor IDs have exactly one workload declaration and
+remain disabled by default.
 
 ## Components
 
@@ -48,10 +60,11 @@ land. Octopus does not currently export OTLP spans.
 | `tidb.sql` | Named JDBC SQL constants and total parameterized query builders |
 | `persistence` | Effect-polymorphic store algebras, `DbResultT`, and `BatchStatement` |
 | `processor` | Stable IDs, ownership contracts, retry policy, leases, runners, and supervision model |
+| `archive` | Hash-verified, idempotent MinIO payload storage acquired as a `Resource` |
 | `cron` | Currently wired periodic ingest, recovery, dispatch, audit, and manifest checks |
 | `dispatch` | Backpressure and durable outbox publication |
 | `http` | Liveness, readiness, compatibility health, and metrics routes |
-| `observability` | Structured logs and Micrometer counters/gauges |
+| `observability` | Structured logs, Micrometer counters/gauges, and OTLP tracing |
 
 The generic metadata-driven sink, metadata cache, `SinkPipe`, and
 `SystemRegistry` were removed. Runtime DDL is forbidden: the provisioning
@@ -120,6 +133,22 @@ Important gates:
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs |
 | `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Initial retry delay |
 | `OCTOPUS_PROCESSOR_RESTART_MAX_DELAY_MS` | `30000` | Maximum retry delay |
+| `OCTOPUS_PROCESSOR_BATCH_SIZE` | `250` | Bound for normalized projection and search-preparation passes |
+| `OCTOPUS_PROCESSOR_INTERVAL_SECONDS` | `10` | Periodic search preparation interval |
+| `OCTOPUS_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Model attached to newly prepared embedding jobs |
+| `OCTOPUS_EVENT_DUPLICATE_DISTANCE` | `0.05` | Characterized event-vector duplicate distance |
+| `OCTOPUS_BEHAVIOR_SIMILARITY_THRESHOLD` | `0.88` | Characterized behavior similarity threshold |
+| `OCTOPUS_SEQUENCE_DISTANCE_THRESHOLD` | `0.10` | Characterized frame-sequence distance threshold |
+| `OCTOPUS_ARCHIVE_ENABLED` | `false` | Required gate for `event-retention` |
+| `MINIO_ENDPOINT` | `http://minio:9000` | S3-compatible archive endpoint |
+| `MINIO_ACCESS_KEY_ID` / `MINIO_SECRET_ACCESS_KEY` | empty | Archive credentials sourced from the runtime secret |
+| `WIRELESS_RAW_ARCHIVE_BUCKET` | `ssl-proxy-wireless-raw-archive` | Raw wireless payload archive bucket |
+| `WIRELESS_RAW_PAYLOAD_HOT_DAYS` | `7` | Age before a hot payload becomes archive-eligible |
+| `SYNC_EVENT_ROW_RETENTION_DAYS` | `30` | Age before an archived terminal event becomes deletion-eligible |
+| `SEARCH_RETENTION_DAYS` | `30` | Age before a terminal superseded search document becomes deletion-eligible |
+| `SYNC_EVENT_TOMBSTONE_RETENTION_DAYS` | `45` | Replay-protection period after event deletion |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and TiDB boundary spans |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; Helm uses `traceidratio` |
 | `OCTOPUS_CUTOVER_DEV_BYPASS` | `false` | Development-only bypass; production rejects it |
 
 TiDB uses `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`,

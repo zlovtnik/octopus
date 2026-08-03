@@ -4,18 +4,18 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
+import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.tidb.{
   SyncEventHydrationCandidate,
   TidbPayloadReadException,
-  TidbPayloadResolver,
-  TidbRepository
+  TidbPayloadResolver
 }
 import fs2.Stream
 
 import scala.concurrent.duration.*
 
 final class SyncEventHydrationService(
-    repository: TidbRepository,
+    store: IngestionStore[IO],
     payloadResolver: TidbPayloadResolver,
     metrics: CoordinatorMetrics,
     pageSize: Int,
@@ -43,7 +43,7 @@ final class SyncEventHydrationService(
       stats: Stats
   ): IO[Unit] =
     dbSemaphore.permit.use { _ =>
-      repository.findSyncEventsNeedingHydration(after, pageSize)
+      store.findHydrationCandidates(after, pageSize).value
     }.flatMap {
       case Left(error) =>
         IO.raiseError(new RuntimeException(
@@ -102,7 +102,7 @@ final class SyncEventHydrationService(
     (for
       payload <- payloadIO
       result <- dbSemaphore.permit.use { _ =>
-        repository.hydrateExistingSyncEvent(candidate, payload)
+        store.hydrateExistingEvent(candidate, payload).value
       }
       hydrated <- result.fold(
         error => IO.raiseError[Boolean](new RuntimeException(

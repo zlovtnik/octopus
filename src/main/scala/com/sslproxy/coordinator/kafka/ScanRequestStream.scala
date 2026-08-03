@@ -7,7 +7,8 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbPayloadResolver, TidbRepository}
+import com.sslproxy.coordinator.persistence.IngestionStore
+import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbPayloadResolver}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -18,7 +19,7 @@ object ScanRequestStream:
   def run(
       cfg: KafkaCfg,
       artifact: VerifiedCutoverArtifact,
-      repo: TidbRepository,
+      store: IngestionStore[IO],
       payloadResolver: TidbPayloadResolver,
       metrics: CoordinatorMetrics,
       producer: KafkaProducer[IO, String, String],
@@ -26,7 +27,7 @@ object ScanRequestStream:
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact, producer,
       ScanRequestRecord.decodeWire,
-      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).flatMap {
+      store.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).value.flatMap {
         case Left(err) =>
           IO(log.error("scan_request_consumer",
             "status" -> "offset_load_failed",
@@ -46,7 +47,7 @@ object ScanRequestStream:
           IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }
         handled <- resolved.traverse { case (locked, request, record) =>
-          dbSemaphore.permit.use(_ => repo.recordScanRequestWithEvidence(record, locked.metadata)).flatMap {
+          dbSemaphore.permit.use(_ => store.recordScanRequestWithEvidence(record, locked.metadata).value).flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))
             case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
               LockedTopicConsumer.parkNonRetriable(

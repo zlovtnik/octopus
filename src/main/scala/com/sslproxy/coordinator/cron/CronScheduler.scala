@@ -8,7 +8,13 @@ import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.dispatch.BatchDispatchService.DispatchResult
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.persistence.{
+  IngestionStore,
+  MaintenanceStore,
+  OutboxStore,
+  ProjectionStore
+}
+import com.sslproxy.coordinator.tidb.TidbErrorClass
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
 
@@ -17,7 +23,10 @@ import scala.concurrent.duration.*
 final class CronScheduler private (
     cfg: CronConfig,
     ingestConfig: IngestConfig,
-    repo: TidbRepository,
+    ingestionStore: IngestionStore[IO],
+    outboxStore: OutboxStore[IO],
+    projectionStore: ProjectionStore[IO],
+    maintenanceStore: MaintenanceStore[IO],
     backpressureService: BackpressureService,
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,
@@ -30,10 +39,10 @@ final class CronScheduler private (
 
   val schemaRefresher: Stream[IO, Unit] =
     Stream.awakeEvery[IO](cfg.schemaRefreshIntervalSeconds.seconds).evalMap { _ =>
-      verifyCanonicalManifest.handleErrorWith { error =>
-        IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
-          IO.raiseError(error)
-      }
+      CronScheduler.verifyCanonicalManifestWithRetry(
+        verifyCanonicalManifest,
+        cfg.scanRetryBackoffSeconds.max(1).seconds
+      )
     }
 
   val jobPlanningStream: Stream[IO, Unit] =
@@ -49,11 +58,11 @@ final class CronScheduler private (
   val loadDispatchStream: Stream[IO, Unit] =
     Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
       dbSemaphore.permit.use { _ =>
-        repo.prepareLoadDispatch(
+        ingestionStore.prepareLoadDispatch(
           ingestConfig.loadStreamNames,
           cfg.batchMaxAttempts,
           cfg.ingestBatchSize
-        ).flatMap {
+        ).value.flatMap {
           case Right(_) => IO.unit
           case Left(error) => IO.raiseError(databaseFailure(error))
         }
@@ -68,6 +77,143 @@ final class CronScheduler private (
   val rfAlertStream: Stream[IO, Unit] =
     Stream.awakeEvery[IO](10.seconds).evalMap { _ =>
       dbSemaphore.permit.use(_ => shadowAudit())
+    }
+
+  val wirelessFrameNormalizerStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        projectionStore.normalizeWirelessFrames(cfg.ingestBatchSize).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  val wirelessInventoryProjectorStream: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](10.seconds).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        projectionStore.projectWirelessInventory(cfg.ingestBatchSize).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  def searchDocumentBuilderStream(
+      batchSize: Int,
+      interval: FiniteDuration
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        projectionStore.buildSearchDocuments(batchSize).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  def embeddingJobPreparerStream(
+      batchSize: Int,
+      interval: FiniteDuration,
+      embeddingModel: String
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        projectionStore.prepareEmbeddingJobs(batchSize, embeddingModel).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  def staleWorkerCleanupStream(
+      batchSize: Int,
+      interval: FiniteDuration
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        maintenanceStore.cleanupStaleWorkers(batchSize).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  def scheduledReconciliationStream(
+      batchSize: Int,
+      interval: FiniteDuration
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        maintenanceStore.reconcileWirelessProjections(batchSize).value.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
+    }
+
+  def behaviorProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectBehavior(batchSize).value)
+
+  def timingProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectTiming(batchSize).value)
+
+  def baselineProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectBaselines(batchSize).value)
+
+  def sequenceProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectSequences(batchSize).value)
+
+  def similarityProjectorStream(
+      batchSize: Int,
+      interval: FiniteDuration,
+      eventDuplicateDistance: Double,
+      behaviorSimilarityThreshold: Double,
+      sequenceDistanceThreshold: Double
+  ): Stream[IO, Unit] =
+    projectionStream(
+      interval,
+      projectionStore.projectSimilarities(
+        batchSize,
+        eventDuplicateDistance,
+        behaviorSimilarityThreshold,
+        sequenceDistanceThreshold
+      ).value
+    )
+
+  def clusteringProjectorStream(
+      batchSize: Int,
+      interval: FiniteDuration,
+      minimumSimilarity: Double
+  ): Stream[IO, Unit] =
+    projectionStream(
+      interval,
+      projectionStore.projectClusterCandidates(batchSize, minimumSimilarity).value
+    )
+
+  def identityProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectApprovedIdentities(batchSize).value)
+
+  def graphProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectInfrastructureGraph(batchSize).value)
+
+  def dnsAlertProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectDnsThreats(batchSize).value)
+
+  def riskProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(interval, projectionStore.projectRisk(batchSize).value)
+
+  private def projectionStream(
+      interval: FiniteDuration,
+      operation: => IO[Either[com.sslproxy.coordinator.domain.DatabaseError, Int]]
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      dbSemaphore.permit.use { _ =>
+        operation.flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(databaseFailure(error))
+        }
+      }
     }
 
   val supportStream: Stream[IO, Unit] =
@@ -108,7 +254,7 @@ final class CronScheduler private (
   private def processIngest(): IO[Unit] =
     val budget = backpressureService.budget
 
-    repo.pendingLedgerCount().flatMap {
+    ingestionStore.pendingCount.value.flatMap {
       case Left(err) =>
         IO(log.warn("ingest_ledger", "status" -> "pending_count_failed",
           "operation" -> err.operation, "error" -> err.message)) *>
@@ -124,12 +270,12 @@ final class CronScheduler private (
         else IO.unit
 
         logPending *> throttleCheck *>
-          repo.processIngestLedger(
+          ingestionStore.processPending(
             ingestConfig.streamNames,
             cfg.scanMaxAttempts,
             cfg.scanRetryBackoffSeconds,
             cfg.ingestBatchSize
-          ).flatMap {
+          ).value.flatMap {
             case Left(err) =>
               IO(log.error("ingest_ledger", "status" -> "failed",
                 "operation" -> err.operation, "error" -> err.message)) *>
@@ -146,7 +292,7 @@ final class CronScheduler private (
     }
 
   private def recoverStaleBatches(): IO[Unit] =
-    repo.recoverExpiredOutboxLeases().flatMap {
+    outboxStore.recoverExpired.value.flatMap {
       case Left(err) =>
         IO(log.error("outbox_lease_recovery", "status" -> "failed",
           "operation" -> err.operation, "error" -> err.message)) *>
@@ -171,7 +317,7 @@ final class CronScheduler private (
       val now = System.currentTimeMillis()
       if now - lastMs < intervalMs then IO.unit
       else
-        repo.generateShadowAlerts().flatMap {
+        projectionStore.generateRfAlerts.value.flatMap {
           case Left(err) =>
             IO(log.error("shadow_audit", "status" -> "failed",
               "operation" -> err.operation, "error" -> err.message)) *>
@@ -195,7 +341,10 @@ object CronScheduler:
   def create(
       cfg: CronConfig,
       ingestConfig: IngestConfig,
-      repo: TidbRepository,
+      ingestionStore: IngestionStore[IO],
+      outboxStore: OutboxStore[IO],
+      projectionStore: ProjectionStore[IO],
+      maintenanceStore: MaintenanceStore[IO],
       backpressureService: BackpressureService,
       batchDispatchService: BatchDispatchService,
       metrics: CoordinatorMetrics,
@@ -208,7 +357,10 @@ object CronScheduler:
     yield new CronScheduler(
       cfg,
       ingestConfig,
-      repo,
+      ingestionStore,
+      outboxStore,
+      projectionStore,
+      maintenanceStore,
       backpressureService,
       batchDispatchService,
       metrics,
@@ -234,3 +386,21 @@ object CronScheduler:
         }
 
     loop(maxDispatches.max(0), 0)
+
+  private[cron] def verifyCanonicalManifestWithRetry(
+      verify: IO[Unit],
+      retryDelay: FiniteDuration
+  ): IO[Unit] =
+    verify.handleErrorWith { error =>
+      TidbErrorClass.classify(error) match
+        case TidbErrorClass.Retryable =>
+          IO(log.warn(
+            "canonical_manifest_verification",
+            "status" -> "retrying",
+            "delay_ms" -> retryDelay.toMillis.toString,
+            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+          )) *> IO.sleep(retryDelay) *> verifyCanonicalManifestWithRetry(verify, retryDelay)
+        case TidbErrorClass.Permanent =>
+          IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
+            IO.raiseError(error)
+    }

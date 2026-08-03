@@ -5,16 +5,19 @@ import cats.effect.implicits.*
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.cutover.CutoffKey
+import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord}
 import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
-import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
+import com.sslproxy.coordinator.processor.{IntelligencePreparation, Lease, SearchDocumentPreparation}
 import com.sslproxy.coordinator.util.Sha256Utils
-import com.sslproxy.coordinator.tidb.sql.{IngestionSql, JobBatchSql, OutboxSql, ProjectionSql, ResultSql, WirelessProjectionSql, WirelessSql}
+import com.sslproxy.coordinator.tidb.sql.{IdentityGraphSql, IngestionSql, IntelligenceSql, JobBatchSql, MaintenanceSql, OutboxSql, ProjectionSql, ResultSql, SearchPreparationSql, ThreatRiskSql, WirelessProcessorSql, WirelessProjectionSql, WirelessSql}
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import io.opentelemetry.api.trace.SpanKind
 import scala.concurrent.duration.*
 
 class TidbRepository(xa: Transactor[IO]):
@@ -547,6 +550,288 @@ class TidbRepository(xa: Transactor[IO]):
       ProjectionSql.generateShadowAlerts(windowSecs, signalThreshold, presenceWindowSecs)
     }
 
+  def normalizeWirelessFrames(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.normalize_wireless_frames") {
+      WirelessProcessorSql.normalize(limit)
+    }
+
+  def projectWirelessInventory(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_wireless_inventory") {
+      WirelessProcessorSql.projectInventory(limit)
+    }
+
+  def buildSearchDocuments(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.build_search_documents") {
+      SearchPreparationSql.candidates(limit).to[List].flatMap { sources =>
+        sources.traverse_ { source =>
+          SearchDocumentPreparation.prepare(source).fold(
+            error => FC.raiseError[Unit](IllegalArgumentException(error)),
+            document => SearchPreparationSql.persist(document)
+          )
+        }.as(sources.size)
+      }
+    }
+
+  def prepareEmbeddingJobs(
+      limit: Int,
+      embeddingModel: String
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.prepare_embedding_jobs") {
+      SearchPreparationSql.documentsMissingEmbeddingJobs(embeddingModel, limit).to[List].flatMap { documents =>
+        documents.traverse_ { case (documentId, checksum) =>
+          val jobId = stableUuid(s"embedding:$documentId:event:$embeddingModel:$checksum")
+          SearchPreparationSql.enqueueEmbeddingJob(jobId, documentId, checksum, embeddingModel)
+        }.as(documents.size)
+      }
+    }
+
+  def projectBehavior(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_behavior") {
+      IntelligenceSql.behaviorCandidates(limit).to[List].flatMap { frames =>
+        IntelligencePreparation.behavior(frames).traverse(IntelligenceSql.persistBehavior).map(_.sum)
+      }
+    }
+
+  def projectTiming(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_timing") {
+      IntelligenceSql.timingCandidates(limit).to[List].flatMap { frames =>
+        IntelligencePreparation.timing(frames).traverse(IntelligenceSql.persistTiming).map(_.sum)
+      }
+    }
+
+  def projectSequences(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_sequences") {
+      IntelligenceSql.sequenceCandidates(limit).to[List].flatMap { frames =>
+        IntelligencePreparation.sequences(frames).traverse(IntelligenceSql.persistSequence).map(_.sum)
+      }
+    }
+
+  def projectBaselines(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_baselines") {
+      IntelligenceSql.baselineCandidates(limit).to[List].flatMap { rows =>
+        rows.groupMap(_._1)(_._2).toList
+          .traverse { case (bssid, signals) =>
+            IntelligencePreparation.baseline(bssid, signals.toVector)
+              .fold(0.pure[ConnectionIO])(IntelligenceSql.persistBaseline)
+          }
+          .map(_.sum)
+      }
+    }
+
+  def projectSimilarities(
+      limit: Int,
+      eventDuplicateDistance: Double,
+      behaviorSimilarityThreshold: Double,
+      sequenceDistanceThreshold: Double
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_similarities") {
+      val candidates = List(
+        IntelligenceSql.VectorKind.Event -> eventDuplicateDistance,
+        IntelligenceSql.VectorKind.Behaviour -> (1.0d - behaviorSimilarityThreshold),
+        IntelligenceSql.VectorKind.Sequence -> sequenceDistanceThreshold
+      )
+      candidates.traverse { case (kind, distance) =>
+        IntelligenceSql.similarityCandidates(kind, distance, limit).to[List].flatMap { values =>
+          values.traverse { candidate =>
+            IntelligencePreparation.similarity(candidate).fold(
+              error => FC.raiseError[Int](IllegalArgumentException(error)),
+              IntelligenceSql.persistSimilarity
+            )
+          }.map(_.sum)
+        }
+      }.map(_.sum)
+    }
+
+  def projectClusterCandidates(
+      limit: Int,
+      minimumSimilarity: Double
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_cluster_candidates") {
+      IdentityGraphSql.similarityEdges(minimumSimilarity, limit).to[List].flatMap { edges =>
+        edges.distinctBy((left, right, _) => Vector(left, right).sorted).traverse {
+          case (left, right, confidence) =>
+            IdentityGraphSql.persistMergeCandidate(left, right, confidence)
+        }.map(_.sum)
+      }
+    }
+
+  def projectApprovedIdentities(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_approved_identities") {
+      IdentityGraphSql.approvedIdentityEdges(limit).to[List].flatMap { edges =>
+        IntelligencePreparation.identityClusters(edges).toList
+          .traverse(IdentityGraphSql.persistCluster)
+          .map(_.sum)
+      }
+    }
+
+  def projectInfrastructureGraph(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_infrastructure_graph") {
+      val runId = java.util.UUID.randomUUID().toString
+      IdentityGraphSql.projectGraph(limit, runId)
+    }
+
+  def projectDnsThreats(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_dns_threats") {
+      ThreatRiskSql.dnsCandidates(limit).to[List].flatMap { candidates =>
+        candidates.traverse(candidate =>
+          ThreatRiskSql.persistDnsThreat(IntelligencePreparation.dnsThreat(candidate))
+        ).map(_.sum)
+      }
+    }
+
+  def projectRisk(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.project_risk") {
+      ThreatRiskSql.apRiskCandidates(limit).to[List].flatMap { candidates =>
+        candidates.traverse { case (bssid, deauth, signal, typosquat, vendor, outlier) =>
+          ThreatRiskSql.persistApRisk(IntelligencePreparation.apRisk(
+            bssid,
+            deauth,
+            signal,
+            typosquat,
+            vendor,
+            outlier
+          ))
+        }.map(_.sum)
+      }
+    }
+
+  def findArchiveCandidates(
+      hotDays: Int,
+      limit: Int
+  ): IO[Either[DatabaseError, List[ArchiveCandidate]]] =
+    runDb("tidb.find_archive_candidates") {
+      MaintenanceSql.archiveCandidates(hotDays, limit).to[List]
+    }
+
+  def recordArchive(
+      candidate: ArchiveCandidate,
+      receipt: ArchiveReceipt
+  ): IO[Either[DatabaseError, Unit]] =
+    runDb("tidb.record_archive") {
+      MaintenanceSql.recordArchive(candidate, receipt)
+    }
+
+  def claimMaintenanceLease(
+      resourceType: String,
+      resourceId: String,
+      ownerId: String,
+      token: String,
+      ttlSeconds: Int
+  ): IO[Either[DatabaseError, Option[Lease]]] =
+    runDb("tidb.claim_maintenance_lease") {
+      MaintenanceSql.claimLease(resourceType, resourceId, ownerId, token, ttlSeconds)
+    }
+
+  def releaseMaintenanceLease(
+      resourceType: String,
+      resourceId: String,
+      lease: Lease
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.release_maintenance_lease") {
+      MaintenanceSql.releaseLease(resourceType, resourceId, lease).run
+    }
+
+  def renewMaintenanceLease(
+      resourceType: String,
+      resourceId: String,
+      lease: Lease,
+      ttlSeconds: Int
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.renew_maintenance_lease") {
+      MaintenanceSql.renewLease(resourceType, resourceId, lease, ttlSeconds).run
+    }
+
+  def startRetentionRun(
+      runId: String,
+      policyName: String,
+      targetTable: String,
+      cutoff: java.time.Instant,
+      lease: Lease
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.start_retention_run") {
+      MaintenanceSql.startRetentionRun(runId, policyName, targetTable, cutoff, lease).run
+    }
+
+  def finishRetentionRun(
+      runId: String,
+      status: String,
+      rowsSelected: Long,
+      rowsArchived: Long,
+      rowsDeleted: Long,
+      error: Option[String]
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.finish_retention_run") {
+      MaintenanceSql.finishRetentionRun(
+        runId,
+        status,
+        rowsSelected,
+        rowsArchived,
+        rowsDeleted,
+        error
+      ).run
+    }
+
+  def retainArchivedEvents(
+      retentionDays: Int,
+      tombstoneDays: Int,
+      limit: Int,
+      resourceType: String,
+      resourceId: String,
+      lease: Lease
+  ): IO[Either[DatabaseError, (Long, Long)]] =
+    runDb("tidb.retain_archived_events") {
+      MaintenanceSql.retentionCandidates(retentionDays, limit).to[List].flatMap { candidates =>
+        candidates.traverse(candidate =>
+          MaintenanceSql.deleteRetainedEvent(
+            candidate,
+            tombstoneDays,
+            resourceType,
+            resourceId,
+            lease
+          )
+        ).map(deleted => candidates.size.toLong -> deleted.count(identity).toLong)
+      }
+    }
+
+  def pruneExpiredTombstones(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.prune_expired_tombstones") {
+      MaintenanceSql.pruneTombstones(limit).run
+    }
+
+  def retainSearchDocuments(
+      retentionDays: Int,
+      limit: Int,
+      resourceType: String,
+      resourceId: String,
+      lease: Lease
+  ): IO[Either[DatabaseError, (Long, Long)]] =
+    runDb("tidb.retain_search_documents") {
+      MaintenanceSql.searchRetentionCandidates(retentionDays, limit).to[List].flatMap { candidates =>
+        candidates.traverse(documentId =>
+          MaintenanceSql.deleteRetainedSearchDocument(
+            documentId,
+            resourceType,
+            resourceId,
+            lease
+          )
+        ).map(deleted => candidates.size.toLong -> deleted.count(identity).toLong)
+      }
+    }
+
+  def cleanupStaleWorkers(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.cleanup_stale_workers") {
+      MaintenanceSql.cleanupStaleWorkers(limit)
+    }
+
+  def reconcileWirelessProjections(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("tidb.reconcile_wireless_projections") {
+      for
+        findings <- MaintenanceSql.reconcileMissingWirelessChildren(limit)
+        _ <- WirelessProcessorSql.normalize(limit)
+        resolved <- MaintenanceSql.ResolveWirelessFindings.run
+      yield findings + resolved
+    }
+
   def lookupDeviceByMac(mac: String): IO[Either[DatabaseError, Option[String]]] =
     runDb("tidb.lookup_device_by_mac") {
       WirelessSql.lookupDevice(mac).query[String].option
@@ -626,11 +911,32 @@ class TidbRepository(xa: Transactor[IO]):
     runDb("tidb.list_pending_wireless_backlog") {
       WirelessSql.oldestPending(limit.max(1).min(100)).query[
         (String, String, String, String, Int, java.sql.Timestamp)
-      ].to[List].map(_.flatMap { case (dedupeKey, streamName, payload, stage, attempts, createdAt) =>
-        circeParser.parse(payload).toOption.map { json =>
-          WirelessBacklogEntry(dedupeKey, streamName, json, stage, attempts, createdAt.toInstant)
-        }
-      })
+      ].to[List].flatMap(_.traverse {
+        case (dedupeKey, streamName, payload, stage, attempts, createdAt) =>
+          circeParser.parse(payload) match
+            case Right(json) =>
+              WirelessBacklogEntry(
+                dedupeKey,
+                streamName,
+                json,
+                stage,
+                attempts,
+                createdAt.toInstant
+              ).some.pure[ConnectionIO]
+            case Left(error) =>
+              FC.delay(log.warn(
+                "wireless_backlog",
+                "status" -> "invalid_payload",
+                "dedupe_key" -> dedupeKey,
+                "stream_name" -> streamName,
+                "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+              )) *>
+                WirelessSql.markFailed(
+                  dedupeKey,
+                  streamName,
+                  "stored backlog payload is not valid JSON"
+                ).update.run.as(Option.empty[WirelessBacklogEntry])
+      }).map(_.flatten)
     }
 
   def markWirelessBacklogSynced(
@@ -650,14 +956,21 @@ class TidbRepository(xa: Transactor[IO]):
     }
 
   private def runDb[A](operation: String)(fa: ConnectionIO[A]): IO[Either[DatabaseError, A]] =
-    TidbRepository.retryTransient(operation)(fa.transact(xa))
-      .map(Right(_))
-      .handleError { cause =>
-        log.error("db_error", cause, "operation" -> operation)
-        TidbErrorClass.classify(cause) match
-          case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
-          case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
-      }
+    val traced = CoordinatorTracing.span(
+      operation,
+      SpanKind.CLIENT,
+      "db.system" -> "mysql",
+      "db.namespace" -> "octopus_core",
+      "db.operation.name" -> operation
+    ) {
+      TidbRepository.retryTransient(operation)(fa.transact(xa))
+    }
+    traced.map(Right(_)).handleError { cause =>
+      log.error("db_error", cause, "operation" -> operation)
+      TidbErrorClass.classify(cause) match
+        case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
+        case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
+    }
 
   private def stableUuid(value: String): String =
     UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString

@@ -140,7 +140,7 @@ class LockedTopicConsumerSuite extends FunSuite:
       loadTopic = "sync.oracle.load",
       resultTopic = "sync.oracle.result",
       scanTopic = ScanTopic,
-      payloadAuditTopic = "proxy.payload.audit",
+      payloadAuditTopic = "proxy.payload_audit",
       dlqSuffix = ".dlq",
       scanConsumer = ScanGroup,
       resultConsumer = "octopus-result-v1",

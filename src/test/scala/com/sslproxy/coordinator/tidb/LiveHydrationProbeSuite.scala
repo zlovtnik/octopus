@@ -73,6 +73,37 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       val scratchTable = s"`$scratchDatabase`.`sync_events`"
       val sourceTombstones = s"`$sourceDatabase`.`sync_event_tombstones`"
       val scratchTombstones = s"`$scratchDatabase`.`sync_event_tombstones`"
+
+      val setup = connection.createStatement()
+      setup.execute(s"DROP TABLE IF EXISTS $scratchTombstones")
+      setup.execute(s"DROP TABLE IF EXISTS $scratchTable")
+      setup.execute(s"CREATE TABLE $scratchTable LIKE $sourceTable")
+      setup.execute(s"CREATE TABLE $scratchTombstones LIKE $sourceTombstones")
+      setup.close()
+
+      val copy = connection.prepareStatement(
+        s"""INSERT INTO $scratchTable
+          |SELECT * FROM %s
+          |WHERE payload_archived = 0
+          |  AND stream_name = 'wireless.audit'
+          |  AND (payload IS NULL OR event_type IS NULL OR schema_version IS NULL
+          |       OR sensor_id IS NULL OR wireless_search_text IS NULL)
+          |ORDER BY observed_at, dedupe_key
+          |LIMIT 20""".stripMargin.format(sourceTable)
+      )
+      copy.executeUpdate()
+      copy.close()
+
+      val copyTombstones = connection.prepareStatement(
+        s"""INSERT INTO $scratchTombstones
+          |SELECT tombstone.* FROM $sourceTombstones tombstone
+          |JOIN $scratchTable event
+          |  ON event.dedupe_key = tombstone.dedupe_key
+          | AND event.stream_name = tombstone.stream_name""".stripMargin
+      )
+      copyTombstones.executeUpdate()
+      copyTombstones.close()
+
       val select = connection.prepareStatement(
         """SELECT dedupe_key, stream_name, observed_at, payload_ref, payload_sha256
           |FROM %s e
@@ -81,7 +112,7 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
           |  AND (payload IS NULL OR event_type IS NULL OR schema_version IS NULL
           |       OR sensor_id IS NULL OR wireless_search_text IS NULL)
           |ORDER BY observed_at, dedupe_key
-          |LIMIT 20""".stripMargin.format(sourceTable)
+          |LIMIT 20""".stripMargin.format(scratchTable)
       )
       val result = select.executeQuery()
       val candidates = List.newBuilder[SyncEventHydrationCandidate]
@@ -98,23 +129,6 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       select.close()
       val candidateList = candidates.result()
       if candidateList.isEmpty then fail("expected production hydration candidates")
-
-      val setup = connection.createStatement()
-      setup.execute(s"CREATE TABLE $scratchTable LIKE $sourceTable")
-      setup.execute(s"CREATE TABLE $scratchTombstones LIKE $sourceTombstones")
-      val copy = connection.prepareStatement(
-        s"""INSERT INTO $scratchTable
-          |SELECT * FROM %s
-          |WHERE payload_archived = 0
-          |  AND stream_name = 'wireless.audit'
-          |  AND (payload IS NULL OR event_type IS NULL OR schema_version IS NULL
-          |       OR sensor_id IS NULL OR wireless_search_text IS NULL)
-          |ORDER BY observed_at, dedupe_key
-          |LIMIT 20""".stripMargin.format(sourceTable)
-      )
-      copy.executeUpdate()
-      copy.close()
-      setup.close()
 
       val resolver = new TidbPayloadResolver("/unused")
       candidateList.map(candidate => candidate -> resolver.resolvePayload(candidate.payloadRef))

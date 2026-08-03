@@ -89,7 +89,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     connectionTimeoutMs = 5000L,
     statementTimeoutSecs = 30,
     enabled = true,
-    warnOnly = false
+    warnOnly = false,
+    manifestSha256 = manifestValue("manifest_sha256")
   )
   private lazy val schemaTransactor = TidbTransactor.fromDataSource(dataSource, schemaConfig)
   private lazy val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
@@ -682,8 +683,30 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
             val _ = statement.execute(sqlStatement)
           }
         }
+        val readiness = connection.prepareStatement(
+          """UPDATE octopus_core.schema_readiness
+            |SET required_version = ?, applied_version = ?,
+            |    required_checksum = ?, applied_checksum = ?, ready = 1,
+            |    checked_at = UTC_TIMESTAMP(6)
+            |WHERE domain = 'octopus_core'""".stripMargin
+        )
+        try
+          val version = manifestValue("schema_version")
+          val checksum = manifestValue("manifest_sha256")
+          readiness.setString(1, version)
+          readiness.setString(2, version)
+          readiness.setString(3, checksum)
+          readiness.setString(4, checksum)
+          val _ = readiness.executeUpdate()
+        finally readiness.close()
       finally statement.close()
     finally connection.close()
+
+  private def manifestValue(key: String): String =
+    Files.readAllLines(schemaRoot.resolve("manifest.yaml")).asScala
+      .find(_.startsWith(s"$key:"))
+      .map(_.substring(key.length + 1).trim)
+      .getOrElse(throw IllegalStateException(s"missing $key in canonical manifest"))
 
   private def schemaRoot: Path =
     Iterator.iterate(Path.of("").toAbsolutePath)(_.getParent)

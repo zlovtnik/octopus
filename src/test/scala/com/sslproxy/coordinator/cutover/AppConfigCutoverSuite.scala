@@ -308,6 +308,19 @@ class AppConfigCutoverSuite extends FunSuite:
         ))
       case Right(_) => fail("expected public key retrieval rejection")
 
+  test("enabled TiDB requires an exact canonical manifest checksum"):
+    val baseline = AppConfig.load
+    val staged = baseline.copy(
+      tidb = enabledTiDb(baseline.tidb).copy(manifestSha256 = "not-a-checksum")
+    )
+
+    AppConfig.validate(staged) match
+      case Left(error) =>
+        assert(error.errors.toList.contains(
+          "tidb.manifest-sha-256 must be 64 lowercase hexadecimal characters"
+        ))
+      case Right(_) => fail("expected manifest checksum rejection")
+
   test("proxy.events must remain in both ingest and TiDB load streams"):
     val baseline = AppConfig.load
     val missing = baseline.copy(

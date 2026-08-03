@@ -54,7 +54,8 @@ final case class TiDbConfig(
     sslClientKeyStorePath: String = "",
     sslClientKeyStorePassword: String = "",
     sslClientKeyStoreType: String = "PKCS12",
-    localDevAllowPublicKeyRetrieval: Boolean = false
+    localDevAllowPublicKeyRetrieval: Boolean = false,
+    manifestSha256: String = ""
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -395,6 +396,9 @@ object AppConfig:
       ),
       Option.when(config.localDevAllowPublicKeyRetrieval)(
         "tidb.local-dev-allow-public-key-retrieval must be false when TiDB readiness is enabled"
+      ),
+      Option.when(!Sha256Hex.matches(config.manifestSha256))(
+        "tidb.manifest-sha-256 must be 64 lowercase hexadecimal characters"
       )
     ).flatten
 

@@ -82,6 +82,24 @@ final class TidbTransactor private (
   def healthCheck: IO[Boolean] =
     checkConnection().as(true).handleError(_ => false)
 
+  def schemaReadiness(domain: String): IO[Option[SchemaReadiness]] =
+    withConnection { conn =>
+      val stmt = conn.prepareStatement(SchemaChecksSql.SchemaReadinessQuery)
+      try
+        stmt.setString(1, domain)
+        val rs = stmt.executeQuery()
+        Option.when(rs.next())(
+          SchemaReadiness(
+            requiredVersion = rs.getString("required_version"),
+            appliedVersion = Option(rs.getString("applied_version")),
+            requiredChecksum = rs.getString("required_checksum"),
+            appliedChecksum = Option(rs.getString("applied_checksum")),
+            ready = rs.getBoolean("ready")
+          )
+        )
+      finally stmt.close()
+    }
+
   private def executeBatch(stmt: PreparedStatement, rows: Seq[Seq[Any]]): Long =
     var count = 0L
     for row <- rows do

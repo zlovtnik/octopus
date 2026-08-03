@@ -21,20 +21,23 @@ object IntelligenceSql:
 
   def behaviorCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
-    (fr"""WITH candidate_windows AS (
+    (fr"""WITH source_windows AS (
              SELECT frame.source_mac,
-                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket
+                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket,
+                    COUNT(*) AS source_event_count
              FROM wireless_frames frame
              WHERE frame.source_mac IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1 FROM atheros_search.behaviour_snapshots snapshot
-                 WHERE snapshot.snapshot_key = CONCAT(
-                   frame.source_mac, ':',
-                   CAST(FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) * 3600 AS CHAR)
-                 )
-               )
              GROUP BY frame.source_mac, window_bucket
-             ORDER BY window_bucket, frame.source_mac
+           ), candidate_windows AS (
+             SELECT source.source_mac, source.window_bucket
+             FROM source_windows source
+             LEFT JOIN atheros_search.behaviour_snapshots snapshot
+               ON snapshot.snapshot_key = CONCAT(
+                 source.source_mac, ':', CAST(source.window_bucket * 3600 AS CHAR)
+               )
+             WHERE snapshot.snapshot_key IS NULL
+                OR snapshot.event_count <> source.source_event_count
+             ORDER BY source.window_bucket, source.source_mac
              LIMIT $batchLimit
            )
            SELECT""" ++ FrameColumnsFragment ++ fr"""
@@ -51,20 +54,23 @@ object IntelligenceSql:
 
   def timingCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
-    (fr"""WITH candidate_windows AS (
+    (fr"""WITH source_windows AS (
              SELECT frame.source_mac,
-                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket
+                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket,
+                    COUNT(*) AS source_event_count
              FROM wireless_frames frame
              WHERE frame.source_mac IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1 FROM atheros_search.timing_profiles profile
-                 WHERE profile.profile_key = CONCAT(
-                   frame.source_mac, ':',
-                   CAST(FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) * 3600 AS CHAR)
-                 )
-               )
              GROUP BY frame.source_mac, window_bucket
-             ORDER BY window_bucket, frame.source_mac
+           ), candidate_windows AS (
+             SELECT source.source_mac, source.window_bucket
+             FROM source_windows source
+             LEFT JOIN atheros_search.timing_profiles profile
+               ON profile.profile_key = CONCAT(
+                 source.source_mac, ':', CAST(source.window_bucket * 3600 AS CHAR)
+               )
+             WHERE profile.profile_key IS NULL
+                OR profile.source_event_count <> source.source_event_count
+             ORDER BY source.window_bucket, source.source_mac
              LIMIT $batchLimit
            )
            SELECT""" ++ FrameColumnsFragment ++ fr"""
@@ -81,16 +87,19 @@ object IntelligenceSql:
 
   def sequenceCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
-    (fr"""WITH candidate_sessions AS (
-             SELECT identity_row.session_key
+    (fr"""WITH source_sessions AS (
+             SELECT identity_row.session_key, COUNT(*) AS source_event_count
              FROM wireless_frame_identity identity_row
              WHERE identity_row.session_key IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1 FROM atheros_search.frame_sequences sequence_row
-                 WHERE sequence_row.session_key = identity_row.session_key
-               )
              GROUP BY identity_row.session_key
-             ORDER BY identity_row.session_key
+           ), candidate_sessions AS (
+             SELECT source.session_key
+             FROM source_sessions source
+             LEFT JOIN atheros_search.frame_sequences sequence_row
+               ON sequence_row.session_key = source.session_key
+             WHERE sequence_row.session_key IS NULL
+                OR sequence_row.frame_count <> source.source_event_count
+             ORDER BY source.session_key
              LIMIT $batchLimit
            )
            SELECT""" ++ FrameColumnsFragment ++ fr"""
@@ -105,17 +114,20 @@ object IntelligenceSql:
 
   def baselineCandidates(limit: Int): Query0[(String, Double)] =
     val batchLimit = limit.max(1)
-    sql"""WITH candidate_bssids AS (
-             SELECT frame.bssid
+    sql"""WITH source_bssids AS (
+             SELECT frame.bssid, COUNT(*) AS source_event_count
              FROM wireless_frames frame
              JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
              WHERE frame.bssid IS NOT NULL AND radio.signal_dbm IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1 FROM atheros_search.baseline_profiles baseline
-                 WHERE baseline.bssid = frame.bssid AND baseline.metric = 'signal_dbm'
-               )
              GROUP BY frame.bssid
-             ORDER BY frame.bssid
+           ), candidate_bssids AS (
+             SELECT source.bssid
+             FROM source_bssids source
+             LEFT JOIN atheros_search.baseline_profiles baseline
+               ON baseline.bssid = source.bssid AND baseline.metric = 'signal_dbm'
+             WHERE baseline.baseline_id IS NULL
+                OR baseline.sample_count <> source.source_event_count
+             ORDER BY source.bssid
              LIMIT $batchLimit
            )
            SELECT frame.bssid, CAST(radio.signal_dbm AS DOUBLE)
@@ -175,52 +187,134 @@ object IntelligenceSql:
              ${value.signalMin}, ${value.signalMax}, ${value.signalAverage}, ${value.retryCount},
              ${value.protectedCount}, ${value.unprotectedCount}, ${value.uniqueBssidCount},
              CAST(${value.rotationIndicatorsJson} AS JSON), ${value.projectionRunId}
-           ) ON DUPLICATE KEY UPDATE snapshot_id = snapshot_id""".update.run
+           ) ON DUPLICATE KEY UPDATE
+             location_id = VALUES(location_id),
+             sensor_id = VALUES(sensor_id),
+             window_start = VALUES(window_start),
+             window_end = VALUES(window_end),
+             event_count = VALUES(event_count),
+             text_summary = VALUES(text_summary),
+             embedding_text = VALUES(embedding_text),
+             protocol_mix = VALUES(protocol_mix),
+             frame_type_distribution = VALUES(frame_type_distribution),
+             signal_min_dbm = VALUES(signal_min_dbm),
+             signal_max_dbm = VALUES(signal_max_dbm),
+             signal_avg_dbm = VALUES(signal_avg_dbm),
+             retry_count = VALUES(retry_count),
+             protected_count = VALUES(protected_count),
+             unprotected_count = VALUES(unprotected_count),
+             unique_bssid_count = VALUES(unique_bssid_count),
+             mac_rotation_indicators = VALUES(mac_rotation_indicators),
+             projection_run_id = VALUES(projection_run_id),
+             updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
   def persistTiming(value: TimingProfileProjection): ConnectionIO[Int] =
     sql"""INSERT INTO atheros_search.timing_profiles (
              profile_id, profile_key, source_mac, sensor_id, location_id,
              window_start, window_end, embedding_text, tsft_p50_us, tsft_p95_us,
-             tsft_jitter, wall_p50_ms, wall_jitter_ms, projection_run_id
+             tsft_jitter, wall_p50_ms, wall_jitter_ms, source_event_count, projection_run_id
            ) VALUES (
              ${value.profileId}, ${value.profileKey}, ${value.sourceMac}, ${value.sensorId},
              ${value.locationId}, ${value.windowStart}, ${value.windowEnd}, NULL,
              ${value.tsftP50}, ${value.tsftP95}, ${value.tsftJitter},
-             ${value.wallP50}, ${value.wallJitter}, ${value.projectionRunId}
-           ) ON DUPLICATE KEY UPDATE profile_id = profile_id""".update.run
+             ${value.wallP50}, ${value.wallJitter}, ${value.sourceEventCount}, ${value.projectionRunId}
+           ) ON DUPLICATE KEY UPDATE
+             sensor_id = VALUES(sensor_id),
+             location_id = VALUES(location_id),
+             window_start = VALUES(window_start),
+             window_end = VALUES(window_end),
+             tsft_p50_us = VALUES(tsft_p50_us),
+             tsft_p95_us = VALUES(tsft_p95_us),
+             tsft_jitter = VALUES(tsft_jitter),
+             wall_p50_ms = VALUES(wall_p50_ms),
+             wall_jitter_ms = VALUES(wall_jitter_ms),
+             source_event_count = VALUES(source_event_count),
+             projection_run_id = VALUES(projection_run_id),
+             updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
   def persistSequence(value: SequenceProjection): ConnectionIO[Int] =
     val tokenText = value.tokens.map(_.value).mkString(" ")
-    sql"""INSERT INTO atheros_search.frame_sequences (
-             session_key, source_mac, location_id, sensor_id, window_start, window_end,
-             sequence_tokens, semantic_tokens, frame_count, projection_run_id
-           ) VALUES (
-             ${value.sessionKey}, ${value.sourceMac}, ${value.locationId}, ${value.sensorId},
-             ${value.windowStart}, ${value.windowEnd}, $tokenText, $tokenText,
-             ${value.tokens.size.toLong}, ${value.projectionRunId}
-           ) ON DUPLICATE KEY UPDATE session_key = session_key""".update.run.flatMap { inserted =>
-      if inserted != 1 then 0.pure[ConnectionIO]
-      else
-        val counts = value.tokens.zip(value.tokens.drop(1)).groupMapReduce(identity)(_ => 1L)(_ + _)
-        val totals = counts.toList.groupMapReduce(_._1._1)(_._2)(_ + _)
-        counts.toList.traverse { case ((previous, next), count) =>
-          val probability = count.toDouble / totals(previous).toDouble
-          sql"""INSERT INTO atheros_search.sequence_transitions (
-                 previous_token, next_token, sequence_kind, transition_count,
-                 previous_total, vocabulary_size, probability, projection_run_id
-               ) VALUES (
-                 ${previous.value}, ${next.value}, 'frame_sequence', $count,
-                 ${totals(previous)}, ${FrameToken.values.length.toLong}, $probability,
-                 ${value.projectionRunId}
-               ) ON DUPLICATE KEY UPDATE
-                 transition_count = transition_count + VALUES(transition_count),
-                 previous_total = previous_total + VALUES(previous_total),
-                 vocabulary_size = VALUES(vocabulary_size),
-                 probability = transition_count / NULLIF(previous_total, 0),
-                 last_updated = CURRENT_TIMESTAMP(6),
-                 projection_run_id = VALUES(projection_run_id)""".update.run
-        }.map(_.sum)
-    }
+    val counts = value.tokens.zip(value.tokens.drop(1)).groupMapReduce(identity)(_ => 1L)(_ + _)
+    val totals = counts.toList.groupMapReduce(_._1._1)(_._2)(_ + _)
+    for
+      oldPrevious <- sql"""SELECT previous_token
+                            FROM atheros_search.sequence_previous_totals
+                            WHERE session_key = ${value.sessionKey}
+                              AND sequence_kind = 'frame_sequence'""".query[String].to[List]
+      sequence <- sql"""INSERT INTO atheros_search.frame_sequences (
+                          session_key, source_mac, location_id, sensor_id, window_start, window_end,
+                          sequence_tokens, semantic_tokens, frame_count, projection_run_id
+                        ) VALUES (
+                          ${value.sessionKey}, ${value.sourceMac}, ${value.locationId}, ${value.sensorId},
+                          ${value.windowStart}, ${value.windowEnd}, $tokenText, $tokenText,
+                          ${value.tokens.size.toLong}, ${value.projectionRunId}
+                        ) ON DUPLICATE KEY UPDATE
+                          source_mac = VALUES(source_mac),
+                          location_id = VALUES(location_id),
+                          sensor_id = VALUES(sensor_id),
+                          window_start = VALUES(window_start),
+                          window_end = VALUES(window_end),
+                          sequence_tokens = VALUES(sequence_tokens),
+                          semantic_tokens = VALUES(semantic_tokens),
+                          frame_count = VALUES(frame_count),
+                          projection_run_id = VALUES(projection_run_id),
+                          updated_at = CURRENT_TIMESTAMP(6)""".update.run
+      _ <- sql"""DELETE FROM atheros_search.sequence_transition_contributions
+                  WHERE session_key = ${value.sessionKey}
+                    AND sequence_kind = 'frame_sequence'""".update.run
+      _ <- sql"""DELETE FROM atheros_search.sequence_previous_totals
+                  WHERE session_key = ${value.sessionKey}
+                    AND sequence_kind = 'frame_sequence'""".update.run
+      contributions <- counts.toList.traverse { case ((previous, next), count) =>
+        sql"""INSERT INTO atheros_search.sequence_transition_contributions (
+               session_key, previous_token, next_token, sequence_kind,
+               transition_count, previous_total, projection_run_id
+             ) VALUES (
+               ${value.sessionKey}, ${previous.value}, ${next.value}, 'frame_sequence',
+               $count, ${totals(previous)}, ${value.projectionRunId}
+             )""".update.run
+      }
+      previousTotals <- totals.toList.traverse { case (previous, total) =>
+        sql"""INSERT INTO atheros_search.sequence_previous_totals (
+               session_key, previous_token, sequence_kind, previous_total, projection_run_id
+             ) VALUES (
+               ${value.sessionKey}, ${previous.value}, 'frame_sequence', $total,
+               ${value.projectionRunId}
+             )""".update.run
+      }
+      affectedPrevious = (oldPrevious ++ totals.keysIterator.map(_.value)).distinct
+      transitions <- affectedPrevious.traverse { previous =>
+        for
+          deleted <- sql"""DELETE FROM atheros_search.sequence_transitions
+                            WHERE previous_token = $previous
+                              AND sequence_kind = 'frame_sequence'""".update.run
+          inserted <- sql"""INSERT INTO atheros_search.sequence_transitions (
+                              previous_token, next_token, sequence_kind, transition_count,
+                              previous_total, vocabulary_size, probability, projection_run_id
+                            )
+                            SELECT contribution.previous_token, contribution.next_token,
+                                   contribution.sequence_kind,
+                                   SUM(contribution.transition_count), totals.previous_total,
+                                   ${FrameToken.values.length.toLong},
+                                   SUM(contribution.transition_count) / NULLIF(totals.previous_total, 0),
+                                   ${value.projectionRunId}
+                            FROM atheros_search.sequence_transition_contributions contribution
+                            JOIN (
+                              SELECT previous_token, sequence_kind, SUM(previous_total) AS previous_total
+                              FROM atheros_search.sequence_previous_totals
+                              WHERE previous_token = $previous
+                                AND sequence_kind = 'frame_sequence'
+                              GROUP BY previous_token, sequence_kind
+                            ) totals
+                              ON totals.previous_token = contribution.previous_token
+                             AND totals.sequence_kind = contribution.sequence_kind
+                            WHERE contribution.previous_token = $previous
+                              AND contribution.sequence_kind = 'frame_sequence'
+                            GROUP BY contribution.previous_token, contribution.next_token,
+                                     contribution.sequence_kind, totals.previous_total""".update.run
+        yield deleted + inserted
+      }
+    yield sequence + contributions.sum + previousTotals.sum + transitions.sum
 
   def persistBaseline(value: BaselineProjection): ConnectionIO[Int] =
     sql"""INSERT INTO atheros_search.baseline_profiles (
@@ -228,7 +322,13 @@ object IntelligenceSql:
            ) VALUES (
              ${value.baselineId}, ${value.bssid}, ${value.metric}, ${value.p5},
              ${value.p50}, ${value.p95}, ${value.sampleCount}, ${value.projectionRunId}
-           ) ON DUPLICATE KEY UPDATE baseline_id = baseline_id""".update.run
+           ) ON DUPLICATE KEY UPDATE
+             p5 = VALUES(p5),
+             p50 = VALUES(p50),
+             p95 = VALUES(p95),
+             sample_count = VALUES(sample_count),
+             projection_run_id = VALUES(projection_run_id),
+             updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
   def persistSimilarity(value: SimilarityProjection): ConnectionIO[Int] =
     val candidate = value.candidate

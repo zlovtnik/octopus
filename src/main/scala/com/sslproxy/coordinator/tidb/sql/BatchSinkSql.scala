@@ -138,6 +138,11 @@ object BatchSinkSql:
       |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
 
 object SchemaChecksSql:
+  val SchemaReadinessQuery: String =
+    """SELECT required_version, applied_version, required_checksum, applied_checksum, ready
+      |FROM schema_readiness
+      |WHERE domain = ?""".stripMargin
+
   def tableLookup(tableCount: Int): Either[String, String] =
     placeholders(tableCount).map { values =>
       s"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ($values)"

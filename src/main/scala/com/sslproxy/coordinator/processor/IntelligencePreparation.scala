@@ -61,6 +61,7 @@ final case class TimingProfileProjection(
     tsftJitter: Option[Double],
     wallP50: Option[Double],
     wallJitter: Option[Double],
+    sourceEventCount: Long,
     projectionRunId: String
 )
 
@@ -214,6 +215,7 @@ object IntelligencePreparation:
           ProjectionFunctions.medianAbsoluteDeviation(tsft),
           ProjectionFunctions.percentile(wall, 0.5d),
           ProjectionFunctions.medianAbsoluteDeviation(wall),
+          grouped.size.toLong,
           ProjectionFunctions.stableId("timing-run", Vector(key))
         )
       }

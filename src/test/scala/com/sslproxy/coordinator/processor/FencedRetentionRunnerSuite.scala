@@ -91,6 +91,20 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       assertEquals(finishes.map(_._1), List("failed"))
       assertEquals(releases, 1)
 
+  test("generic periodic work is renewed and released under its processor fence"):
+    for
+      store <- TestMaintenanceStore.create()
+      runner = new FencedWorkRunner[IO](store, "worker-1")
+      result <- runner.runOnce(ProcessorId.BehaviorProjector, 3.seconds) { lease =>
+        IO.sleep(1100.millis).as(lease.fence)
+      }
+      renewals <- store.renewals.get
+      releases <- store.releases.get
+    yield
+      assertEquals(result, Some(1L))
+      assert(renewals >= 1)
+      assertEquals(releases, 1)
+
   private final class TestMaintenanceStore(
       val finishes: Ref[IO, List[(String, RetentionCounts)]],
       val releases: Ref[IO, Int],

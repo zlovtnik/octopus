@@ -116,6 +116,13 @@ publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 - Stream cursors advance monotonically and handle numeric wireless cursors
   without lexicographic regression.
 - Outbox mutations require owner, lease token, and fence matches.
+- Every periodic workload claims and continuously renews a persisted
+  `work_leases` fence; a competing replica skips the tick, and lease loss
+  cancels the in-flight operation.
+- Behavior, timing, baseline, and sequence projections compare authoritative
+  source counts so late-arriving evidence is reprocessed. Sequence transition
+  contributions are stored per session before aggregate probabilities are
+  rebuilt, making replay idempotent.
 - Retryable database failures use bounded exponential delay; permanent failures
   fail closed or are parked according to the record contract.
 - JDBC batch sinks retain prepared statements and batched execution; SQL is
@@ -128,6 +135,7 @@ Important gates:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TIDB_ENABLED` | `false` | Enables TiDB after TLS, least-privilege, and schema validation |
+| `TIDB_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
 | `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables signed-cutover Kafka consumers |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane |
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs |
@@ -172,6 +180,11 @@ it never reverses schema or deletes ingestion evidence.
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
 | `/actuator/prometheus` | compatibility alias for metrics |
+
+Processor metrics include a one-hot lifecycle gauge per processor, the current
+persisted restart count, and supervised retry counters. Existing ingestion,
+pending-ledger, backpressure, outbox, and DLQ counters remain available on the
+same surface.
 
 When work stalls, check the signed cutover artifact, consumer lag, ingestion
 evidence, pending jobs/batches, outbox lease/fence state, retry timestamps, and

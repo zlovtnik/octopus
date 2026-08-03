@@ -15,6 +15,7 @@ import com.sslproxy.coordinator.persistence.{
   ProjectionStore
 }
 import com.sslproxy.coordinator.tidb.TidbErrorClass
+import com.sslproxy.coordinator.processor.{FencedWorkRunner, ProcessorId}
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
 
@@ -33,7 +34,8 @@ final class CronScheduler private (
     verifyCanonicalManifest: IO[Unit],
     dbSemaphore: Semaphore[IO],
     loopCounter: Ref[IO, Long],
-    lastShadowAuditMs: Ref[IO, Long]
+    lastShadowAuditMs: Ref[IO, Long],
+    workRunner: FencedWorkRunner[IO]
 ):
   import CronScheduler.log
 
@@ -46,26 +48,20 @@ final class CronScheduler private (
     }
 
   val jobPlanningStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
-      dbSemaphore.permit.use(_ => processIngest())
-    }
+    fencedPeriodicStream(ProcessorId.SyncJobPlanner, cfg.idleSleepMs.millis)(processIngest())
 
   val backlogRecoveryStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
-      dbSemaphore.permit.use(_ => recoverStaleBatches())
-    }
+    fencedPeriodicStream(ProcessorId.SyncBacklogRecovery, cfg.idleSleepMs.millis)(recoverStaleBatches())
 
   val loadDispatchStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        ingestionStore.prepareLoadDispatch(
-          ingestConfig.loadStreamNames,
-          cfg.batchMaxAttempts,
-          cfg.ingestBatchSize
-        ).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
+    fencedPeriodicStream(ProcessorId.SyncLoadDispatch, cfg.idleSleepMs.millis) {
+      ingestionStore.prepareLoadDispatch(
+        ingestConfig.loadStreamNames,
+        cfg.batchMaxAttempts,
+        cfg.ingestBatchSize
+      ).value.flatMap {
+        case Right(_) => IO.unit
+        case Left(error) => IO.raiseError(databaseFailure(error))
       }
     }
 
@@ -75,9 +71,7 @@ final class CronScheduler private (
     }
 
   val rfAlertStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](10.seconds).evalMap { _ =>
-      dbSemaphore.permit.use(_ => shadowAudit())
-    }
+    fencedPeriodicStream(ProcessorId.RfAlertProjector, 10.seconds)(shadowAudit())
 
   val wirelessFrameNormalizerStream: Stream[IO, Unit] =
     Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
@@ -90,26 +84,16 @@ final class CronScheduler private (
     }
 
   val wirelessInventoryProjectorStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](10.seconds).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        projectionStore.projectWirelessInventory(cfg.ingestBatchSize).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
-      }
+    periodicDatabaseStream(ProcessorId.WirelessInventoryProjector, 10.seconds) {
+      projectionStore.projectWirelessInventory(cfg.ingestBatchSize).value
     }
 
   def searchDocumentBuilderStream(
       batchSize: Int,
       interval: FiniteDuration
   ): Stream[IO, Unit] =
-    Stream.awakeEvery[IO](interval).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        projectionStore.buildSearchDocuments(batchSize).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
-      }
+    periodicDatabaseStream(ProcessorId.EmbeddingTextBuilder, interval) {
+      projectionStore.buildSearchDocuments(batchSize).value
     }
 
   def embeddingJobPreparerStream(
@@ -117,52 +101,37 @@ final class CronScheduler private (
       interval: FiniteDuration,
       embeddingModel: String
   ): Stream[IO, Unit] =
-    Stream.awakeEvery[IO](interval).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        projectionStore.prepareEmbeddingJobs(batchSize, embeddingModel).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
-      }
+    periodicDatabaseStream(ProcessorId.EmbeddingPreparer, interval) {
+      projectionStore.prepareEmbeddingJobs(batchSize, embeddingModel).value
     }
 
   def staleWorkerCleanupStream(
       batchSize: Int,
       interval: FiniteDuration
   ): Stream[IO, Unit] =
-    Stream.awakeEvery[IO](interval).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        maintenanceStore.cleanupStaleWorkers(batchSize).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
-      }
+    periodicDatabaseStream(ProcessorId.StaleWorkerCleanup, interval) {
+      maintenanceStore.cleanupStaleWorkers(batchSize).value
     }
 
   def scheduledReconciliationStream(
       batchSize: Int,
       interval: FiniteDuration
   ): Stream[IO, Unit] =
-    Stream.awakeEvery[IO](interval).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
-        maintenanceStore.reconcileWirelessProjections(batchSize).value.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
-      }
+    periodicDatabaseStream(ProcessorId.ScheduledReconciliation, interval) {
+      maintenanceStore.reconcileWirelessProjections(batchSize).value
     }
 
   def behaviorProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectBehavior(batchSize).value)
+    projectionStream(ProcessorId.BehaviorProjector, interval, projectionStore.projectBehavior(batchSize).value)
 
   def timingProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectTiming(batchSize).value)
+    projectionStream(ProcessorId.TimingProjector, interval, projectionStore.projectTiming(batchSize).value)
 
   def baselineProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectBaselines(batchSize).value)
+    projectionStream(ProcessorId.BaselineProjector, interval, projectionStore.projectBaselines(batchSize).value)
 
   def sequenceProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectSequences(batchSize).value)
+    projectionStream(ProcessorId.SequenceProjector, interval, projectionStore.projectSequences(batchSize).value)
 
   def similarityProjectorStream(
       batchSize: Int,
@@ -172,6 +141,7 @@ final class CronScheduler private (
       sequenceDistanceThreshold: Double
   ): Stream[IO, Unit] =
     projectionStream(
+      ProcessorId.SimilarityProjector,
       interval,
       projectionStore.projectSimilarities(
         batchSize,
@@ -187,32 +157,53 @@ final class CronScheduler private (
       minimumSimilarity: Double
   ): Stream[IO, Unit] =
     projectionStream(
+      ProcessorId.ClusteringProjector,
       interval,
       projectionStore.projectClusterCandidates(batchSize, minimumSimilarity).value
     )
 
   def identityProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectApprovedIdentities(batchSize).value)
+    projectionStream(ProcessorId.WirelessIdentityProjector, interval, projectionStore.projectApprovedIdentities(batchSize).value)
 
   def graphProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectInfrastructureGraph(batchSize).value)
+    projectionStream(ProcessorId.GraphProjector, interval, projectionStore.projectInfrastructureGraph(batchSize).value)
 
   def dnsAlertProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectDnsThreats(batchSize).value)
+    projectionStream(ProcessorId.DnsAlertProjector, interval, projectionStore.projectDnsThreats(batchSize).value)
 
   def riskProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(interval, projectionStore.projectRisk(batchSize).value)
+    projectionStream(ProcessorId.RiskProjector, interval, projectionStore.projectRisk(batchSize).value)
 
   private def projectionStream(
+      processorId: ProcessorId,
       interval: FiniteDuration,
       operation: => IO[Either[com.sslproxy.coordinator.domain.DatabaseError, Int]]
   ): Stream[IO, Unit] =
+    periodicDatabaseStream(processorId, interval)(operation)
+
+  private def periodicDatabaseStream(
+      processorId: ProcessorId,
+      interval: FiniteDuration
+  )(
+      operation: => IO[Either[com.sslproxy.coordinator.domain.DatabaseError, Int]]
+  ): Stream[IO, Unit] =
+    fencedPeriodicStream(processorId, interval) {
+      operation.flatMap {
+        case Right(_) => IO.unit
+        case Left(error) => IO.raiseError(databaseFailure(error))
+      }
+    }
+
+  private def fencedPeriodicStream(
+      processorId: ProcessorId,
+      interval: FiniteDuration
+  )(
+      operation: => IO[Unit]
+  ): Stream[IO, Unit] =
     Stream.awakeEvery[IO](interval).evalMap { _ =>
       dbSemaphore.permit.use { _ =>
-        operation.flatMap {
-          case Right(_) => IO.unit
-          case Left(error) => IO.raiseError(databaseFailure(error))
-        }
+        val leaseTtl = (interval * 2L).max(30.seconds)
+        workRunner.runOnce(processorId, leaseTtl)(_ => operation).void
       }
     }
 
@@ -354,6 +345,7 @@ object CronScheduler:
     for
       loopCounter <- Ref.of[IO, Long](0L)
       lastShadowAuditMs <- Ref.of[IO, Long](0L)
+      ownerId <- IO(java.util.UUID.randomUUID().toString)
     yield new CronScheduler(
       cfg,
       ingestConfig,
@@ -367,7 +359,8 @@ object CronScheduler:
       verifyCanonicalManifest,
       dbSemaphore,
       loopCounter,
-      lastShadowAuditMs
+      lastShadowAuditMs,
+      new FencedWorkRunner(maintenanceStore, ownerId)
     )
 
   private[cron] def drainBatch(

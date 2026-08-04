@@ -22,6 +22,5 @@ final case class WirelessConfig(
     probeFlushTopic: String,
     probeFlushConsumer: String,
     consumersCount: Int,
-    maxPollRecords: Int,
-    dlqSuffix: String
+    maxPollRecords: Int
 ) derives ConfigReader

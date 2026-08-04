@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
-import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
 import com.sslproxy.coordinator.persistence.OutboxStore
 import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord}
@@ -21,13 +20,11 @@ final class BatchDispatchService(
     destinationTopics: List[String],
     leaseSeconds: Int,
     retryBaseSeconds: Int,
-    retryMaxSeconds: Int,
-    dbSemaphore: Semaphore[IO]
+    retryMaxSeconds: Int
 ):
   import BatchDispatchService.{DispatchResult, log}
 
-  def dispatchNext(): IO[DispatchResult] =
-    dbSemaphore.permit.use(_ => store.claim(ownerId, destinationTopics, leaseSeconds).value).flatMap {
+  def dispatchNext(): IO[DispatchResult] = store.claim(ownerId, destinationTopics, leaseSeconds).value.flatMap {
       case Left(error) =>
         IO(log.error("outbox_claim", "status" -> "db_error",
           "operation" -> error.operation, "error" -> error.message))
@@ -57,8 +54,7 @@ final class BatchDispatchService(
       case Left(error) => fail(record, error)
     }
 
-  private def acknowledge(record: OutboxRecord): IO[DispatchResult] =
-    dbSemaphore.permit.use(_ => store.acknowledge(record).value).flatMap {
+  private def acknowledge(record: OutboxRecord): IO[DispatchResult] = store.acknowledge(record).value.flatMap {
       case Right(true) =>
         IO(metrics.recordBatchDispatched()) *>
           IO(log.info("outbox_publish", "status" -> "published",
@@ -77,9 +73,7 @@ final class BatchDispatchService(
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
-    dbSemaphore.permit.use { _ =>
-      store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value
-    }.flatMap {
+      store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value.flatMap {
       case Right(disposition) =>
         val status = disposition match
           case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"

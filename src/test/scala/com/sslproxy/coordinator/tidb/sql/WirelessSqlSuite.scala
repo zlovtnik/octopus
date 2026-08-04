@@ -13,3 +13,23 @@ class WirelessSqlSuite extends FunSuite:
     assert(pruneSql.contains("updated_at < ?"), pruneSql)
     assert(pruneSql.contains("LIMIT ?"), pruneSql)
   }
+
+  test("indexed identity comparisons normalize parameters without wrapping columns"):
+    val lookup = WirelessSql.lookupDevice("AA:BB:CC:DD:EE:FF").update.sql
+    val probe = WirelessSql
+      .upsertClientProbe(
+        "network",
+        "aa:bb:cc:dd:ee:ff",
+        Some("11:22:33:44:55:66"),
+        None,
+        None,
+        1L,
+        None,
+        "batch"
+      )
+      .update
+      .sql
+
+    assert(lookup.contains("WHERE mac_id = ?"), lookup)
+    assert(!lookup.contains("LOWER(mac_id)"), lookup)
+    assert(!probe.contains("LOWER(authorized.bssid)"), probe)

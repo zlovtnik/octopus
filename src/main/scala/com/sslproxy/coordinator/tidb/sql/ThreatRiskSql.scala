@@ -56,6 +56,7 @@ object ThreatRiskSql:
                     MAX(CASE WHEN alert.alert_type IN ('signal_anomaly', 'rogue_cluster') THEN 1 ELSE 0 END) AS signal_score,
                     MAX(CASE WHEN alert.alert_type = 'rogue_cluster' THEN 1 ELSE 0 END) AS typosquat_score
              FROM wireless_alerts alert
+             JOIN bssids ON bssids.bssid = COALESCE(alert.primary_mac, alert.secondary_mac)
              WHERE alert.detected_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
              GROUP BY COALESCE(alert.primary_mac, alert.secondary_mac)
            ),
@@ -63,6 +64,7 @@ object ThreatRiskSql:
              SELECT frame.bssid,
                     GREATEST(COUNT(DISTINCT peer.bssid_oui) - 1, 0) AS vendor_score
              FROM wireless_frames frame
+             JOIN bssids ON bssids.bssid = frame.bssid
              JOIN wireless_frames peer ON peer.ssid = frame.ssid
              WHERE frame.bssid IS NOT NULL AND frame.ssid IS NOT NULL
              GROUP BY frame.bssid
@@ -72,6 +74,7 @@ object ThreatRiskSql:
              FROM atheros_search.similarity_pairs pair
              JOIN atheros_search.search_documents document
                ON document.document_id IN (pair.left_document_id, pair.right_document_id)
+             JOIN bssids ON bssids.bssid = document.bssid
              WHERE pair.computed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
                AND pair.cosine_distance > 0.15
                AND document.bssid IS NOT NULL

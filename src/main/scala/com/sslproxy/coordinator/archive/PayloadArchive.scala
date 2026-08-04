@@ -35,7 +35,13 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
   def archive(candidate: ArchiveCandidate): F[ArchiveReceipt] =
     val bytes = candidate.payload.getBytes(StandardCharsets.UTF_8)
     val actualSha256 = Sha256Utils.sha256Hex(bytes)
-    if actualSha256 != candidate.payloadSha256 then
+    if !MinioPayloadArchive.isLowercaseSha256(candidate.dedupeKey) then
+      Async[F].raiseError(
+        IllegalArgumentException(
+          "archive dedupe key must be a lowercase SHA-256 value"
+        )
+      )
+    else if actualSha256 != candidate.payloadSha256 then
       Async[F].raiseError(IllegalArgumentException(
         s"archive payload hash mismatch for ${candidate.streamName}/${candidate.dedupeKey}"
       ))
@@ -66,6 +72,9 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
       expectedSha256: String
   ): F[Boolean] =
     value.flatMap {
+      case Some(stored)
+          if stored.payloadSha256.isEmpty =>
+        Async[F].pure(false)
       case Some(stored)
           if stored.size == expectedSize && stored.payloadSha256.contains(expectedSha256) =>
         Async[F].pure(true)
@@ -112,6 +121,7 @@ private final class MinioObjectStore(
     }
 
 object MinioPayloadArchive:
+  private val LowercaseSha256 = "^[0-9a-f]{64}$".r
   def resource(config: ArchiveConfig): Resource[IO, PayloadArchive[IO]] =
     Resource.make(IO.blocking {
       MinioClient.builder()
@@ -124,5 +134,9 @@ object MinioPayloadArchive:
     }
 
   private[archive] def objectKey(candidate: ArchiveCandidate): String =
+    require(isLowercaseSha256(candidate.dedupeKey), "archive dedupe key must be a lowercase SHA-256 value")
     val date = candidate.observedAt.toInstant.atZone(ZoneOffset.UTC).toLocalDate
     f"wireless/${date.getYear}%04d/${date.getMonthValue}%02d/${date.getDayOfMonth}%02d/${candidate.dedupeKey}.json"
+
+  private[archive] def isLowercaseSha256(value: String): Boolean =
+    LowercaseSha256.matches(Option(value).getOrElse(""))

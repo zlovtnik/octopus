@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.ingest
 
 import cats.effect.IO
-import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
@@ -27,8 +26,7 @@ object PayloadAuditConsumer:
       cfg: KafkaCfg,
       store: IngestionStore[IO],
       metrics: CoordinatorMetrics,
-      dlqProducer: KafkaProducer[IO, String, String],
-      dbSemaphore: Semaphore[IO]
+      dlqProducer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
@@ -53,7 +51,7 @@ object PayloadAuditConsumer:
         Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
           consumer.stream
             .map(committable => (translateRecord(committable.record), committable.offset))
-            .through(batchWrite(store, dlqProducer, cfg, metrics, dbSemaphore))
+            .through(batchWrite(store, dlqProducer, cfg, metrics))
             .through(commitBatch)
       }
 
@@ -99,8 +97,7 @@ object PayloadAuditConsumer:
       store: IngestionStore[IO],
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
-      metrics: CoordinatorMetrics,
-      dbSemaphore: Semaphore[IO]
+      metrics: CoordinatorMetrics
   ): fs2.Pipe[IO, (Either[PayloadAuditError, ResolvedScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
     _.groupWithin(cfg.maxPollRecords, 1.second)
       .evalTap { chunk =>
@@ -111,8 +108,7 @@ object PayloadAuditConsumer:
           publishDlq(dlqProducer, cfg, err)
         }
 
-        val writeAction = if validRecords.nonEmpty then
-          dbSemaphore.permit.use(_ => store.recordScanRequests(validRecords).value).flatMap {
+        val writeAction = if validRecords.nonEmpty then store.recordScanRequests(validRecords).value.flatMap {
             case Right(count) =>
               IO(metrics.recordPayloadAuditIngested(count)) *>
                 IO(metrics.recordSyncEventHydrated(count.toLong))

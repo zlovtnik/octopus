@@ -46,6 +46,8 @@ object IdentityGraphSql:
              updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
   def persistCluster(value: IdentityClusterProjection): ConnectionIO[Int] =
+    if value.members.isEmpty then 0.pure[ConnectionIO]
+    else {
     val memberClause = value.members.map(member => fr0"$member").intercalate(fr",")
     val firstSeen = (fr"""SELECT MIN(first_seen), MAX(last_seen)
                             FROM devices
@@ -108,6 +110,7 @@ object IdentityGraphSql:
                  updated_at = CURRENT_TIMESTAMP(6)""".update.run
         }
       yield cluster + members.sum + inventory.sum
+    }
     }
 
   def projectGraph(limit: Int, projectionRunId: String): ConnectionIO[Int] =

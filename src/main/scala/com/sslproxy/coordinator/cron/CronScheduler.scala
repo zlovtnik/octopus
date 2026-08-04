@@ -2,7 +2,6 @@ package com.sslproxy.coordinator.cron
 
 import cats.effect.IO
 import cats.effect.kernel.Ref
-import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
@@ -32,7 +31,6 @@ final class CronScheduler private (
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,
     verifyCanonicalManifest: IO[Unit],
-    dbSemaphore: Semaphore[IO],
     loopCounter: Ref[IO, Long],
     lastShadowAuditMs: Ref[IO, Long],
     workRunner: FencedWorkRunner[IO]
@@ -74,12 +72,10 @@ final class CronScheduler private (
     fencedPeriodicStream(ProcessorId.RfAlertProjector, 10.seconds)(shadowAudit())
 
   val wirelessFrameNormalizerStream: Stream[IO, Unit] =
-    Stream.awakeEvery[IO](cfg.idleSleepMs.millis).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
+    fencedPeriodicStream(ProcessorId.WirelessFrameNormalizer,cfg.idleSleepMs.millis) {
         projectionStore.normalizeWirelessFrames(cfg.ingestBatchSize).value.flatMap {
           case Right(_) => IO.unit
           case Left(error) => IO.raiseError(databaseFailure(error))
-        }
       }
     }
 
@@ -201,19 +197,15 @@ final class CronScheduler private (
       operation: => IO[Unit]
   ): Stream[IO, Unit] =
     Stream.awakeEvery[IO](interval).evalMap { _ =>
-      dbSemaphore.permit.use { _ =>
         val leaseTtl = (interval * 2L).max(30.seconds)
         workRunner.runOnce(processorId, leaseTtl)(_ => operation).void
-      }
     }
 
   val supportStream: Stream[IO, Unit] =
     val backpressureStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
-        dbSemaphore.permit.use { _ =>
-          backpressureService.checkAndAct.void
-        }.handleErrorWith { err =>
+          backpressureService.checkAndAct.void.handleErrorWith { err =>
           IO(log.error("cron_backpressure", err, "status" -> "failed"))
         }
       }
@@ -238,9 +230,15 @@ final class CronScheduler private (
       .merge(resilient(rfAlertStream, "cron_shadow_audit"))
 
   private def resilient(stream: Stream[IO, Unit], event: String): Stream[IO, Unit] =
-    stream.handleErrorWith { error =>
-      Stream.eval(IO(log.error(event, error, "status" -> "failed"))) ++ resilient(stream, event)
+    Stream
+      .unfoldEval(()) { state =>
+    stream.compile.drain.attempt.flatMap {
+          case Right(_) => IO.pure(None)
+          case Left( error) =>IO(log.error(event, error, "status" -> "failed"))
+              .as(Some(((), state)))
     }
+      }
+      .drain
 
   private def processIngest(): IO[Unit] =
     val budget = backpressureService.budget
@@ -339,8 +337,7 @@ object CronScheduler:
       backpressureService: BackpressureService,
       batchDispatchService: BatchDispatchService,
       metrics: CoordinatorMetrics,
-      verifyCanonicalManifest: IO[Unit],
-      dbSemaphore: Semaphore[IO]
+      verifyCanonicalManifest: IO[Unit]
   ): IO[CronScheduler] =
     for
       loopCounter <- Ref.of[IO, Long](0L)
@@ -357,7 +354,6 @@ object CronScheduler:
       batchDispatchService,
       metrics,
       verifyCanonicalManifest,
-      dbSemaphore,
       loopCounter,
       lastShadowAuditMs,
       new FencedWorkRunner(maintenanceStore, ownerId)

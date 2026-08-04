@@ -11,10 +11,11 @@ import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
 
 class LiveHydrationProbeSuite extends CatsEffectSuite:
+  private val ScratchDatabasePrefix = "octopus_live_hydration_"
   test("reproduce production hydration candidates in an isolated scratch database"):
     if !sys.env.get("OCTOPUS_LIVE_HYDRATION_PROBE").contains("true") then
       IO(assume(false, "set OCTOPUS_LIVE_HYDRATION_PROBE=true to enable the live probe"))
-    else resources.use { case (dataSource, executor, sourceDatabase, scratchDatabase) =>
+    else resources.use { case (dataSource, executor, sourceDatabase, scratchDatabase, cleanupAuthorized) =>
       val xa = Transactor.fromDataSource[IO](
         dataSource,
         ExecutionContext.fromExecutorService(executor)
@@ -22,7 +23,8 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       val repository = new TidbRepository(xa)
 
       for
-        seeds <- IO.blocking(seedScratchTables(dataSource, sourceDatabase, scratchDatabase))
+        seeds <- IO.blocking(seedScratchTables(dataSource, sourceDatabase, scratchDatabase,
+              cleanupAuthorized))
         results <- seeds.traverse { case (candidate, payload) =>
           repository.hydrateExistingSyncEvent(candidate, payload)
         }
@@ -40,6 +42,10 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
         "OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE must be a safe identifier"
       )
       require(
+        scratchDatabase.startsWith(ScratchDatabasePrefix),
+        s"OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE must start with $ScratchDatabasePrefix"
+      )
+      require(
         scratchDatabase != database,
         "OCTOPUS_LIVE_TIDB_SCRATCH_DATABASE must differ from OCTOPUS_LIVE_TIDB_DATABASE"
       )
@@ -51,10 +57,11 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       config.setMaximumPoolSize(1)
       config.setMinimumIdle(1)
       config.setCatalog(scratchDatabase)
-      (new HikariDataSource(config), Executors.newSingleThreadExecutor(), database, scratchDatabase)
-    }) { case (dataSource, executor, _, scratchDatabase) =>
+      (new HikariDataSource(config), Executors.newSingleThreadExecutor(), database, scratchDatabase,
+        new java.util.concurrent.atomic.AtomicBoolean(false))
+    }) { case (dataSource, executor, _, scratchDatabase, cleanupAuthorized) =>
       IO.blocking {
-        try dropScratchTables(dataSource, scratchDatabase)
+        try if cleanupAuthorized.get() then dropScratchTables(dataSource, scratchDatabase)
         finally
           dataSource.close()
           executor.shutdown()
@@ -64,7 +71,8 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
   private def seedScratchTables(
       dataSource: HikariDataSource,
       sourceDatabase: String,
-      scratchDatabase: String
+      scratchDatabase: String,
+    cleanupAuthorized: java.util.concurrent.atomic.AtomicBoolean
   ): List[(SyncEventHydrationCandidate, String)] =
     val connection = dataSource.getConnection
     try
@@ -74,12 +82,13 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       val sourceTombstones = s"`$sourceDatabase`.`sync_event_tombstones`"
       val scratchTombstones = s"`$scratchDatabase`.`sync_event_tombstones`"
 
+      requireScratchTablesAbsent(connection, scratchDatabase)
+
       val setup = connection.createStatement()
-      setup.execute(s"DROP TABLE IF EXISTS $scratchTombstones")
-      setup.execute(s"DROP TABLE IF EXISTS $scratchTable")
       setup.execute(s"CREATE TABLE $scratchTable LIKE $sourceTable")
       setup.execute(s"CREATE TABLE $scratchTombstones LIKE $sourceTombstones")
       setup.close()
+      cleanupAuthorized.set(true)
 
       val copy = connection.prepareStatement(
         s"""INSERT INTO $scratchTable
@@ -138,6 +147,10 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       dataSource: HikariDataSource,
       scratchDatabase: String
   ): Unit =
+    require(
+      scratchDatabase.startsWith(ScratchDatabasePrefix),
+      s"refusing to clean a scratch database outside $ScratchDatabasePrefix"
+    )
     val connection = dataSource.getConnection
     try
       val statement = connection.createStatement()
@@ -146,6 +159,28 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
         statement.execute(s"DROP TABLE IF EXISTS `$scratchDatabase`.`sync_events`"): Unit
       finally statement.close()
     finally connection.close()
+
+  private def requireScratchTablesAbsent(
+    connection: java.sql.Connection,
+    scratchDatabase: String
+  ): Unit =
+    val statement = connection.prepareStatement(
+      """SELECT TABLE_NAME
+        |FROM INFORMATION_SCHEMA.TABLES
+        |WHERE TABLE_SCHEMA = ?
+        |  AND TABLE_NAME IN ('sync_events', 'sync_event_tombstones')""".stripMargin
+    )
+    try
+      statement.setString(1, scratchDatabase)
+      val result = statement.executeQuery()
+      val existing = List.newBuilder[String]
+      while result.next() do existing += result.getString(1)
+      result.close()
+      require(
+        existing.result().isEmpty,
+        "scratch database contains pre-existing probe tables; refusing destructive setup"
+      )
+    finally statement.close()
 
   private def requiredEnv(name: String): String =
     sys.env.get(name).filter(_.nonEmpty).getOrElse(

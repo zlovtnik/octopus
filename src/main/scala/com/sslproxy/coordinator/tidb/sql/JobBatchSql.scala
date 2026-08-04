@@ -124,5 +124,14 @@ object JobBatchSql:
              LIMIT $batchLimit
              ON DUPLICATE KEY UPDATE
                payload = VALUES(payload),
+               attempt_count = IF(status IN ('published', 'failed', 'cancelled'), 0, attempt_count),
+               max_attempts = VALUES(max_attempts),
+               next_attempt_at = IF(status IN ('published', 'failed', 'cancelled'), CURRENT_TIMESTAMP(6), next_attempt_at),
+               owner_id = IF(status IN ('published', 'failed', 'cancelled'), NULL, owner_id),
+               lease_token = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_token),
+               lease_expires_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_expires_at),
+               published_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, published_at),
+               last_error = IF(status IN ('published', 'failed', 'cancelled'), NULL, last_error),
+               status = IF(status IN ('published', 'failed', 'cancelled'), 'pending', status),
                updated_at = CURRENT_TIMESTAMP(6)""").update
     }

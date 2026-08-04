@@ -42,9 +42,7 @@ final class SyncEventHydrationService(
       after: Option[SyncEventHydrationCandidate],
       stats: Stats
   ): IO[Unit] =
-    dbSemaphore.permit.use { _ =>
-      store.findHydrationCandidates(after, pageSize).value
-    }.flatMap {
+      store.findHydrationCandidates(after, pageSize).value.flatMap {
       case Left(error) =>
         IO.raiseError(new RuntimeException(
           s"${error.operation}: ${error.message}",
@@ -101,9 +99,8 @@ final class SyncEventHydrationService(
 
     (for
       payload <- payloadIO
-      result <- dbSemaphore.permit.use { _ =>
+      result <-
         store.hydrateExistingEvent(candidate, payload).value
-      }
       hydrated <- result.fold(
         error => IO.raiseError[Boolean](new RuntimeException(
           s"${error.operation}: ${error.message}",

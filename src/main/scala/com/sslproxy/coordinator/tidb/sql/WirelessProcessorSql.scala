@@ -155,14 +155,20 @@ object WirelessProcessorSql:
                     frame.source_mac,
                     MIN(frame.observed_at), MAX(frame.observed_at), 1, CURRENT_TIMESTAMP(6)
              FROM wireless_frames frame
+             JOIN (
+               SELECT candidate.dedupe_key
+               FROM wireless_frames candidate
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM wireless_inventory_projection_inputs applied
+                 WHERE applied.dedupe_key = candidate.dedupe_key
+               )
+               ORDER BY candidate.created_at, candidate.dedupe_key
+               LIMIT $batchLimit
+             ) candidate ON candidate.dedupe_key = frame.dedupe_key
              LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
              LEFT JOIN wireless_frame_app_signals app_row ON app_row.dedupe_key = frame.dedupe_key
-             LEFT JOIN devices existing_device ON existing_device.mac_id = frame.source_mac
              WHERE frame.source_mac IS NOT NULL
-               AND (existing_device.mac_id IS NULL OR frame.observed_at > existing_device.last_seen)
              GROUP BY frame.source_mac
-             ORDER BY MAX(frame.observed_at) DESC
-             LIMIT $batchLimit
              ON DUPLICATE KEY UPDATE
                entity_version = devices.entity_version + 1,
                display_name = COALESCE(VALUES(display_name), devices.display_name),
@@ -181,15 +187,19 @@ object WirelessProcessorSql:
              SELECT frame.ssid, frame.source_mac, MAX(frame.bssid),
                     MIN(frame.observed_at), MAX(frame.observed_at), COUNT(*),
                     MAX(frame.location_id), CURRENT_TIMESTAMP(6)
-             FROM wireless_frames frame
-             LEFT JOIN wireless_clients existing_client
-               ON existing_client.ssid = frame.ssid
-              AND existing_client.client_mac = frame.source_mac
+             FROM wireless_frames frame JOIN (
+               SELECT candidate.dedupe_key
+               FROM wireless_frames candidate
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM wireless_inventory_projection_inputs applied
+                 WHERE applied.dedupe_key = candidate.dedupe_key
+               )
+               ORDER BY candidate.created_at, candidate.dedupe_key
+               LIMIT $batchLimit
+             ) candidate
+               ON candidate.dedupe_key = frame.dedupe_key
              WHERE frame.source_mac IS NOT NULL AND frame.ssid IS NOT NULL
-               AND (existing_client.client_mac IS NULL OR frame.observed_at > existing_client.last_seen)
              GROUP BY frame.ssid, frame.source_mac
-             ORDER BY MAX(frame.observed_at) DESC
-             LIMIT $batchLimit
              ON DUPLICATE KEY UPDATE
                known_bssid = COALESCE(VALUES(known_bssid), wireless_clients.known_bssid),
                first_seen = LEAST(wireless_clients.first_seen, VALUES(first_seen)),
@@ -198,4 +208,20 @@ object WirelessProcessorSql:
                location_id = COALESCE(VALUES(location_id), wireless_clients.location_id),
                updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
-    (devices, clients).mapN(_ + _)
+    val markInputs =
+      sql"""INSERT INTO wireless_inventory_projection_inputs (dedupe_key, projected_at)
+             SELECT candidate.dedupe_key, CURRENT_TIMESTAMP(6)
+             FROM wireless_frames candidate
+             WHERE NOT EXISTS (
+               SELECT 1 FROM wireless_inventory_projection_inputs applied
+               WHERE applied.dedupe_key = candidate.dedupe_key
+             )
+             ORDER BY candidate.created_at, candidate.dedupe_key
+             LIMIT $batchLimit
+             ON DUPLICATE KEY UPDATE dedupe_key = VALUES(dedupe_key)""".update.run
+
+    for
+      deviceCount <- devices
+      clientCount <- clients
+      _ <- markInputs
+    yield deviceCount + clientCount

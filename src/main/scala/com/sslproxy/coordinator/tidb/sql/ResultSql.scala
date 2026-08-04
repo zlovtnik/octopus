@@ -29,7 +29,18 @@ object ResultSql:
              $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.result',
              'sync.oracle.result', $messageKey, ${result.asJson.noSpaces}, 'pending',
              0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-           ) ON DUPLICATE KEY UPDATE outbox_id = outbox_events.outbox_id""".update.run.void
+           ) ON DUPLICATE KEY UPDATE
+             payload = VALUES(payload),
+             attempt_count = IF(status IN ('published', 'failed', 'cancelled'), 0, attempt_count),
+             max_attempts = VALUES(max_attempts),
+             next_attempt_at = IF(status IN ('published', 'failed', 'cancelled'), CURRENT_TIMESTAMP(6), next_attempt_at),
+             owner_id = IF(status IN ('published', 'failed', 'cancelled'), NULL, owner_id),
+             lease_token = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_token),
+             lease_expires_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_expires_at),
+             published_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, published_at),
+             last_error = IF(status IN ('published', 'failed', 'cancelled'), NULL, last_error),
+             status = IF(status IN ('published', 'failed', 'cancelled'), 'pending', status),
+             updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
 
   def batchForUpdate(batchId: String): Query0[BatchState] =
     sql"""SELECT b.job_id, b.stream_name, b.payload_ref,
@@ -55,8 +66,9 @@ object ResultSql:
                              updated_at = CURRENT_TIMESTAMP(6)
                          WHERE batch_id = ${result.batchId}
                            AND job_id = ${result.jobId}
-                           AND status IN ('pending', 'dispatched', 'running', 'completed')""".update.run
-      _ <- if updated == 1 then
+                           AND status IN ('pending', 'dispatched', 'running')""".update.run
+      _ <- requireSingleTransition("complete", result.batchId, updated)
+      _ <-
         sql"""UPDATE sync_jobs
                SET status = 'completed',
                    finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
@@ -65,9 +77,8 @@ object ResultSql:
                    SELECT 1 FROM sync_batches
                    WHERE job_id = ${result.jobId}
                      AND status <> 'completed'
-                 )""".update.run.void *>
-          IngestionSql.advanceCursor(streamName, cursorEnd).run.void
-      else ().pure[ConnectionIO]
+                 )""".update.run.void
+      _ <- IngestionSql.advanceCursor(streamName, cursorEnd)
     yield ()
 
   def scheduleRetry(result: TidbResult, batch: BatchState): ConnectionIO[Unit] =
@@ -77,19 +88,38 @@ object ResultSql:
                updated_at = CURRENT_TIMESTAMP(6)
            WHERE batch_id = ${result.batchId}
              AND job_id = ${batch.jobId}
-             AND status IN ('dispatched', 'running', 'pending')""".update.run.void
+             AND status IN ('pending', 'dispatched', 'running')""".update.run.flatMap { updated =>
+      requireSingleTransition("schedule retry", result.batchId, updated)
+    }
 
   def completeFailed(result: TidbResult, batch: BatchState): ConnectionIO[Unit] =
-    sql"""UPDATE sync_batches
+    for
+      updated <- sql"""UPDATE sync_batches
            SET status = 'failed',
                last_error = ${result.errorText},
                updated_at = CURRENT_TIMESTAMP(6)
            WHERE batch_id = ${result.batchId}
-             AND job_id = ${batch.jobId}""".update.run.void *>
-      sql"""UPDATE sync_jobs
+             AND job_id = ${batch.jobId}
+             AND status IN ('pending', 'dispatched', 'running')""".update.run
+      _ <- requireSingleTransition("fail", result.batchId, updated)
+      _ <- sql"""UPDATE sync_jobs
              SET status = 'failed',
                  finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP(6))
              WHERE job_id = ${batch.jobId}
-               AND status <> 'completed'""".update.run.void *>
-      sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
+               AND status <> 'completed'""".update.run.void
+      _ <- sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
              VALUES (${batch.jobId}, ${result.batchId}, ${result.errorClass}, ${result.errorText})""".update.run.void
+    yield ()
+
+  private def requireSingleTransition(
+    transition: String,
+    batchId: String,
+    affectedRows: Int
+  ): ConnectionIO[Unit] =
+    if affectedRows == 1 then ().pure[ConnectionIO]
+    else
+      doobie.free.connection.raiseError(
+        IllegalStateException(
+          s"cannot $transition batch $batchId from its current state; affected rows: $affectedRows"
+        )
+      )

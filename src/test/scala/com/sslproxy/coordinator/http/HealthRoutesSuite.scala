@@ -10,3 +10,8 @@ class HealthRoutesSuite extends CatsEffectSuite:
     HealthRoutes.withTimeout(IO.never, 5.millis).map { healthy =>
       assertEquals(healthy, false)
     }
+
+  test("raised database health checks are reported as unhealthy"):
+    HealthRoutes.withTimeout(IO.raiseError(RuntimeException("database unavailable")), 5.millis).map { healthy =>
+      assertEquals(healthy, false)
+    }

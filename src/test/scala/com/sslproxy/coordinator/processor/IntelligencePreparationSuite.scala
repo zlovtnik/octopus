@@ -83,7 +83,8 @@ class IntelligencePreparationSuite extends FunSuite:
   test("approved identity edges produce deterministic transitive clusters"):
     val edges = Vector(
       ("bb:bb:bb:bb:bb:bb", "cc:cc:cc:cc:cc:cc", 0.91d),
-      ("aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb", 0.95d)
+      ("aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb", 0.95d),
+      ("bb:bb:bb:bb:bb:bb", "aa:aa:aa:aa:aa:aa", 0.40d)
     )
     val cluster = IntelligencePreparation.identityClusters(edges).headOption
       .getOrElse(fail("expected cluster"))
@@ -109,7 +110,7 @@ class IntelligencePreparationSuite extends FunSuite:
     assertEquals(projection.score, 800.0d)
     assertEquals(projection.severity, "high")
 
-  test("AP risk decomposition preserves legacy weights"):
+  test("AP risk decomposition rejects non-finite values and clamps scores"):
     val projection = IntelligencePreparation.apRisk(
       "11:22:33:44:55:66",
       deauthScore = 4.0d,
@@ -118,10 +119,23 @@ class IntelligencePreparationSuite extends FunSuite:
       vendorMismatchScore = 1.0d,
       embeddingOutlierScore = 0.5d
     )
-    assertEqualsDouble(projection.signalRisk, 1.6d, 0.0000001d)
-    assertEqualsDouble(projection.identityRisk, 0.55d, 0.0000001d)
+      .toOption
+      .getOrElse(fail("expected bounded AP risk"))
+    assertEqualsDouble(projection.signalRisk, 0.45d, 0.0000001d)
+    assertEqualsDouble(projection.identityRisk, 0.35d, 0.0000001d)
     assertEqualsDouble(projection.behaviorRisk, 0.1d, 0.0000001d)
-    assertEqualsDouble(projection.composite, 2.25d, 0.0000001d)
+    assertEqualsDouble(projection.composite, 0.9d, 0.0000001d)
+    assert(
+      IntelligencePreparation
+        .apRisk(
+          "11:22:33:44:55:66",
+          Double.NaN,
+          0.0d,
+          0.0d,
+          0.0d,
+          0.0d
+        )
+        .isLeft)
 
   private def frame(
       observedAt: String,

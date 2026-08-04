@@ -1,8 +1,10 @@
 package com.sslproxy.coordinator.tidb.sql
 
+import cats.syntax.all.*
+
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDisposition, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.tidb.SyncEventHydrationCandidate
-import doobie.{Fragment, Query0, Update0}
+import doobie.{ConnectionIO,Fragment, Query0, Update0}
 import doobie.implicits.*
 
 object IngestionSql:
@@ -183,23 +185,35 @@ object IngestionSql:
              next_offset = GREATEST(consumer_offsets.next_offset, VALUES(next_offset)),
              updated_at = CURRENT_TIMESTAMP(6)""".update
 
-  def advanceCursor(streamName: String, cursorEnd: String): Update0 =
-    sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
+  def advanceCursor(streamName: String, cursorEnd: String): ConnectionIO[Unit] =
+    for
+      current <- cursor(streamName).option
+      _ <- current match
+        case Some(value) if isNumericCursor(value) != isNumericCursor(cursorEnd) =>
+          doobie.free.connection.raiseError(
+            IllegalArgumentException(
+              s"cursor format mismatch for stream $streamName"
+            )
+          )
+        case _ => ().pure[ConnectionIO]
+      _ <- sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
            VALUES ($streamName, $cursorEnd, CURRENT_TIMESTAMP(6))
            ON DUPLICATE KEY UPDATE
              cursor_value = CASE
                WHEN VALUES(cursor_value) REGEXP '^[0-9]+$$'
-                 AND sync_cursors.cursor_value REGEXP '^[0-9]+$$'
                  AND CAST(VALUES(cursor_value) AS DECIMAL(65, 0)) >
                      CAST(sync_cursors.cursor_value AS DECIMAL(65, 0))
                THEN VALUES(cursor_value)
                WHEN NOT (VALUES(cursor_value) REGEXP '^[0-9]+$$')
-                 AND NOT (sync_cursors.cursor_value REGEXP '^[0-9]+$$')
                  AND VALUES(cursor_value) > sync_cursors.cursor_value
                THEN VALUES(cursor_value)
                ELSE sync_cursors.cursor_value
              END,
-             updated_at = CURRENT_TIMESTAMP(6)""".update
+                   updated_at = CURRENT_TIMESTAMP(6)""".update.run.void
+    yield ()
+
+  private def isNumericCursor(value: String): Boolean =
+    value.nonEmpty && value.forall(character => character >= '0' && character <= '9')
 
   def ensureCursor(streamName: String): Update0 =
     sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)

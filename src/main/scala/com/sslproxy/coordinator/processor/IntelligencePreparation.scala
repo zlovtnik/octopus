@@ -281,10 +281,11 @@ object IntelligencePreparation:
         left.nonEmpty && right.nonEmpty && left != right && confidence.isFinite && confidence >= 0.0d
       )
       .toVector
-    val confidenceByPair = normalized.map { case (left, right, confidence) =>
+    val confidenceByPair = normalized.groupMapReduce { case (left, right, _) =>
       val pair = Vector(left, right).sorted
-      (pair.head, pair.last) -> confidence.max(0.0d).min(1.0d)
-    }.toMap
+      (pair.head, pair.last)
+    } { case (_, _, confidence) => confidence.max(0.0d).min(1.0d)
+    }(math.max)
     ProjectionFunctions.connectedComponents(normalized.map((left, right, _) => left -> right)).map { members =>
       val memberSet = members.toSet
       val confidences = confidenceByPair.collect {
@@ -331,33 +332,43 @@ object IntelligencePreparation:
       typosquatScore: Double,
       vendorMismatchScore: Double,
       embeddingOutlierScore: Double
-  ): ApRiskProjection =
-    val signalRisk = (deauthScore.max(0.0d) * 0.25d) + (signalAnomalyScore.max(0.0d) * 0.20d)
-    val identityRisk = (typosquatScore.max(0.0d) * 0.20d) + (vendorMismatchScore.max(0.0d) * 0.15d)
-    val behaviorRisk = embeddingOutlierScore.max(0.0d) * 0.20d
-    val composite = signalRisk + identityRisk + behaviorRisk
-    ApRiskProjection(
-      bssid,
-      composite,
-      signalRisk,
-      identityRisk,
-      behaviorRisk,
-      Json.obj(
-        "deauth_score" -> Json.fromDoubleOrNull(deauthScore),
-        "signal_anomaly_score" -> Json.fromDoubleOrNull(signalAnomalyScore),
-        "typosquat_score" -> Json.fromDoubleOrNull(typosquatScore),
-        "vendor_mismatch_score" -> Json.fromDoubleOrNull(vendorMismatchScore),
-        "embedding_outlier_score" -> Json.fromDoubleOrNull(embeddingOutlierScore),
-        "weights" -> Json.arr(
-          Json.fromDoubleOrNull(0.25d),
-          Json.fromDoubleOrNull(0.20d),
-          Json.fromDoubleOrNull(0.20d),
-          Json.fromDoubleOrNull(0.15d),
-          Json.fromDoubleOrNull(0.20d)
-        )
-      ).noSpaces,
-      ProjectionFunctions.stableId("ap-risk-run", Vector(bssid))
+  ): Either[String, ApRiskProjection] =
+    val inputs = Vector(
+      deauthScore,
+      signalAnomalyScore,
+      typosquatScore,
+      vendorMismatchScore,
+      embeddingOutlierScore
     )
+    if !inputs.forall(_.isFinite) then Left("AP risk inputs must be finite")
+    else
+      val bounded = inputs.map(_.max(0.0d).min(1.0d))
+      val signalRisk = (bounded(0) * 0.25d) + (bounded(1) * 0.20d)
+      val identityRisk = (bounded(2) * 0.20d) + (bounded(3) * 0.15d)
+      val behaviorRisk = bounded(4) * 0.20d
+      val composite = (signalRisk + identityRisk + behaviorRisk).max(0.0d).min(1.0d)
+      Right(ApRiskProjection(
+        bssid,
+        composite,
+        signalRisk,
+        identityRisk,
+        behaviorRisk,
+        Json.obj(
+          "deauth_score" -> Json.fromDoubleOrNull(deauthScore),
+          "signal_anomaly_score" -> Json.fromDoubleOrNull(signalAnomalyScore),
+          "typosquat_score" -> Json.fromDoubleOrNull(typosquatScore),
+          "vendor_mismatch_score" -> Json.fromDoubleOrNull(vendorMismatchScore),
+          "embedding_outlier_score" -> Json.fromDoubleOrNull(embeddingOutlierScore),
+          "weights" -> Json.arr(
+            Json.fromDoubleOrNull(0.25d),
+            Json.fromDoubleOrNull(0.20d),
+            Json.fromDoubleOrNull(0.20d),
+            Json.fromDoubleOrNull(0.15d),
+            Json.fromDoubleOrNull(0.20d)
+          )
+        ).noSpaces,
+        ProjectionFunctions.stableId("ap-risk-run", Vector(bssid))
+      ))
 
   private def windowStart(value: Instant): Instant =
     Instant.ofEpochSecond(Math.floorDiv(value.getEpochSecond, WindowSeconds) * WindowSeconds)

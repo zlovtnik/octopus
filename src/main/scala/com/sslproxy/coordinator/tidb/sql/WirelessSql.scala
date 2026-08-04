@@ -8,6 +8,7 @@ import java.sql.Timestamp
 
 object WirelessSql:
   def lookupDevice(mac: String): Fragment =
+    val normalizedMac = mac.trim.toLowerCase(java.util.Locale.ROOT)
     sql"""SELECT JSON_OBJECT(
             'device_id', mac_id,
             'username', username,
@@ -15,7 +16,7 @@ object WirelessSql:
             'hostname', hostname
           ) AS device_json
           FROM devices
-          WHERE LOWER(mac_id) = LOWER($mac)
+          WHERE mac_id = $normalizedMac
           LIMIT 1"""
 
   val AuthorizedNetworksQuery: Fragment =
@@ -44,14 +45,16 @@ object WirelessSql:
       locationId: Option[String],
       batchId: String
   ): Fragment =
+    val normalizedSsid = ssid.trim
+    val normalizedBssid = observedBssid.map(_.trim.toLowerCase(java.util.Locale.ROOT))
     sql"""INSERT INTO wireless_clients (
             ssid, client_mac, known_bssid, first_seen, last_seen,
             probe_count, location_id, last_probe_batch_id
           ) VALUES (
-            $ssid, $clientMac,
+            $normalizedSsid, $clientMac,
             (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
-             WHERE LOWER(authorized.ssid) = LOWER($ssid) AND authorized.enabled = TRUE
-               AND ($observedBssid IS NULL OR LOWER(authorized.bssid) = LOWER($observedBssid))
+             WHERE authorized.ssid = $normalizedSsid AND authorized.enabled = TRUE
+               AND ($normalizedBssid IS NULL OR authorized.bssid = $normalizedBssid)
                AND ($locationId IS NULL OR authorized.location_id = $locationId)
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId

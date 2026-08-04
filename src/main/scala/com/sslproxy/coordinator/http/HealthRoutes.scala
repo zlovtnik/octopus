@@ -61,4 +61,4 @@ object HealthRoutes:
       healthCheck: IO[Boolean],
       timeout: FiniteDuration
   ): IO[Boolean] =
-    healthCheck.timeoutTo(timeout, IO.pure(false))
+    healthCheck.timeoutTo(timeout, IO.pure(false)).handleError(_ => false)

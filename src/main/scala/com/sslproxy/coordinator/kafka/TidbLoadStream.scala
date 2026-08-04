@@ -49,13 +49,12 @@ object TidbLoadStream:
             "offset" -> locked.metadata.offset.toString)) *>
             dbSemaphore.permit.use(_ => handler.handle(load)).map(result => (locked, load, result))
         }
-        _ <- dbSemaphore.permit.use { _ =>
+        _ <-
           KafkaDatabaseResult.require(
             resultStore.recordLoadResultsWithEvidence(
               handled.map { case (locked, load, result) => (load, result, locked.metadata) }
             ).value
           )
-        }
         _ <- handled.traverse_ { case (_, load, result) =>
           IO(log.info("tidb_load_consumer", "status" -> "durable",
             "batch_id" -> load.batchId, "result_status" -> result.status,

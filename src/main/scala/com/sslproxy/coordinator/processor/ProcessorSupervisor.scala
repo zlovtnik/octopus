@@ -83,6 +83,18 @@ final class ProcessorSupervisor private (
     Stream.eval(runForever(workload, 0))
 
   private def runForever(workload: ProcessorWorkload, restartCount: Int): IO[Unit] =
+    cats.Monad[IO].tailRecM[Int, Unit](restartCount) { currentRestartCount =>
+      runCycle(workload, currentRestartCount).attempt.flatMap {
+        case Right(error) =>
+          backoff(workload, currentRestartCount, error, supervisionFailure = false)
+            .as(Left(currentRestartCount + 1): Either[Int, Unit])
+        case Left(error) =>
+          backoff(workload, currentRestartCount, error, supervisionFailure = true)
+            .as(Left(currentRestartCount + 1): Either[Int, Unit])
+      }
+    }
+
+  private def runCycle(workload: ProcessorWorkload, restartCount: Int): IO[Throwable] =
     val runId = java.util.UUID.randomUUID().toString
     val execute =
       (setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
@@ -97,37 +109,39 @@ final class ProcessorSupervisor private (
         case Right(_) =>
           val error = IllegalStateException("processor stream completed unexpectedly")
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
-            retry(workload, restartCount, error)
+            IO.pure(error)
         case Left(error: TerminalProcessorError) =>
-          val message = safeMessage(error)
-          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
-            setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
-            IO(log.error("processor",
-              "status" -> "failed_terminal", "processor" -> workload.id.value,
-              "error" -> message)) *> IO.never
+          failTerminal(workload, runId, restartCount, error)
         case Left(error: ProcessorPersistenceException) =>
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
-            retry(workload, restartCount, error)
+            IO.pure(error)
         case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
+          failTerminal(workload, runId, restartCount, error)
+        case Left(error) =>
+          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
+            IO.pure(error)
+      }
+
+    cycle
+
+  private def failTerminal(
+      workload: ProcessorWorkload,
+      runId: String,
+      restartCount: Int,
+      error: Throwable
+  ): IO[Throwable] =
           val message = safeMessage(error)
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.FailedTerminal, Some(error)) *>
             setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
             IO(log.error("processor",
               "status" -> "failed_terminal", "processor" -> workload.id.value,
               "error" -> message)) *> IO.never
-        case Left(error) =>
-          bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
-            retry(workload, restartCount, error)
-      }
 
-    cycle.handleErrorWith { error =>
-      retryAfterSupervisionFailure(workload, restartCount, error)
-    }
-
-  private def retry(
+  private def backoff(
       workload: ProcessorWorkload,
       restartCount: Int,
-      error: Throwable
+      error: Throwable,
+      supervisionFailure: Boolean
   ): IO[Unit] =
     val nextRestart = restartCount + 1
     val delay = ProcessorSupervisor.retryDelay(
@@ -137,43 +151,16 @@ final class ProcessorSupervisor private (
       ProcessorSupervisor.jitterFraction(workload.id, nextRestart)
     )
     val message = safeMessage(error)
-
-    IO(metrics.foreach(_.recordProcessorRetry(workload.id.value))) *>
-      setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message)) *>
-      IO(log.warn("processor",
-        "status" -> "backing_off", "processor" -> workload.id.value,
-        "restart_count" -> nextRestart.toString, "delay_ms" -> delay.toMillis.toString,
-        "error" -> message)) *>
-      IO.sleep(delay) *>
-      runForever(workload, nextRestart)
-
-  private def retryAfterSupervisionFailure(
-      workload: ProcessorWorkload,
-      restartCount: Int,
-      error: Throwable
-  ): IO[Unit] =
-    val nextRestart = restartCount + 1
-    val delay = ProcessorSupervisor.retryDelay(
-      config.restartBaseDelayMs,
-      config.restartMaxDelayMs,
-      nextRestart,
-      ProcessorSupervisor.jitterFraction(workload.id, nextRestart)
-    )
-    val message = safeMessage(error)
+    val event = if supervisionFailure then "supervision_retry" else "backing_off"
 
     IO(metrics.foreach(_.recordProcessorRetry(workload.id.value))) *>
       setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message))
-      .handleErrorWith { statusError =>
-        logBookkeepingFailure(workload.id, "set_status", statusError)
-      } *>
-      IO(log.error("processor",
-        error,
-        "status" -> "supervision_retry",
-        "processor" -> workload.id.value,
-        "restart_count" -> nextRestart.toString,
-        "delay_ms" -> delay.toMillis.toString)) *>
-      IO.sleep(delay) *>
-      runForever(workload, nextRestart)
+        .handleErrorWith(statusError => logBookkeepingFailure(workload.id, "set_status", statusError)) *>
+      IO(log.warn("processor",
+        "status" -> event, "processor" -> workload.id.value,
+        "restart_count" -> nextRestart.toString, "delay_ms" -> delay.toMillis.toString,
+        "error" -> message)) *>
+      IO.sleep(delay)
 
   private def setStatus(
       id: ProcessorId,

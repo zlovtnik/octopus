@@ -314,8 +314,9 @@ object WirelessProjectionSql:
               )
               AND payload IS NOT NULL""".update.run
 
-    project *>
-      sql"""UPDATE sync_events
+    for
+      projected <- project
+      _ <- sql"""UPDATE sync_events
              SET wireless_search_text = NULLIF(LOWER(CONCAT_WS(
                    ' ', sensor_id, source_mac, bssid, destination_bssid, ssid,
                    wps_device_name, wps_manufacturer, wps_model_name,
@@ -332,3 +333,4 @@ object WirelessProjectionSql:
                    AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
                )
                AND payload IS NOT NULL""".update.run
+    yield projected

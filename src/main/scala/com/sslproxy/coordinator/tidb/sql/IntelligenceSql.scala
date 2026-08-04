@@ -6,10 +6,13 @@ import doobie.{ConnectionIO, Fragment, Query0}
 import doobie.implicits.*
 
 object IntelligenceSql:
-  enum VectorKind(val table: String, val embeddingKind: String, val pairKind: String):
-    case Event extends VectorKind("search_vectors_event", "event", "event_event")
-    case Behaviour extends VectorKind("search_vectors_behaviour", "behaviour", "device_device")
-    case Sequence extends VectorKind("search_vectors_sequence", "sequence", "sequence_sequence")
+  enum VectorKind(val table: String, val index: String, val embeddingKind: String, val pairKind: String):
+    case Event extends VectorKind("search_vectors_event",
+          "search_vectors_event_embedding_hnsw_idx", "event", "event_event")
+    case Behaviour extends VectorKind("search_vectors_behaviour",
+          "search_vectors_behaviour_embedding_hnsw_idx", "behaviour", "device_device")
+    case Sequence extends VectorKind("search_vectors_sequence",
+          "search_vectors_sequence_embedding_hnsw_idx", "sequence", "sequence_sequence")
 
   private val FrameColumnsFragment: Fragment = Fragment.const(
     "frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id, frame.observed_at, " +
@@ -50,7 +53,8 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
+           ORDER BY frame.observed_at, frame.dedupe_key
+           LIMIT $batchLimit""").query[ProjectionFrame]
 
   def timingCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
@@ -83,7 +87,8 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
+           ORDER BY frame.observed_at, frame.dedupe_key
+           LIMIT $batchLimit""").query[ProjectionFrame]
 
   def sequenceCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
@@ -110,7 +115,8 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_qos qos ON qos.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
-           ORDER BY identity_row.session_key, frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
+           ORDER BY identity_row.session_key, frame.observed_at, frame.dedupe_key
+           LIMIT $batchLimit""").query[ProjectionFrame]
 
   def baselineCandidates(limit: Int): Query0[(String, Double)] =
     val batchLimit = limit.max(1)
@@ -134,10 +140,55 @@ object IntelligenceSql:
            FROM wireless_frames frame
            JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            JOIN candidate_bssids candidate ON candidate.bssid = frame.bssid
-           ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key""".query[(String, Double)]
+           ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key
+           LIMIT $batchLimit""".query[(String, Double)]
 
-  def similarityCandidates(
+  def annReady(
+      kind: VectorKind): Query0[Boolean] =
+    sql"""SELECT
+             EXISTS (
+               SELECT 1
+               FROM INFORMATION_SCHEMA.TIFLASH_REPLICA replica
+               WHERE replica.TABLE_SCHEMA = 'atheros_search'
+                 AND replica.TABLE_NAME = ${kind.table}
+                 AND replica.AVAILABLE = 1
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM INFORMATION_SCHEMA.TIFLASH_INDEXES index_state
+               WHERE index_state.TIDB_DATABASE = 'atheros_search'
+                 AND index_state.TIDB_TABLE = ${kind.table}
+                 AND index_state.INDEX_NAME = ${kind.index}
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM INFORMATION_SCHEMA.TIFLASH_INDEXES index_state
+               WHERE index_state.TIDB_DATABASE = 'atheros_search'
+                 AND index_state.TIDB_TABLE = ${kind.table}
+                 AND index_state.INDEX_NAME = ${kind.index}
+                 AND (
+                   COALESCE(index_state.ERROR_MESSAGE, '') <> ''
+                   OR COALESCE(index_state.ROWS_STABLE_NOT_INDEXED, 0) > 0
+                   OR COALESCE(index_state.ROWS_DELTA_NOT_INDEXED, 0) > 0
+                 )
+             )""".query[Boolean]
+
+  def similarityAnchors(
       kind: VectorKind,
+    limit: Int
+  ): Query0[(Long, String, String, String)] =
+    val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
+    val batchLimit = limit.max(1)
+    (fr"""SELECT vector_id, document_id, embedding_model, VEC_AS_TEXT(embedding)
+           FROM""" ++ vectorTable ++ fr"""
+           ORDER BY vector_id DESC
+           LIMIT $batchLimit""").query[(Long, String, String, String)]
+
+  def similarityCandidatesForAnchor(
+    kind: VectorKind,
+    anchorDocumentId: String,
+    anchorEmbeddingModel: String,
+    anchorEmbedding: String,
       maximumDistance: Double,
       limit: Int
   ): Query0[SimilarityCandidate] =
@@ -146,30 +197,46 @@ object IntelligenceSql:
     val embeddingKind = kind.embeddingKind
     val distance = maximumDistance.max(0.0d).min(2.0d)
     val batchLimit = limit.max(1)
-    (fr"""SELECT $pairKind, $embeddingKind, left_vector.embedding_model,
-                  left_vector.document_id, right_vector.document_id,
+    val topK = (batchLimit + 1).min(64)
+    (fr"""SELECT $pairKind, $embeddingKind, $anchorEmbeddingModel,
+                  $anchorDocumentId, right_vector.document_id,
                   left_document.source_table, left_document.source_key, left_document.source_mac,
                   left_document.sensor_id, left_document.location_id, left_document.observed_at,
                   right_document.source_table, right_document.source_key, right_document.source_mac,
                   right_document.sensor_id, right_document.location_id, right_document.observed_at,
-                  VEC_COSINE_DISTANCE(left_vector.embedding, right_vector.embedding)
-           FROM""" ++ vectorTable ++ fr"""left_vector
-           JOIN""" ++ vectorTable ++ fr"""right_vector
-             ON right_vector.vector_id > left_vector.vector_id
-            AND right_vector.embedding_model = left_vector.embedding_model
+                  right_vector.cosine_distance
+           FROM (
+             SELECT candidate.vector_id, candidate.document_id,
+                    candidate.embedding_model,
+                    VEC_COSINE_DISTANCE(
+                      candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
+                    ) AS cosine_distance
+           FROM""" ++ vectorTable ++ fr"""candidate
+             ORDER BY VEC_COSINE_DISTANCE(
+               candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
+             ) ASC
+             LIMIT $topK
+           ) right_vector
            JOIN atheros_search.search_documents left_document
-             ON left_document.document_id = left_vector.document_id
+             ON left_document.document_id = $anchorDocumentId
            JOIN atheros_search.search_documents right_document
              ON right_document.document_id = right_vector.document_id
-           WHERE VEC_COSINE_DISTANCE(left_vector.embedding, right_vector.embedding) <= $distance
+           WHERE right_vector.document_id <> $anchorDocumentId
+             AND right_vector.embedding_model = $anchorEmbeddingModel
+             AND right_vector.cosine_distance <= $distance
              AND NOT EXISTS (
                SELECT 1 FROM atheros_search.similarity_pairs pair
                WHERE pair.pair_kind = $pairKind
-                 AND pair.embedding_model = left_vector.embedding_model
-                 AND pair.left_document_id = left_vector.document_id
-                 AND pair.right_document_id = right_vector.document_id
+                 AND pair.embedding_model = $anchorEmbeddingModel
+                 AND (
+                   (pair.left_document_id = $anchorDocumentId
+                 AND pair.right_document_id = right_vector.document_id)
+                   OR
+                   (pair.left_document_id = right_vector.document_id
+                     AND pair.right_document_id = $anchorDocumentId)
+                 )
              )
-           ORDER BY left_vector.vector_id, right_vector.vector_id
+           ORDER BY right_vector.cosine_distance, right_vector.vector_id
            LIMIT $batchLimit""").query[SimilarityCandidate]
 
   def persistBehavior(value: BehaviorSnapshotProjection): ConnectionIO[Int] =

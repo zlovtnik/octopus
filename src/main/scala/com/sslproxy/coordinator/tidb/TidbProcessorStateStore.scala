@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import cats.data.EitherT
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -13,7 +14,8 @@ import doobie.implicits.*
 
 import java.time.Instant
 
-final class TidbProcessorStateStore(xa: Transactor[IO]) extends ProcessorStateStore[IO]:
+final class TidbProcessorStateStore(xa: Transactor[IO],
+  dbSemaphore: Option[Semaphore[IO]] = None) extends ProcessorStateStore[IO]:
   import TidbProcessorStateStore.log
 
   def load: DbResultT[IO, Map[ProcessorId, ProcessorStatus]] =
@@ -72,7 +74,8 @@ final class TidbProcessorStateStore(xa: Transactor[IO]) extends ProcessorStateSt
 
   private def run[A](operation: String)(action: ConnectionIO[A]): DbResultT[IO, A] =
     EitherT(
-      TidbRepository.retryTransient(operation)(action.transact(xa))
+      TidbRepository.retryTransient(operation)(
+          dbSemaphore.fold(action.transact(xa))(semaphore => semaphore.permit.use(_ => action.transact(xa))))
         .map(Right(_))
         .handleError { cause =>
           log.error("db_error", cause, "operation" -> operation)

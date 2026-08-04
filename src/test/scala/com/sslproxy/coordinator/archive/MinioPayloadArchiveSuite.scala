@@ -13,7 +13,7 @@ import java.time.Instant
 class MinioPayloadArchiveSuite extends CatsEffectSuite:
   test("object keys are deterministic and partitioned by UTC date"):
     val candidate = ArchiveCandidate(
-      "abc123",
+      "00" * 32,
       "wireless.audit",
       Timestamp.from(Instant.parse("2026-08-03T23:59:59Z")),
       "{}",
@@ -21,7 +21,16 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
     )
     assertEquals(
       MinioPayloadArchive.objectKey(candidate),
-      "wireless/2026/08/03/abc123.json"
+      s"wireless/2026/08/03/${"00" * 32}.json"
+    )
+
+  test("object keys reject non-hash dedupe keys"):
+    val result = Either.catchNonFatal(
+      MinioPayloadArchive.objectKey(
+        validCandidate("invalid-key", "{}").copy(dedupeKey = "../escape")
+      )
+    )
+    assert(result.left.exists(_.isInstanceOf[IllegalArgumentException])
     )
 
   test("a duplicate archive reuses verified content without another upload"):
@@ -53,6 +62,22 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
       result <- archive.archive(validCandidate("bad-metadata", "{}")).attempt
     yield assert(result.left.exists(_.isInstanceOf[IllegalStateException]))
 
+  test("an existing object without hash metadata is safely replaced and verified"):
+    for
+      store <- MemoryStore.create()
+      archive = new HashVerifiedPayloadArchive[IO](store, "archive")
+      candidate = validCandidate("missing-metadata", "{\"frame\":1}")
+      _ <- store.seed(
+        MinioPayloadArchive.objectKey(candidate),
+        StoredArchiveObject(candidate.payload.getBytes(StandardCharsets.UTF_8).length.toLong, None)
+      )
+      receipt <- archive.archive(candidate)
+      stored <- store.objects
+      puts <- store.putCount
+    yield
+      assertEquals(stored(MinioPayloadArchive.objectKey(candidate)).payloadSha256, Some(receipt.payloadSha256))
+      assertEquals(puts, 1)
+
   test("concurrent archival converges on one deterministic object"):
     for
       store <- MemoryStore.create()
@@ -66,7 +91,8 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
 
   private def validCandidate(key: String, payload: String): ArchiveCandidate =
     ArchiveCandidate(
-      key,
+      Sha256Utils.sha256Hex(
+      key.getBytes(StandardCharsets.UTF_8)),
       "wireless.audit",
       Timestamp.from(Instant.parse("2026-08-03T23:59:59Z")),
       payload,
@@ -93,6 +119,8 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
 
     def putCount: IO[Int] = puts.get
     def objects: IO[Map[String, StoredArchiveObject]] = state.get
+    def seed(objectKey: String, value: StoredArchiveObject): IO[Unit] =
+      state.update(_.updated(objectKey, value))
 
   private object MemoryStore:
     def create(corruptMetadata: Boolean = false): IO[MemoryStore] =

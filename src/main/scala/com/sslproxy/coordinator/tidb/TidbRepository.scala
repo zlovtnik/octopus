@@ -20,8 +20,9 @@ import java.util.UUID
 import io.opentelemetry.api.trace.SpanKind
 import scala.concurrent.duration.*
 
-class TidbRepository(xa: Transactor[IO]):
-  import TidbRepository.log
+class TidbRepository(xa: Transactor[IO],
+  dbSemaphore: Option[Semaphore[IO]] = None):
+  import TidbRepository.{log, stableUuid}
 
   def checkConnectivity(): IO[Either[DatabaseError, Unit]] =
     runDb("tidb.check_connectivity") {
@@ -148,8 +149,8 @@ class TidbRepository(xa: Transactor[IO]):
         .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
     }
     val observedAt = Option(record.observedAt).filter(_.nonEmpty).flatMap(parseTs)
-    val jobId = stableUuid(s"job:${record.streamName}:${record.dedupeKey}")
-    val batchId = stableUuid(s"batch:${record.streamName}:${record.dedupeKey}")
+    val jobId = stableUuid("job", record.streamName, record.dedupeKey)
+    val batchId = stableUuid("batch", record.streamName, record.dedupeKey)
 
     def validate: ConnectionIO[Unit] =
       if record.streamName.isBlank then FC.raiseError(IllegalArgumentException("scan request stream_name must not be empty"))
@@ -405,8 +406,7 @@ class TidbRepository(xa: Transactor[IO]):
 
   private def enqueueResultTx(result: TidbResult, attempt: Int): ConnectionIO[Unit] =
     val safeAttempt = attempt.max(1)
-    val messageKey = s"${result.batchId}:$safeAttempt"
-    val outboxId = stableUuid(s"outbox:sync.oracle.result:$messageKey")
+    val outboxId = stableUuid("outbox:sync.oracle.result", result.batchId, safeAttempt.toString)
     ResultSql.enqueue(result, safeAttempt, outboxId)
 
   private def applyResultTransition(result: TidbResult): ConnectionIO[Unit] =
@@ -528,10 +528,8 @@ class TidbRepository(xa: Transactor[IO]):
       dbSemaphore.available.flatMap { available =>
         val parallelism = available.toInt.max(1)
         streamNames.parTraverseN(parallelism) { name =>
-          dbSemaphore.permit.use { _ =>
             runDb(s"tidb.ensure_cursor_$name") {
               IngestionSql.ensureCursor(name).run
-            }
           }
         }.map { results =>
           if results.exists(_.isLeft) then
@@ -579,7 +577,7 @@ class TidbRepository(xa: Transactor[IO]):
     runDb("tidb.prepare_embedding_jobs") {
       SearchPreparationSql.documentsMissingEmbeddingJobs(embeddingModel, limit).to[List].flatMap { documents =>
         documents.traverse_ { case (documentId, checksum) =>
-          val jobId = stableUuid(s"embedding:$documentId:event:$embeddingModel:$checksum")
+          val jobId = stableUuid("embedding", documentId, "event", embeddingModel, checksum)
           SearchPreparationSql.enqueueEmbeddingJob(jobId, documentId, checksum, embeddingModel)
         }.as(documents.size)
       }
@@ -631,13 +629,26 @@ class TidbRepository(xa: Transactor[IO]):
         IntelligenceSql.VectorKind.Sequence -> sequenceDistanceThreshold
       )
       candidates.traverse { case (kind, distance) =>
-        IntelligenceSql.similarityCandidates(kind, distance, limit).to[List].flatMap { values =>
+        IntelligenceSql.annReady(kind).unique.flatMap {
+            case false => 0.pure[ConnectionIO]
+            case true =>
+              IntelligenceSql.similarityAnchors(kind, limit).to[List].flatMap { anchors =>
+                anchors
+                  .foldM((0, limit.max(1))) { case ((written, remaining), (_, documentId, model, embedding)) =>
+                    if remaining <= 0 then (written, remaining).pure[ConnectionIO]
+                    else
+                      IntelligenceSql
+                        .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining).to[List].flatMap { values =>
           values.traverse { candidate =>
             IntelligencePreparation.similarity(candidate).fold(
               error => FC.raiseError[Int](IllegalArgumentException(error)),
               IntelligenceSql.persistSimilarity
             )
-          }.map(_.sum)
+          }.map(counts => (written + counts.sum, remaining - values.size))
+                        }
+                  }
+                  .map(_._1)
+              }
         }
       }.map(_.sum)
     }
@@ -682,15 +693,17 @@ class TidbRepository(xa: Transactor[IO]):
   def projectRisk(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("tidb.project_risk") {
       ThreatRiskSql.apRiskCandidates(limit).to[List].flatMap { candidates =>
-        candidates.traverse { case (bssid, deauth, signal, typosquat, vendor, outlier) =>
-          ThreatRiskSql.persistApRisk(IntelligencePreparation.apRisk(
+        candidates.traverse { case (bssid, deauth, signal, typosquat, vendor, outlier) =>IntelligencePreparation.apRisk(
             bssid,
             deauth,
             signal,
             typosquat,
             vendor,
             outlier
-          ))
+          )
+              .fold(
+                error => FC.raiseError[Int](IllegalArgumentException(error)),
+                ThreatRiskSql.persistApRisk)
         }.map(_.sum)
       }
     }
@@ -963,7 +976,7 @@ class TidbRepository(xa: Transactor[IO]):
       "db.namespace" -> "octopus_core",
       "db.operation.name" -> operation
     ) {
-      TidbRepository.retryTransient(operation)(fa.transact(xa))
+      TidbRepository.retryTransientWithPermit(operation, dbSemaphore)(fa.transact(xa))
     }
     traced.map(Right(_)).handleError { cause =>
       log.error("db_error", cause, "operation" -> operation)
@@ -971,9 +984,6 @@ class TidbRepository(xa: Transactor[IO]):
         case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
         case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
     }
-
-  private def stableUuid(value: String): String =
-    UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString
 
   private def parseTs(s: String): Option[java.sql.Timestamp] =
     try
@@ -988,6 +998,16 @@ object TidbRepository:
   private val MacPattern = "(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$".r
   private val transactionRetryMaxAttempts = 5
   private val transactionRetryBaseDelay = 25.millis
+
+  private[tidb] def stableUuid(namespace: String, parts: String*): String =
+    val values = namespace +: parts.toVector
+    val encoded =
+      if parts.forall(part => !part.contains(':')) then values.mkString(":")
+      else
+        values.map { value =>
+          s"${value.getBytes(StandardCharsets.UTF_8).length}:$value"
+        }.mkString
+    UUID.nameUUIDFromBytes(encoded.getBytes(StandardCharsets.UTF_8)).toString
 
   private[tidb] def retryTransient[A](operation: String)(fa: IO[A]): IO[A] =
     def loop(attempt: Int): IO[A] =
@@ -1008,3 +1028,11 @@ object TidbRepository:
       }
 
     loop(1)
+
+  private[tidb] def retryTransientWithPermit[A](
+    operation: String,
+    semaphore: Option[Semaphore[IO]]
+  )(fa: IO[A]): IO[A] =
+    retryTransient(operation) {
+      semaphore.fold(fa)(_.permit.use(_ => fa))
+    }

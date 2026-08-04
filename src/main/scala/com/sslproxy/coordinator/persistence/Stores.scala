@@ -57,6 +57,10 @@ trait OutboxStore[F[_]]:
   def recoverExpired: DbResultT[F, Int]
 
 trait ResultStore[F[_]]:
+  def recordResultWithEvidence(
+    result: TidbResult,
+    metadata: BrokerRecordMetadata
+  ): DbResultT[F, Unit]
   def recordLoadResultsWithEvidence(
     records: List[(TidbLoad, TidbResult, BrokerRecordMetadata)]
   ): DbResultT[F, Unit]

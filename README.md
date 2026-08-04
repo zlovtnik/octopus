@@ -130,6 +130,28 @@ publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 
 ## Configuration and rollout
 
+The complete configuration reference is the checked-in
+[`application.conf`](src/main/resources/application.conf). Each environment
+override is declared directly beside its typed default, so the file is the
+authoritative list of accepted variable names and defaults. `AppConfig.validate`
+is the authoritative startup-requirement check; `AppConfigCutoverSuite` loads
+the reference and exercises the fail-closed bounds and conditional gates.
+
+| Configuration block | Environment families | Startup requirement |
+|---|---|---|
+| `tidb` | `TIDB_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
+| `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition bounds; production replication factor at least three; one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
+| `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
+| `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
+| `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |
+| `processors` | `OCTOPUS_PROCESSOR_*`, `OCTOPUS_ENABLED_PROCESSORS`, similarity/distance variables | Enabled IDs must be Octopus-owned with dependencies enabled; delays, interval, and batch size positive; scores finite and in range |
+| `archive` | `OCTOPUS_ARCHIVE_ENABLED`, `MINIO_*`, retention and archive variables | Credentials and bucket required when enabled; retention ordering, intervals, and batch size validated |
+| `cutover` | `OCTOPUS_CUTOVER_*`, `OCTOPUS_ENVIRONMENT` | Signed artifact, one public-key source, key pin, cluster ID, schema version, and exact group set required outside development bypass |
+
+Unknown or obsolete overrides are not alternate configuration sources. In
+particular, `WIRELESS_DLQ_SUFFIX` is retired; use `SYNC_DLQ_SUFFIX` for every
+consumer DLQ.
+
 Important gates:
 
 | Variable | Default | Meaning |

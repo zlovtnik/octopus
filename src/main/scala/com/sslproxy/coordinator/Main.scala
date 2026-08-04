@@ -66,7 +66,6 @@ object Main extends IOApp.Simple:
             val tiDbDs = oldTx.dataSource
             val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
             val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
-            val tiDbRepo = new TidbRepository(tiDbDoobieTx)
 
             Resource.eval(preflight.validate()).flatMap { _ =>
               val enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
@@ -104,6 +103,7 @@ object Main extends IOApp.Simple:
                     )
                   )
                   .flatMap { dbSemaphore =>
+                    val tiDbRepo = new TidbRepository(tiDbDoobieTx, Some(dbSemaphore))
                     KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
                       val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
                       val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
@@ -129,8 +129,7 @@ object Main extends IOApp.Simple:
                         List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
                         cfg.cron.batchDispatchLeaseSeconds,
                         cfg.cron.scanRetryBackoffSeconds,
-                        cfg.cron.batchDispatchRetryMaxSeconds,
-                        dbSemaphore
+                        cfg.cron.batchDispatchRetryMaxSeconds
                       )
 
                       val scheduler = for
@@ -150,13 +149,12 @@ object Main extends IOApp.Simple:
                           backpressureService,
                           batchDispatchService,
                           metrics,
-                          preflight.validate(),
-                          dbSemaphore
+                          preflight.validate()
                         )
                       yield cronScheduler
 
                       Resource.eval(scheduler).flatMap { cronScheduler =>
-                        val processorStateStore = new TidbProcessorStateStore(tiDbDoobieTx)
+                        val processorStateStore = new TidbProcessorStateStore(tiDbDoobieTx, Some(dbSemaphore))
                         val maintenanceOwnerId = java.util.UUID.randomUUID().toString
                         val leaseTtlSeconds = ((cfg.archive.maintenanceIntervalMs / 1000L) * 2L)
                           .max(60L)
@@ -223,15 +221,13 @@ object Main extends IOApp.Simple:
                                   cfg.kafka,
                                   ingestionStore,
                                   metrics,
-                                  kafka.producer,
-                                  dbSemaphore
+                                  kafka.producer
                                 )
                                 val wirelessStreams = WirelessConsumerService.allStreams(
                                   cfg.wireless,
                                   cfg.kafka,
                                   wirelessStore,
-                                  kafka.producer,
-                                  dbSemaphore
+                                  kafka.producer
                                 )
 
                                 val (scanStream, loadStream, resultStream) = artifactOpt match
@@ -243,8 +239,7 @@ object Main extends IOApp.Simple:
                                         ingestionStore,
                                         payloadResolver,
                                         metrics,
-                                        kafka.producer,
-                                        dbSemaphore
+                                        kafka.producer
                                       ),
                                       TidbLoadStream.run(
                                         cfg.kafka,
@@ -260,8 +255,7 @@ object Main extends IOApp.Simple:
                                         artifact,
                                         ingestionStore,
                                         resultStore,
-                                        kafka.producer,
-                                        dbSemaphore
+                                        kafka.producer
                                       )
                                     )
                                   case None =>

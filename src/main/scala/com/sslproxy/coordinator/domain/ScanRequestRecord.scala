@@ -5,6 +5,7 @@ import io.circe.{Decoder, HCursor}
 import io.circe.parser.{decode, parse}
 
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 
 /** Locked source record for a `sync.scan.request`-shaped ingest request.
   *
@@ -42,7 +43,7 @@ object ScanRequestRecord:
       if wire.streamName.isBlank then Left(IllegalArgumentException("scan request stream_name must not be empty"))
       else if wire.dedupeKey.isBlank then Left(IllegalArgumentException("scan request dedupe_key must not be empty"))
       else if wire.payloadRef.isBlank then Left(IllegalArgumentException("scan request payload_ref must not be empty"))
-      else if wire.observedAt.isBlank then Left(IllegalArgumentException("scan request observed_at must not be empty"))
+      else if !isRfc3339( wire.observedAt) then Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
       else
         val sourceRecordSha256 = Sha256Utils.sha256Hex(rawJson.getBytes(StandardCharsets.UTF_8))
         Right(
@@ -56,6 +57,12 @@ object ScanRequestRecord:
           )
         )
     }
+
+  private def isRfc3339(value: String): Boolean =
+    try
+      Instant.parse(value)
+      true
+    catch case _: java.time.format.DateTimeParseException => false
 
 /** A scan request whose referenced event payload has been resolved and
   * validated as non-null JSON.

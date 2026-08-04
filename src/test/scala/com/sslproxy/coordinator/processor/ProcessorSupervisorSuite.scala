@@ -116,17 +116,21 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       events <- Ref.of[IO, Vector[String]](Vector.empty)
       store = RecordingProcessorStateStore(events)
       supervisor <- ProcessorSupervisor.create(config, store)
-      fiber <- supervisor.run(List(ProcessorWorkload(
+      _ <- supervisor.run(List(ProcessorWorkload(
         id,
         Stream.raiseError[IO](TerminalProcessorError("invalid record"))
       ))).compile.drain.start
-      _ <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
-      recorded <- events.get
-      _ <- fiber.cancel
-    yield
-      assert(recorded.exists(_ == s"state:${id.value}:failed_terminal"))
-      assert(recorded.exists(_.startsWith(s"start:${id.value}:")))
-      assert(recorded.exists(_.contains(":failed_terminal")))
+        .flatMap { fiber =>
+          (for
+            _ <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+            recorded <- events.get
+          yield
+            assert(recorded.exists(_ == s"state:${id.value}:failed_terminal"))
+            assert(recorded.exists(_.startsWith(s"start:${id.value}:")))
+            assert(recorded.exists(_.contains(":failed_terminal")))
+          ).guarantee(fiber.cancel)
+        }
+    yield ()
   }
 
   test("start-run persistence failures stay local and retry") {
@@ -136,16 +140,20 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       attempts <- Ref.of[IO, Int](0)
       store = new StartRunOnceFailingStore(attempts)
       supervisor <- ProcessorSupervisor.create(config, store)
-      fiber <- supervisor.run(List(ProcessorWorkload(
+      _ <- supervisor.run(List(ProcessorWorkload(
         id,
         Stream.raiseError[IO](TerminalProcessorError("invalid record"))
       ))).compile.drain.start
-      statuses <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
-      startAttempts <- attempts.get
-      _ <- fiber.cancel
-    yield
-      assertEquals(statuses(id).lastError, Some("invalid record"))
-      assertEquals(startAttempts, 2)
+        .flatMap { fiber =>
+          (for
+            statuses <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+            startAttempts <- attempts.get
+          yield
+            assertEquals(statuses(id).lastError, Some("invalid record"))
+            assertEquals(startAttempts, 2)
+          ).guarantee(fiber.cancel)
+        }
+    yield ()
   }
 
   private def awaitLifecycle(

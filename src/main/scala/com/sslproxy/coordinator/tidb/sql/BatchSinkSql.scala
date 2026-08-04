@@ -52,7 +52,7 @@ object BatchSinkSql:
       |  signal_dbm, sequence_number, raw_len, is_retry, is_more_data, is_power_save,
       |  is_protected, is_to_ds, is_from_ds, is_handshake, security_flags,
       |  device_id, username, identity_source, tags, anomaly_reasons, raw_json
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       |ON DUPLICATE KEY UPDATE batch_id = VALUES(batch_id)""".stripMargin
 
   val UpsertWirelessSensors: String =
@@ -125,8 +125,8 @@ object BatchSinkSql:
       |  device_id = VALUES(device_id),
       |  username = VALUES(username),
       |  identity_source = VALUES(identity_source),
-      |  last_seen = VALUES(last_seen),
-      |  first_seen = VALUES(first_seen),
+      |  last_seen = GREATEST(wireless_client_inventory.last_seen, VALUES(last_seen)),
+      |  first_seen = LEAST(wireless_client_inventory.first_seen, VALUES(first_seen)),
       |  signal_dbm = VALUES(signal_dbm),
       |  is_authorized = VALUES(is_authorized)""".stripMargin
 

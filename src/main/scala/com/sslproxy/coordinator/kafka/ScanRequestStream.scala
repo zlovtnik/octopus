@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
-import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
@@ -22,8 +21,7 @@ object ScanRequestStream:
       store: IngestionStore[IO],
       payloadResolver: TidbPayloadResolver,
       metrics: CoordinatorMetrics,
-      producer: KafkaProducer[IO, String, String],
-      dbSemaphore: Semaphore[IO]
+      producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact, producer,
       ScanRequestRecord.decodeWire,
@@ -46,8 +44,7 @@ object ScanRequestStream:
         resolved <- relevant.traverse { locked =>
           IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }
-        handled <- resolved.traverse { case (locked, request, record) =>
-          dbSemaphore.permit.use(_ => store.recordScanRequestWithEvidence(record, locked.metadata).value).flatMap {
+        handled <- resolved.traverse { case (locked, request, record) => store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))
             case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
               LockedTopicConsumer.parkNonRetriable(

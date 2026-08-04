@@ -16,5 +16,8 @@ class JobBatchSqlSuite extends FunSuite:
     assert(statement.sql.contains("INSERT INTO outbox_events"))
     assert(statement.sql.contains("destination_topic"))
     assert(statement.sql.contains("LIMIT ?"))
+    assert(statement.sql.contains("status = IF(status IN"))
+    assert(statement.sql.contains("attempt_count = IF(status IN"))
+    assert(statement.sql.contains("lease_expires_at = IF(status IN"))
     assert(!statement.sql.contains("proxy.events"))
     assert(!statement.sql.contains("wireless.audit"))

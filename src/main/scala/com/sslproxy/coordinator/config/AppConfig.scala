@@ -178,8 +178,9 @@ object AppConfig:
     validate(loaded).fold(error => throw error, identity)
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
+    val isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
     val stagedTiDbErrors =
-      if config.tidb.enabled then enabledTiDbErrors(config.tidb)
+      if config.tidb.enabled then enabledTiDbErrors(config.tidb, isDevelopment)
       else List.empty
     val runtimeErrors =
       if config.runtime.anyEnabled || config.processors.enabled.nonEmpty then activeRuntimeErrors(config)
@@ -195,10 +196,13 @@ object AppConfig:
         archiveErrors(config.archive, config.processors) ++
         kafkaErrors(
           config.kafka,
-          isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
+          isDevelopment) ++
+        wirelessErrors( config.wireless) ++
+        backpressureErrors( config.backpressure
         ) ++
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
+        tidbBoundErrors(config.tidb) ++
         stagedTiDbErrors ++
         runtimeErrors
 
@@ -257,13 +261,16 @@ object AppConfig:
       Option.when(config.embeddingModel.trim.isEmpty)(
         "processors.embedding-model must not be blank"
       ),
-      Option.when(config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d)(
+      Option.when(
+        !config.eventDuplicateDistance.isFinite ||config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d)(
         "processors.event-duplicate-distance must be between 0 and 2"
       ),
-      Option.when(config.behaviorSimilarityThreshold < -1.0d || config.behaviorSimilarityThreshold > 1.0d)(
+      Option.when(
+        !config.behaviorSimilarityThreshold.isFinite ||config.behaviorSimilarityThreshold < -1.0d || config.behaviorSimilarityThreshold > 1.0d)(
         "processors.behavior-similarity-threshold must be between -1 and 1"
       ),
-      Option.when(config.sequenceDistanceThreshold < 0.0d || config.sequenceDistanceThreshold > 2.0d)(
+      Option.when(
+        !config.sequenceDistanceThreshold.isFinite ||config.sequenceDistanceThreshold < 0.0d || config.sequenceDistanceThreshold > 2.0d)(
         "processors.sequence-distance-threshold must be between 0 and 2"
       )
     ).flatten ++ idErrors
@@ -329,34 +336,56 @@ object AppConfig:
       )
     ).flatten
 
+  private def wirelessErrors(config: WirelessConfig): List[String] =
+    List(
+      Option.when(config.consumersCount <= 0)(
+        "wireless.consumers-count must be positive"
+      ),
+      Option.when(config.maxPollRecords <= 0)(
+        "wireless.max-poll-records must be positive"
+      )
+    ).flatten
+
+  private def backpressureErrors(config: BackpressureConfig): List[String] =
+    List(
+      Option.when(config.budgetMultiplier <= 0)(
+        "backpressure.budget-multiplier must be positive"
+      ),
+      Option.when(config.adaptivePullChangeThreshold <= 0)(
+        "backpressure.adaptive-pull-change-threshold must be positive"
+      ),
+      Option.when(config.adaptivePullMinRestartIntervalMs <= 0)(
+        "backpressure.adaptive-pull-min-restart-interval-ms must be positive"
+      )
+    ).flatten
+
   private def cronErrors(config: CronConfig): List[String] =
     List(
+      Option.when(config.idleSleepMs <= 0)("cron.idle-sleep-ms must be positive"),
+      Option.when(config.idleSleepBackoffMs <= 0)("cron.idle-sleep-backoff-ms must be positive"),
+      Option.when(config.dispatchBatchSize <= 0)("cron.dispatch-batch-size must be positive"),
+      Option.when(config.ingestBatchSize <= 0)("cron.ingest-batch-size must be positive"),
+      Option.when(config.scanMaxAttempts <= 0)("cron.scan-max-attempts must be positive"),
+      Option.when(config.scanRetryBackoffSeconds <= 0)("cron.scan-retry-backoff-seconds must be positive"),
+      Option.when(config.batchDispatchLeaseSeconds <= 0)("cron.batch-dispatch-lease-seconds must be positive"),
       Option.when(config.batchDispatchRetryMaxSeconds <= 0)(
         "cron.batch-dispatch-retry-max-seconds must be positive"
       ),
       Option.when(config.batchDispatchRetryMaxSeconds < config.scanRetryBackoffSeconds)(
         "cron.batch-dispatch-retry-max-seconds must be at least cron.scan-retry-backoff-seconds"
-      )
+      ),
+      Option.when(config.batchMaxAttempts <= 0)("cron.batch-max-attempts must be positive"),
+      Option.when(config.heartbeatLogIntervalMs <= 0)("cron.heartbeat-log-interval-ms must be positive"),
+      Option.when(config.schemaRefreshIntervalSeconds <= 0)("cron.schema-refresh-interval-seconds must be positive"),
+      Option.when(config.scanFetchCount <= 0)("cron.scan-fetch-count must be positive"),
+      Option.when(config.resultFetchCount <= 0)("cron.result-fetch-count must be positive")
     ).flatten
 
-  private def enabledTiDbErrors(config: TiDbConfig): List[String] =
-    val normalizedHost = config.host.trim.toLowerCase(java.util.Locale.ROOT)
-    val loopbackHosts = Set("localhost", "127.0.0.1", "::1", "[::1]")
+  private def tidbBoundErrors(config: TiDbConfig): List[String] =
 
     List(
-      required(config.host, "tidb.host"),
-      Option.when(loopbackHosts.contains(normalizedHost))(
-        "tidb.host must reference the external TiDB cluster, not loopback"
-      ),
       Option.when(config.port <= 0 || config.port > 65535)(
-        "tidb.port must be between 1 and 65535"
-      ),
-      required(config.database, "tidb.database"),
-      required(config.user, "tidb.user"),
-      Option.when(config.user.trim.equalsIgnoreCase("root"))(
-        "tidb.user must be a least-privilege non-root account"
-      ),
-      required(config.password, "tidb.password"),
+        "tidb.port must be between 1 and 65535"),
       Option.when(config.poolSize <= 0)("tidb.pool-size must be positive"),
       Option.when(config.healthcheckReserve < 0)(
         "tidb.healthcheck-reserve must not be negative"
@@ -369,6 +398,24 @@ object AppConfig:
       ),
       Option.when(config.statementTimeoutSecs <= 0)(
         "tidb.statement-timeout-secs must be positive"
+      )
+    ).flatten
+
+  private def enabledTiDbErrors(config: TiDbConfig, isDevelopment: Boolean): List[String] =
+    val normalizedHost = config.host.trim.toLowerCase(java.util.Locale.ROOT)
+    val loopbackHosts = Set("localhost", "127.0.0.1", "::1", "[::1]")
+
+    List(
+      required(config.host, "tidb.host"),
+      Option.when(loopbackHosts.contains(normalizedHost))(
+        "tidb.host must reference the external TiDB cluster, not loopback"
+      ),
+      required(config.database, "tidb.database"),
+      required(config.user, "tidb.user"),
+      Option.when(config.user.trim.equalsIgnoreCase("root"))(
+        "tidb.user must be a least-privilege non-root account"
+      ),
+      required(config.password, "tidb.password"
       ),
       Option.when(config.sslMode != "VERIFY_IDENTITY")(
         "tidb.ssl-mode must be VERIFY_IDENTITY"
@@ -394,8 +441,8 @@ object AppConfig:
       Option.when(config.warnOnly)(
         "tidb.warn-only must be false when TiDB readiness is enabled"
       ),
-      Option.when(config.localDevAllowPublicKeyRetrieval)(
-        "tidb.local-dev-allow-public-key-retrieval must be false when TiDB readiness is enabled"
+      Option.when(config.localDevAllowPublicKeyRetrieval && !isDevelopment)(
+        "tidb.local-dev-allow-public-key-retrieval requires development cutover bypass"
       ),
       Option.when(!Sha256Hex.matches(config.manifestSha256))(
         "tidb.manifest-sha-256 must be 64 lowercase hexadecimal characters"

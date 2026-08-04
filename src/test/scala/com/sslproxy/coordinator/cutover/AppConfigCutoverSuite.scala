@@ -295,18 +295,64 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(!messages.exists(_.contains("cutover.artifact-path")))
       case Right(_) => fail("expected invalid staged TiDB configuration rejection")
 
-  test("enabled TiDB rejects local public key retrieval"):
+  test("enabled TiDB restricts public key retrieval to development bypass"):
     val baseline = AppConfig.load
     val staged = baseline.copy(
       tidb = enabledTiDb(baseline.tidb).copy(localDevAllowPublicKeyRetrieval = true)
+    )
+    val development = staged.copy(
+      runtime = staged.runtime.copy(environment = "development"),
+      cutover = staged.cutover.copy(devBypass = true)
     )
 
     AppConfig.validate(staged) match
       case Left(error) =>
         assert(error.errors.toList.contains(
-          "tidb.local-dev-allow-public-key-retrieval must be false when TiDB readiness is enabled"
+          "tidb.local-dev-allow-public-key-retrieval requires development cutover bypass"
         ))
       case Right(_) => fail("expected public key retrieval rejection")
+    assertEquals(AppConfig.validate(development), Right(development))
+
+  test("all concurrency polling batch and cron bounds are validated"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      cron = baseline.cron.copy(
+        idleSleepMs = 0,
+        dispatchBatchSize = 0,
+        ingestBatchSize = 0,
+        scanMaxAttempts = 0,
+        heartbeatLogIntervalMs = 0,
+        schemaRefreshIntervalSeconds = 0,
+        scanFetchCount = 0,
+        resultFetchCount = 0
+      ),
+      backpressure = baseline.backpressure.copy(
+        budgetMultiplier = 0,
+        adaptivePullChangeThreshold = 0,
+        adaptivePullMinRestartIntervalMs = 0
+      ),
+      wireless = baseline.wireless.copy(consumersCount = 0, maxPollRecords = 0)
+    )
+
+    val messages = AppConfig
+      .validate(invalid)
+      .left
+      .toOption
+      .map(_.errors.toList)
+      .getOrElse(fail("expected invalid operational bounds"))
+    assert(messages.exists(_.contains("idle-sleep-ms")))
+    assert(messages.exists(_.contains("dispatch-batch-size")))
+    assert(messages.exists(_.contains("ingest-batch-size")))
+    assert(messages.exists(_.contains("scan-max-attempts")))
+    assert(messages.exists(_.contains("heartbeat-log-interval-ms")))
+    assert(messages.exists(_.contains("schema-refresh-interval-seconds")))
+    assert(messages.exists(_.contains("scan-fetch-count")))
+    assert(messages.exists(_.contains("result-fetch-count")))
+    assert(messages.exists(_.contains("budget-multiplier")))
+    assert(messages.exists(_.contains("adaptive-pull-change-threshold")))
+    assert(messages.exists(_.contains("adaptive-pull-min-restart-interval-ms")))
+    assert(messages.exists(_.contains("wireless.consumers-count")))
+    assert(messages.exists(_.contains("wireless.max-poll-records")))
 
   test("enabled TiDB requires an exact canonical manifest checksum"):
     val baseline = AppConfig.load

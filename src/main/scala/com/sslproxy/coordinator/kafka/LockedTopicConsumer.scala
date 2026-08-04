@@ -6,6 +6,7 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, CutoverError, CutoverOffsetEvidence, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.BrokerRecordMetadata
 import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.util.ErrorSanitizer
 import fs2.Stream
 import fs2.kafka.{CommittableConsumerRecord, CommittableOffsetBatch, ConsumerRecord, KafkaConsumer, KafkaProducer, ProducerRecord, ProducerRecords}
 import io.circe.Json
@@ -221,7 +222,7 @@ private[kafka] object LockedTopicConsumer:
       record: ConsumerRecord[String, String],
       error: Throwable
   ): IO[Unit] =
-    val message = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+    val message = ErrorSanitizer.message(error)
     val body = Json.obj(
       "consumer_group" -> Json.fromString(groupId),
       "error" -> Json.fromString(message),

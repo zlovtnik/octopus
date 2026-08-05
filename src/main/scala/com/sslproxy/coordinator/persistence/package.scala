@@ -9,7 +9,7 @@ package object persistence:
   type DbResultT[F[_], A] = EitherT[F, DatabaseError, A]
 
   final case class DatabaseOperationException(error: DatabaseError)
-      extends RuntimeException(s"${error.operation}: ${error.message}", error.cause)
+      extends RuntimeException(s"${error.operation}: ${com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)}", error.cause)
 
   extension [F[_]: MonadThrow, A](result: DbResultT[F, A])
     def orRaise: F[A] =

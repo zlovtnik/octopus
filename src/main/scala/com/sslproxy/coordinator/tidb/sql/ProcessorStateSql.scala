@@ -71,3 +71,7 @@ object ProcessorStateSql:
                error_class = $errorClass,
                error_text = $errorText
            WHERE run_id = $runId AND status = ${ProcessorRunStatus.Running.value}""".update
+
+  def runStatus(runId: String): Query0[String] =
+    sql"""SELECT status FROM processor_runs WHERE run_id = $runId"""
+      .query[String]

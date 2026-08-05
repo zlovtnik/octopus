@@ -202,7 +202,8 @@ final class CronScheduler private (
           .handleErrorWith { error =>
             IO(log.error("cron_fenced_tick", error,
               "status" -> "failed",
-              "processor" -> processorId.value))
+              "processor" -> processorId.value)) *>
+              IO.raiseError(error)
           }
     }
 

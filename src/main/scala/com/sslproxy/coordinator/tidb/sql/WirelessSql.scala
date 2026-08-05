@@ -59,9 +59,9 @@ object WirelessSql:
                AND ($locationId IS NULL OR authorized.location_id = $locationId)
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId
-          ) ON DUPLICATE KEY UPDATE
-            first_seen = LEAST(wireless_clients.first_seen, VALUES(first_seen)),
-            last_seen = GREATEST(wireless_clients.last_seen, VALUES(last_seen)),
+          )           ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(COALESCE(wireless_clients.first_seen, VALUES(first_seen)), COALESCE(VALUES(first_seen), wireless_clients.first_seen)),
+            last_seen = GREATEST(COALESCE(wireless_clients.last_seen, VALUES(last_seen)), COALESCE(VALUES(last_seen), wireless_clients.last_seen)),
             probe_count = CASE
               WHEN wireless_clients.last_probe_batch_id IS NULL
                 OR wireless_clients.last_probe_batch_id != VALUES(last_probe_batch_id)
@@ -97,7 +97,7 @@ object WirelessSql:
           WHERE status IN ('pending', 'sync_failed')
             AND next_attempt_at <= CURRENT_TIMESTAMP(6)
           ORDER BY created_at, stream_name, dedupe_key
-          LIMIT $limit"""
+          LIMIT ${limit.max(1)}"""
 
   def markSynced(dedupeKey: String, streamName: String): Fragment =
     sql"""UPDATE sync_backlog
@@ -115,4 +115,4 @@ object WirelessSql:
     sql"""DELETE FROM sync_backlog
           WHERE status = 'synced' AND updated_at < $cutoff
           ORDER BY updated_at, stream_name, dedupe_key
-          LIMIT $limit"""
+          LIMIT ${limit.max(1)}"""

@@ -63,7 +63,7 @@ object JobBatchSql:
              LIMIT $limit
              ON DUPLICATE KEY UPDATE
                batch_id = sync_batches.batch_id,
-               created_at = CURRENT_TIMESTAMP(6)"""
+               updated_at = CURRENT_TIMESTAMP(6)"""
 
       for
         _ <- insertJobs.update.run

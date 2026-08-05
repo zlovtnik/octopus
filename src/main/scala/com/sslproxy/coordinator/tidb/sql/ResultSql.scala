@@ -67,7 +67,12 @@ object ResultSql:
                          WHERE batch_id = ${result.batchId}
                            AND job_id = ${result.jobId}
                            AND status IN ('pending', 'dispatched', 'running')""".update.run
-      _ <- requireSingleTransition("complete", result.batchId, updated)
+      _ <- if updated == 1 then ().pure[ConnectionIO]
+            else
+              sql"""SELECT status FROM sync_batches WHERE batch_id = ${result.batchId} AND job_id = ${result.jobId}""".query[String].option.flatMap {
+                case Some("completed") => ().pure[ConnectionIO]
+                case _ => requireSingleTransition("complete", result.batchId, updated)
+              }
       _ <-
         sql"""UPDATE sync_jobs
                SET status = 'completed',

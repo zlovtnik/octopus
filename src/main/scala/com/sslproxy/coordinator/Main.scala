@@ -427,7 +427,9 @@ object Main extends IOApp.Simple:
                                       )
                                     })
                                 val processorStreams =
-                                  if cfg.processors.enabled.isEmpty then legacyProcessorStreams
+                                  if cfg.runtime.processorsEnabled && cfg.processors.enabled.isEmpty then
+                                    Stream.empty
+                                  else if cfg.processors.enabled.isEmpty then legacyProcessorStreams
                                   else
                                     cronScheduler.supportStream
                                       .merge(cronScheduler.schemaRefresher)

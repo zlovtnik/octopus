@@ -138,7 +138,7 @@ class TidbRepository(xa: Transactor[IO],
         case Right(Json.Null) =>
           FC.raiseError(IllegalArgumentException("resolved backfill payload must not be JSON null"))
         case Right(_) if candidate.streamName == "wireless.audit" &&
-            candidate.payloadJson.nonEmpty &&
+            candidate.payloadJson.exists(_.nonEmpty) &&
             candidate.payloadSha256.contains(candidate.dedupeKey) =>
           hydrateWirelessProjection(candidate.dedupeKey).map(_ > 0)
         case Right(_) if candidate.streamName == "wireless.audit" &&
@@ -886,7 +886,7 @@ class TidbRepository(xa: Transactor[IO],
           .map("%02x".format(_)).mkString
 
         log.info("probe_flush_batch", "status" -> "parsed",
-          "batch_id" -> batchId, "probe_count" -> probes.length.toString, "payload_bytes" -> probesJson.length.toString)
+          "batch_id" -> batchId, "probe_count" -> probes.length.toString, "payload_bytes" -> probesJson.getBytes(java.nio.charset.StandardCharsets.UTF_8).length.toString)
 
         val validProbes = probes.flatMap { probe =>
           probe.hcursor.get[String]("client_mac").toOption
@@ -996,10 +996,11 @@ class TidbRepository(xa: Transactor[IO],
       TidbRepository.retryTransientWithPermit(operation, dbSemaphore)(fa.transact(xa))
     }
     traced.map(Right(_)).handleError { cause =>
+      val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
       log.error("db_error", cause, "operation" -> operation)
       TidbErrorClass.classify(cause) match
-        case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
-        case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
+        case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, sanitized))
+        case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, sanitized))
     }
 
   private def parseTs(s: String): Option[java.sql.Timestamp] =
@@ -1019,7 +1020,7 @@ object TidbRepository:
   private[tidb] def stableUuid(namespace: String, parts: String*): String =
     val values = namespace +: parts.toVector
     val encoded =
-      if parts.forall(part => !part.contains(':')) then values.mkString(":")
+      if parts.forall(part => !part.contains(':')) && !namespace.contains(':') then values.mkString(":")
       else
         values.map { value =>
           s"${value.getBytes(StandardCharsets.UTF_8).length}:$value"
@@ -1032,7 +1033,9 @@ object TidbRepository:
         if attempt < transactionRetryMaxAttempts &&
             TidbErrorClass.classify(cause) == TidbErrorClass.Retryable
         then
-          val delay = transactionRetryBaseDelay * (1L << (attempt - 1))
+          val baseDelay = transactionRetryBaseDelay * (1L << (attempt - 1))
+          val jitterMs = scala.util.Random.nextLong(baseDelay.toMillis.max(1))
+          val delay = baseDelay + jitterMs.millis
           IO(log.warn(
             "tidb_transaction_retry",
             "status" -> "retrying",

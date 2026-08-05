@@ -26,8 +26,9 @@ final class BatchDispatchService(
 
   def dispatchNext(): IO[DispatchResult] = store.claim(ownerId, destinationTopics, leaseSeconds).value.flatMap {
       case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
         IO(log.error("outbox_claim", "status" -> "db_error",
-          "operation" -> error.operation, "error" -> error.message))
+          "operation" -> error.operation, "error" -> sanitized))
           .as(DispatchResult.StopDraining)
       case Right(None) => IO.pure(DispatchResult.NoWork)
       case Right(Some(record)) => publish(record)
@@ -66,9 +67,10 @@ final class BatchDispatchService(
           "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString))
           .as(DispatchResult.ContinueDraining)
       case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
         IO(log.error("outbox_publish", "status" -> "ack_failed",
           "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> error.message)).as(DispatchResult.StopDraining)
+          "error" -> sanitized)).as(DispatchResult.StopDraining)
     }
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
@@ -82,9 +84,10 @@ final class BatchDispatchService(
           "outbox_id" -> record.outboxId, "attempt" -> record.attemptCount.toString,
           "error" -> message)).as(DispatchResult.StopDraining)
       case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
         IO(log.error("outbox_publish", "status" -> "fail_transition_failed",
           "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> error.message)).as(DispatchResult.StopDraining)
+          "error" -> sanitized)).as(DispatchResult.StopDraining)
     }
 
 object BatchDispatchService:

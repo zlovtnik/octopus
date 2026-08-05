@@ -77,7 +77,7 @@ object MaintenanceSql:
                               updated_at = CURRENT_TIMESTAMP(6)
                           WHERE resource_type = $resourceType
                             AND resource_id = $resourceId
-                            AND next_attempt_at <= CURRENT_TIMESTAMP(6)
+                            AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP(6))
                             AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP(6))""".update.run
       lease <- if claimed != 1 then none[Lease].pure[ConnectionIO]
                else

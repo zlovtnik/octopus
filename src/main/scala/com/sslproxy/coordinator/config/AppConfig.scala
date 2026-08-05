@@ -324,9 +324,14 @@ object AppConfig:
         "kafka.locked-batch-window-ms must be positive"
       ),
       Option.when(
-        (!isDevelopment && config.topicReplicationFactor < 3) ||
-          config.topicReplicationFactor <= 0 ||
-          config.topicReplicationFactor > Short.MaxValue
+        isDevelopment &&
+          (config.topicReplicationFactor < 1 || config.topicReplicationFactor > Short.MaxValue)
+      )(
+        "kafka.topic-replication-factor must be between 1 and 32767 in development mode"
+      ),
+      Option.when(
+        !isDevelopment &&
+          (config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)
       )(
         "kafka.topic-replication-factor must be between 3 and 32767"
       )
@@ -467,9 +472,20 @@ object AppConfig:
       config.wireless.networksAuthorizedConsumer,
       config.wireless.probeFlushConsumer
     )
+    val lockedConsumerProcessorIds = Set(
+      ProcessorId.SyncScanIngestion,
+      ProcessorId.SyncLoadConsumer,
+      ProcessorId.SyncResultConsumer
+    )
+    val enabledLockedConsumers =
+      config.processors.enabled.flatMap(ProcessorId.fromString(_).toOption)
+        .filter(lockedConsumerProcessorIds.contains)
     val runtimeInvariantErrors = List(
       Option.when(!config.tidb.enabled)(
         "an enabled runtime requires tidb.enabled=true"
+      ),
+      Option.when(enabledLockedConsumers.nonEmpty && !config.runtime.consumersEnabled)(
+        s"locked-consumer processors ${enabledLockedConsumers.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"
       )
     ).flatten
 

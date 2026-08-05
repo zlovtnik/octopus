@@ -301,10 +301,11 @@ object IntelligencePreparation:
     }
 
   def dnsThreat(candidate: DnsThreatCandidate): DnsThreatProjection =
-    val count = candidate.blockedCount.max(1L)
-    val averageBytes = candidate.attemptedBytes.toDouble / count.toDouble
-    val recencyWeight = 1.0d + (2.0d * candidate.recentCount.max(0L).toDouble / count.toDouble)
-    val score = count.toDouble * (averageBytes + 1.0d) * recencyWeight
+    val blocked = candidate.blockedCount.max(0L)
+    val denominator = blocked.max(1L)
+    val averageBytes = candidate.attemptedBytes.toDouble / denominator.toDouble
+    val recencyWeight = 1.0d + (2.0d * candidate.recentCount.max(0L).toDouble / denominator.toDouble)
+    val score = blocked.toDouble * (averageBytes + 1.0d) * recencyWeight
     val severity =
       if score >= 1000.0d then "critical"
       else if score >= 500.0d then "high"

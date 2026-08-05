@@ -5,7 +5,7 @@ object ErrorSanitizer:
   private val SecretAssignment =
     "(?i)(password|passwd|token|secret|api[-_]?key)\\s*[:=]\\s*([^\\s,;]+)".r
   private val UriUserinfo = "://[^/]*?:([^@/]+)@".r
-  private val BearerToken = "(?i)(authorization\\s+Bearer\\s+)([A-Za-z0-9._\\-]+)".r
+  private val BearerToken = "(?i)(authorization\\s+(?:Bearer\\s+)?)([A-Za-z0-9._\\-]+)".r
   private val ControlCharacters = "[\\p{Cc}\\p{Cf}]".r
   private val RepeatedWhitespace = "\\s+".r
 

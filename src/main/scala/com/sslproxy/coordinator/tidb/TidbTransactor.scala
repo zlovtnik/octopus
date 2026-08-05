@@ -55,10 +55,11 @@ final class TidbTransactor private (
       f.handleErrorWith { err =>
         if attempt < retryMaxAttempts && TidbErrorClass.classify(err) == TidbErrorClass.Retryable then
           val delay = retryBaseDelay * (1L << (attempt - 1))
+          val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(err)
           log.warn("tidb_retry", "status" -> "retrying",
             "operation" -> label, "attempt" -> s"$attempt/$retryMaxAttempts",
             "delay" -> s"${delay.toMillis}ms",
-            "error" -> Option(err.getMessage).getOrElse(err.getClass.getSimpleName))
+            "error" -> sanitized)
           IO.sleep(delay) *> go(attempt + 1)
         else
           IO.raiseError(err)
@@ -504,7 +505,9 @@ final class TidbTransactor private (
     }
 
   private def bandForChannel(channel: Long): String =
-    if channel >= 1 && channel <= 14 then "2.4GHz" else "5GHz"
+    if channel >= 1 && channel <= 14 then "2.4GHz"
+    else if channel >= 1 && channel <= 233 then "5GHz"
+    else "unknown"
 
   // ── wireless_client_inventory ─────────────────────────────────
   override def insertWirelessClientInventory(batchId: String, rows: List[WirelessClientInventoryInsert]): IO[Long] =

@@ -84,13 +84,18 @@ final class ProcessorSupervisor private (
 
   private def runForever(workload: ProcessorWorkload, restartCount: Int): IO[Unit] =
     cats.Monad[IO].tailRecM[Int, Unit](restartCount) { currentRestartCount =>
-      runCycle(workload, currentRestartCount).attempt.flatMap {
-        case Right(error) =>
-          backoff(workload, currentRestartCount, error, supervisionFailure = false)
-            .as(Left(currentRestartCount + 1): Either[Int, Unit])
-        case Left(error) =>
-          backoff(workload, currentRestartCount, error, supervisionFailure = true)
-            .as(Left(currentRestartCount + 1): Either[Int, Unit])
+      Clock[IO].monotonic.flatMap { startedAt =>
+        runCycle(workload, currentRestartCount).attempt.flatMap { outcome =>
+          val (error, supervisionFailure) = outcome match
+            case Right(value) => (value, false)
+            case Left(value)  => (value, true)
+          Clock[IO].monotonic.flatMap { finishedAt =>
+            val stable = (finishedAt - startedAt) >= config.restartMaxDelayMs.millis
+            val effective = if stable then 0 else currentRestartCount
+            backoff(workload, effective, error, supervisionFailure)
+              .as(Left(effective + 1): Either[Int, Unit])
+          }
+        }
       }
     }
 

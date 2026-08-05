@@ -28,8 +28,9 @@ final class BackpressureService private (
   def checkAndAct: IO[Long] =
     pendingLedgerCount.flatMap {
       case Left(err) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(err.message)
         IO(log.warn("backpressure", "status" -> "pending_count_failed",
-          "operation" -> err.operation, "error" -> err.message)) *>
+          "operation" -> err.operation, "error" -> sanitized)) *>
           consumerSuspended.get.flatMap { suspended =>
             IO(metrics.recordBackpressureActive(suspended))
               .as(if suspended then budget else 0L)

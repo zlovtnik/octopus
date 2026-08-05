@@ -5,7 +5,6 @@ import io.circe.{Decoder, HCursor}
 import io.circe.parser.{decode, parse}
 
 import java.nio.charset.StandardCharsets
-import java.time.Instant
 
 /** Locked source record for a `sync.scan.request`-shaped ingest request.
   *
@@ -60,7 +59,7 @@ object ScanRequestRecord:
 
   private def isRfc3339(value: String): Boolean =
     try
-      Instant.parse(value)
+      java.time.OffsetDateTime.parse(value)
       true
     catch case _: java.time.format.DateTimeParseException => false
 

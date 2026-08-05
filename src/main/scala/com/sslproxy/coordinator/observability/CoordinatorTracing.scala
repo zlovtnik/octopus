@@ -20,7 +20,10 @@ object CoordinatorTracing:
           .getOpenTelemetrySdk
       )
     } { sdk =>
-      IO.blocking(sdk.getSdkTracerProvider.shutdown().join(10L, TimeUnit.SECONDS)).void
+      IO.blocking {
+        sdk.getSdkTracerProvider.shutdown().join(10L, TimeUnit.SECONDS)
+        sdk.close()
+      }.void
     }.void
 
   def span[A](

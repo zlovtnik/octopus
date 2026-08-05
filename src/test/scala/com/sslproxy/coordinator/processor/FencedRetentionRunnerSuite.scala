@@ -116,7 +116,7 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       "worker-1",
       "token",
       1L,
-      Instant.parse("2026-08-03T23:59:59Z")
+      Instant.now().plusSeconds(3600L)
     )
 
     def findArchiveCandidates(hotDays: Int, limit: Int): DbResultT[IO, List[ArchiveCandidate]] =

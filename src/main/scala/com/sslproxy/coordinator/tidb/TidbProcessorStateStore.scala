@@ -68,7 +68,13 @@ final class TidbProcessorStateStore(xa: Transactor[IO],
     run("tidb.processor_run.finish") {
       ProcessorStateSql.finishRun(runId, status, errorClass, errorText, finishedAt).run.flatMap { updated =>
         if updated == 1 then ().pure[ConnectionIO]
-        else FC.raiseError(IllegalStateException(s"processor run $runId is not running"))
+        else
+          ProcessorStateSql.runStatus(runId).option.flatMap {
+            case Some(existingStatus) if existingStatus == status.value =>
+              ().pure[ConnectionIO]
+            case _ =>
+              FC.raiseError(IllegalStateException(s"processor run $runId is not running"))
+          }
       }
     }
 
@@ -78,10 +84,11 @@ final class TidbProcessorStateStore(xa: Transactor[IO],
           dbSemaphore.fold(action.transact(xa))(semaphore => semaphore.permit.use(_ => action.transact(xa))))
         .map(Right(_))
         .handleError { cause =>
+          val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
           log.error("db_error", cause, "operation" -> operation)
           TidbErrorClass.classify(cause) match
-            case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
-            case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
+            case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, sanitized))
+            case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, sanitized))
         }
     )
 

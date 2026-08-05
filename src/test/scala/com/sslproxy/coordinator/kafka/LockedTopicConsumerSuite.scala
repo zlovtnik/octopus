@@ -6,7 +6,7 @@ import com.sslproxy.coordinator.tidb.TidbResult
 import munit.FunSuite
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.errors.TopicExistsException
+import org.apache.kafka.common.errors.{InvalidReplicationFactorException, TopicExistsException}
 
 import java.nio.charset.StandardCharsets
 import java.security.{KeyPairGenerator, MessageDigest, Signature}
@@ -106,6 +106,14 @@ class LockedTopicConsumerSuite extends FunSuite:
     ))
     assert(!KafkaComponents.isTopicAlreadyExists(
       new ExecutionException(new IllegalStateException("topic creation failed"))
+    ))
+
+  test("topic provisioning detects invalid replication factor"):
+    assert(KafkaComponents.isInvalidReplicationFactor(
+      new ExecutionException(new InvalidReplicationFactorException("Unable to allocate topic with given replication factor"))
+    ))
+    assert(!KafkaComponents.isInvalidReplicationFactor(
+      new ExecutionException(new IllegalStateException("replication failed"))
     ))
 
   test("topic provisioning reserves the expanded count for locked sync topics"):

@@ -7,7 +7,7 @@ import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
-import org.apache.kafka.common.errors.{RetriableException, TopicExistsException}
+import org.apache.kafka.common.errors.{InvalidReplicationFactorException, RetriableException, TopicExistsException}
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.{Collections, Properties}
@@ -48,6 +48,10 @@ object KafkaComponents:
           catch
             case error if isTopicAlreadyExists(error) =>
               log.debug("topic_provision", "status" -> "exists", "topic" -> topic)
+            case error if isInvalidReplicationFactor(error) =>
+              log.warn("topic_provision", "status" -> "replication_factor_mismatch",
+                "topic" -> topic, "replication" -> replicationFactor.toString,
+                "error" -> error.getMessage)
         else
           log.debug("topic_provision", "status" -> "exists", "topic" -> topic)
       finally
@@ -57,6 +61,12 @@ object KafkaComponents:
     error match
       case _: TopicExistsException => true
       case execution: ExecutionException => execution.getCause.isInstanceOf[TopicExistsException]
+      case _ => false
+
+  private[kafka] def isInvalidReplicationFactor(error: Throwable): Boolean =
+    error match
+      case _: InvalidReplicationFactorException => true
+      case execution: ExecutionException => execution.getCause.isInstanceOf[InvalidReplicationFactorException]
       case _ => false
 
   private[kafka] def provisionedTopicPartitions(cfg: KafkaCfg, topic: String): Int =

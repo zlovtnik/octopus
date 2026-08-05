@@ -20,16 +20,17 @@ object ProcessorStateSql:
       observedAt: Instant
   ): Update0 =
     val timestamp = Timestamp.from(observedAt)
-    val databaseStatus = status.lifecycle.value match
-      case "disabled"        => "disabled"
-      case "starting"        => "running"
-      case "ready"           => "idle"
-      case "backing_off"     => "degraded"
-      case "failed_terminal" => "failed"
-    val startedAt = Option.when(status.lifecycle.value == "starting")(timestamp)
-    val succeededAt = Option.when(status.lifecycle.value == "ready")(timestamp)
+    import com.sslproxy.coordinator.processor.ProcessorLifecycle.*
+    val databaseStatus = status.lifecycle match
+      case Disabled        => "disabled"
+      case Starting        => "running"
+      case Ready           => "idle"
+      case BackingOff      => "degraded"
+      case FailedTerminal  => "failed"
+    val startedAt = Option.when(status.lifecycle == Starting)(timestamp)
+    val succeededAt = Option.when(status.lifecycle == Ready)(timestamp)
     val failedAt = Option.when(
-      status.lifecycle.value == "backing_off" || status.lifecycle.value == "failed_terminal"
+      status.lifecycle == BackingOff || status.lifecycle == FailedTerminal
     )(timestamp)
     val failures = if failedAt.nonEmpty then status.restartCount.max(1) else 0
 

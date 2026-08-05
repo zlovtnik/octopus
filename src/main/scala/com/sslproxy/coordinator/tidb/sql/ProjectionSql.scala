@@ -12,11 +12,12 @@ object ProjectionSql:
   ): ConnectionIO[List[String]] =
     val window = windowSeconds.max(1)
     val presenceWindow = presenceWindowSeconds.max(1)
+    val runId = java.util.UUID.randomUUID().toString
     val insert =
       sql"""INSERT INTO wireless_shadow_alerts (
                source_mac, first_occurred_at, last_occurred_at, occurrence_count,
                destination_bssid, ssid, sensor_id, location_id, signal_dbm,
-               reason, evidence, created_at, updated_at
+               reason, evidence, created_at, updated_at, projection_run_id
              )
              SELECT
                w.source_mac, w.observed_at, w.observed_at, 1,
@@ -27,7 +28,7 @@ object ProjectionSql:
                  'signal_threshold_dbm', $signalThresholdDbm,
                  'presence_window_seconds', $presenceWindow
                ),
-               CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+               CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), $runId
              FROM (
                SELECT DISTINCT
                  e.dedupe_key,
@@ -48,7 +49,7 @@ object ProjectionSql:
                  )
              ) w
              WHERE w.source_mac IS NOT NULL
-               AND w.source_mac REGEXP '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$$'
+               AND w.source_mac REGEXP '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$$'
                AND w.signal_dbm >= $signalThresholdDbm
                AND NOT EXISTS (
                  SELECT 1 FROM wireless_authorized_networks awn
@@ -70,6 +71,7 @@ object ProjectionSql:
                sensor_id = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(sensor_id), wireless_shadow_alerts.sensor_id),
                location_id = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(location_id), wireless_shadow_alerts.location_id),
                signal_dbm = IF(VALUES(last_occurred_at) >= wireless_shadow_alerts.last_occurred_at, VALUES(signal_dbm), wireless_shadow_alerts.signal_dbm),
+               projection_run_id = VALUES(projection_run_id),
                updated_at = CURRENT_TIMESTAMP(6)""".update.run
 
     val markInputs =
@@ -93,7 +95,7 @@ object ProjectionSql:
                  )
              ) w
              WHERE w.source_mac IS NOT NULL
-               AND w.source_mac REGEXP '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$$'
+               AND w.source_mac REGEXP '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$$'
                AND w.signal_dbm >= $signalThresholdDbm
                AND NOT EXISTS (
                  SELECT 1 FROM wireless_authorized_networks awn
@@ -125,7 +127,7 @@ object ProjectionSql:
                'evidence', evidence
              ) AS alert_json
              FROM wireless_shadow_alerts
-             WHERE updated_at >= TIMESTAMPADD(SECOND, -2, CURRENT_TIMESTAMP(6))"""
+             WHERE projection_run_id = $runId"""
         .query[String]
         .to[List]
 

@@ -231,7 +231,7 @@ object Main extends IOApp.Simple:
                                 )
 
                                 val (scanStream, loadStream, resultStream) = artifactOpt match
-                                  case Some(artifact) =>
+                                  case Some(artifact) if cfg.runtime.consumersEnabled =>
                                     (
                                       ScanRequestStream.run(
                                         cfg.kafka,
@@ -258,11 +258,19 @@ object Main extends IOApp.Simple:
                                         kafka.producer
                                       )
                                     )
-                                  case None =>
+                                  case _ =>
                                     (Stream.empty, Stream.empty, Stream.empty)
 
-                                val workloads = List(
-                                  ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
+                                val lockedConsumerWorkloads =
+                                  if cfg.runtime.consumersEnabled then
+                                    List(
+                                      ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
+                                      ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
+                                      ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream)
+                                    )
+                                  else Nil
+
+                                val workloads = lockedConsumerWorkloads ++ List(
                                   ProcessorWorkload(
                                     ProcessorId.SyncJobPlanner,
                                     cronScheduler.jobPlanningStream,
@@ -273,8 +281,6 @@ object Main extends IOApp.Simple:
                                     cronScheduler.backlogRecoveryStream
                                   ),
                                   ProcessorWorkload(ProcessorId.SyncLoadDispatch, cronScheduler.loadDispatchStream),
-                                  ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
-                                  ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream),
                                   ProcessorWorkload(
                                     ProcessorId.SyncOutboxPublisher,
                                     cronScheduler.outboxPublisherStream

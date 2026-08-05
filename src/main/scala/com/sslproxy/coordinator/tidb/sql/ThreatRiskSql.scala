@@ -66,19 +66,25 @@ object ThreatRiskSql:
              FROM wireless_frames frame
              JOIN bssids ON bssids.bssid = frame.bssid
              JOIN wireless_frames peer ON peer.ssid = frame.ssid
+               AND peer.observed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
              WHERE frame.bssid IS NOT NULL AND frame.ssid IS NOT NULL
+               AND frame.observed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
              GROUP BY frame.bssid
            ),
            outlier_scores AS (
-             SELECT document.bssid, MAX(pair.cosine_distance) AS outlier_score
+             SELECT COALESCE(left_document.bssid, right_document.bssid) AS bssid,
+                    MAX(pair.cosine_distance) AS outlier_score
              FROM atheros_search.similarity_pairs pair
-             JOIN atheros_search.search_documents document
-               ON document.document_id IN (pair.left_document_id, pair.right_document_id)
-             JOIN bssids ON bssids.bssid = document.bssid
+             JOIN atheros_search.search_documents left_document
+               ON left_document.document_id = pair.left_document_id
+             JOIN atheros_search.search_documents right_document
+               ON right_document.document_id = pair.right_document_id
+             JOIN bssids bssid_left ON bssid_left.bssid = left_document.bssid
+             JOIN bssids bssid_right ON bssid_right.bssid = right_document.bssid
              WHERE pair.computed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
                AND pair.cosine_distance > 0.15
-               AND document.bssid IS NOT NULL
-             GROUP BY document.bssid
+               AND (left_document.bssid IS NOT NULL OR right_document.bssid IS NOT NULL)
+             GROUP BY COALESCE(left_document.bssid, right_document.bssid)
            )
            SELECT bssids.bssid,
                   COALESCE(alert_scores.deauth_score, 0),

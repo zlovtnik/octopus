@@ -53,8 +53,7 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key
-           LIMIT $batchLimit""").query[ProjectionFrame]
+           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
 
   def timingCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
@@ -87,8 +86,7 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key
-           LIMIT $batchLimit""").query[ProjectionFrame]
+           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
 
   def sequenceCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
@@ -115,8 +113,7 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_qos qos ON qos.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
-           ORDER BY identity_row.session_key, frame.observed_at, frame.dedupe_key
-           LIMIT $batchLimit""").query[ProjectionFrame]
+           ORDER BY identity_row.session_key, frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
 
   def baselineCandidates(limit: Int): Query0[(String, Double)] =
     val batchLimit = limit.max(1)
@@ -140,8 +137,7 @@ object IntelligenceSql:
            FROM wireless_frames frame
            JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            JOIN candidate_bssids candidate ON candidate.bssid = frame.bssid
-           ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key
-           LIMIT $batchLimit""".query[(String, Double)]
+           ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key""".query[(String, Double)]
 
   def annReady(
       kind: VectorKind): Query0[Boolean] =
@@ -197,7 +193,7 @@ object IntelligenceSql:
     val embeddingKind = kind.embeddingKind
     val distance = maximumDistance.max(0.0d).min(2.0d)
     val batchLimit = limit.max(1)
-    val topK = (batchLimit + 1).min(64)
+    val topK = (batchLimit * 2).min(64)
     (fr"""SELECT $pairKind, $embeddingKind, $anchorEmbeddingModel,
                   $anchorDocumentId, right_vector.document_id,
                   left_document.source_table, left_document.source_key, left_document.source_mac,
@@ -212,6 +208,8 @@ object IntelligenceSql:
                       candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
                     ) AS cosine_distance
            FROM""" ++ vectorTable ++ fr"""candidate
+             WHERE candidate.document_id <> $anchorDocumentId
+               AND candidate.embedding_model = $anchorEmbeddingModel
              ORDER BY VEC_COSINE_DISTANCE(
                candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
              ) ASC
@@ -221,9 +219,7 @@ object IntelligenceSql:
              ON left_document.document_id = $anchorDocumentId
            JOIN atheros_search.search_documents right_document
              ON right_document.document_id = right_vector.document_id
-           WHERE right_vector.document_id <> $anchorDocumentId
-             AND right_vector.embedding_model = $anchorEmbeddingModel
-             AND right_vector.cosine_distance <= $distance
+           WHERE right_vector.cosine_distance <= $distance
              AND NOT EXISTS (
                SELECT 1 FROM atheros_search.similarity_pairs pair
                WHERE pair.pair_kind = $pairKind

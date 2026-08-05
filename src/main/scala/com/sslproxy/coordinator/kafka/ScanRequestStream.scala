@@ -40,7 +40,11 @@ object ScanRequestStream:
       }
     ) { lockedRecords =>
       val relevant = lockedRecords.filter(_.decoded.streamName == "proxy.events")
+      val skipped = lockedRecords.filter(_.decoded.streamName != "proxy.events")
       for
+        _ <- skipped.traverse_ { locked =>
+          store.recordSkippedScanRequest(locked.decoded, locked.metadata).value.void
+        }
         resolved <- relevant.traverse { locked =>
           IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }
@@ -76,12 +80,28 @@ object ScanRequestStream:
         }
         _ <- lockedRecords.filter(_.decoded.streamName != "proxy.events")
           .traverse_ { locked =>
-            IO(log.debug("scan_request_consumer",
-              "status" -> "skipped",
-              "stream_name" -> locked.decoded.streamName,
-              "group" -> locked.metadata.consumerGroup,
-              "partition" -> locked.metadata.partition.toString,
-              "offset" -> locked.metadata.offset.toString))
+            store.recordSkippedScanRequest(locked.decoded, locked.metadata).value.flatMap {
+              case Right(_) =>
+                IO(log.debug("scan_request_consumer",
+                  "status" -> "skipped",
+                  "stream_name" -> locked.decoded.streamName,
+                  "group" -> locked.metadata.consumerGroup,
+                  "partition" -> locked.metadata.partition.toString,
+                  "offset" -> locked.metadata.offset.toString))
+              case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
+                LockedTopicConsumer.parkNonRetriable(
+                  producer,
+                  cfg.scanTopic + cfg.dlqSuffix,
+                  cfg.scanConsumer,
+                  locked.record,
+                  error.cause
+                )
+              case Left(error) =>
+                IO.raiseError(new RuntimeException(
+                  s"${error.operation}: ${Option(error.message).getOrElse("")}",
+                  error.cause
+                ))
+            }
           }
       yield ()
     }

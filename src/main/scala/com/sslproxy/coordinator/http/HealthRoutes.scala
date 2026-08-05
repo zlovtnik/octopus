@@ -22,8 +22,11 @@ class HealthRoutes(
   private def readinessResponse: IO[org.http4s.Response[IO]] =
     (
       HealthRoutes.withTimeout(transactor.healthCheck, databaseCheckTimeout),
-      processorReadiness.fold(IO.pure(true))(_.ready)
-    ).tupled.flatMap { case (databaseHealthy, processorsHealthy) =>
+      HealthRoutes.withTimeout(
+        processorReadiness.fold(IO.pure(true))(_.ready),
+        databaseCheckTimeout
+      )
+    ).parTupled.flatMap { case (databaseHealthy, processorsHealthy) =>
       val healthy = databaseHealthy && processorsHealthy
       val status = if healthy then "UP" else "DOWN"
       val json = Json.obj(

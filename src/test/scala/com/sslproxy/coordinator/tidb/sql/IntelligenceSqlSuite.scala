@@ -14,7 +14,8 @@ class IntelligenceSqlSuite extends FunSuite:
     assert(sequence.contains("sequence_row.frame_count <> source.source_event_count"))
     assert(baseline.contains("baseline.sample_count <> source.source_event_count"))
     List(behavior, timing, sequence, baseline).foreach { statement =>
-      assert(statement.trim.endsWith("LIMIT ?"), statement)
+      assert(statement.contains("LIMIT ?"), statement)
+      assert(!statement.trim.endsWith("LIMIT ?"), s"outer LIMIT should be removed: $statement")
     }
 
   test("dynamic similarity identifiers remain closed by VectorKind"):

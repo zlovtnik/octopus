@@ -20,6 +20,7 @@ enum IngestionDisposition(val databaseValue: String):
   case Deduplicated extends IngestionDisposition("duplicate")
   case Retrying extends IngestionDisposition("retrying")
   case Parked extends IngestionDisposition("parked")
+  case Rejected extends IngestionDisposition("rejected")
 
 final case class IngestionDecision(
     disposition: IngestionDisposition,

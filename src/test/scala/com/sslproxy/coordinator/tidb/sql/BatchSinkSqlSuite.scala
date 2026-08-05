@@ -3,8 +3,37 @@ package com.sslproxy.coordinator.tidb.sql
 import munit.FunSuite
 
 class BatchSinkSqlSuite extends FunSuite:
-  private val InsertStatement =
-    raw"(?is)^\s*INSERT\s+INTO\s+\S+\s*\((.*?)\)\s*VALUES\s*\((.*?)\)".r
+  private def topLevelParts(s: String): List[String] =
+    var depth = 0
+    val current = new StringBuilder
+    val parts = scala.collection.mutable.ListBuffer.empty[String]
+    for ch <- s do
+      ch match
+        case '(' => depth += 1; current.append(ch)
+        case ')' => depth -= 1; current.append(ch)
+        case ',' if depth == 0 =>
+          parts += current.toString.trim
+          current.clear()
+        case _ => current.append(ch)
+    if current.nonEmpty then parts += current.toString.trim
+    parts.toList
+
+  private def extractGroup(sql: String, prefix: String): Option[String] =
+    val upperSql = sql.toUpperCase
+    val prefixIdx = upperSql.indexOf(prefix.toUpperCase)
+    if prefixIdx < 0 then return None
+    val parenStart = sql.indexOf('(', prefixIdx + prefix.length)
+    if parenStart < 0 then return None
+    var depth = 1
+    var i = parenStart + 1
+    while i < sql.length && depth > 0 do
+      sql.charAt(i) match
+        case '(' => depth += 1
+        case ')' => depth -= 1
+        case _ =>
+      i += 1
+    if depth == 0 then Some(sql.substring(parenStart + 1, i - 1))
+    else None
 
   private val insertStatements = List(
     "InsertProxyEvents" -> BatchSinkSql.InsertProxyEvents,
@@ -21,13 +50,12 @@ class BatchSinkSqlSuite extends FunSuite:
 
   test("insert statements have one bind placeholder per column"):
     insertStatements.foreach { case (name, statement) =>
-      InsertStatement.findFirstMatchIn(statement) match
-        case Some(statementMatch) =>
-          val columns = statementMatch.group(1)
-          val values = statementMatch.group(2)
-          val columnCount = columns.split(',').count(_.trim.nonEmpty)
+      val columnsOpt = extractGroup(statement, "INSERT INTO")
+      val valuesOpt = extractGroup(statement, "VALUES")
+      (columnsOpt, valuesOpt) match
+        case (Some(columns), Some(values)) =>
+          val columnCount = topLevelParts(columns).count(_.nonEmpty)
           val bindCount = values.count(_ == '?')
-
           assertEquals(bindCount, columnCount, name)
         case _ => fail(s"$name is not a recognized INSERT statement")
     }

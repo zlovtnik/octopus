@@ -56,6 +56,7 @@ object WirelessConsumerService:
       handleBacklogList(
         committable.record.value,
         cfg.backlogListReplyTopic,
+        configuredReplyTopics(cfg),
         store,
         producer,
         cfg.backlogListTopic + kafkaCfg.dlqSuffix
@@ -90,6 +91,7 @@ object WirelessConsumerService:
       handleBacklogPrune(
         committable.record.value,
         cfg.backlogPruneReplyTopic,
+        configuredReplyTopics(cfg),
         store,
         producer,
         cfg.backlogPruneTopic + kafkaCfg.dlqSuffix
@@ -105,7 +107,7 @@ object WirelessConsumerService:
     val settings = consumerSettings(cfg.macLookupConsumer, cfg.maxPollRecords, kafkaCfg.bootstrapServers)
     wirelessStream(settings, cfg.macLookupTopic, cfg.macLookupConsumer, cfg.consumersCount, kafkaCfg, producer) { committable =>
       val payload = committable.record.value
-      handleMacLookup(payload, cfg.macLookupReplyTopic, store, producer).as(committable.offset)
+      handleMacLookup(payload, cfg.macLookupReplyTopic, configuredReplyTopics(cfg), store, producer).as(committable.offset)
     }
 
   def networksAuthorizedStream(
@@ -121,6 +123,7 @@ object WirelessConsumerService:
       handleNetworksAuthorized(
         payload,
         cfg.networksAuthorizedReplyTopic,
+        configuredReplyTopics(cfg),
         store,
         producer
       ).as(committable.offset)
@@ -173,6 +176,7 @@ object WirelessConsumerService:
   private def handleBacklogList(
       payload: String,
       defaultReplyTopic: String,
+      allowedReplyTopics: Set[String],
       store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String
@@ -189,7 +193,7 @@ object WirelessConsumerService:
           "created_at" -> entry.createdAt.toString.asJson
         )
       }.asJson).noSpaces
-      publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic), body)
+      publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic, allowedReplyTopics), body)
     }
 
   private def handleBacklogSynced(
@@ -207,6 +211,7 @@ object WirelessConsumerService:
   private def handleBacklogPrune(
       payload: String,
       defaultReplyTopic: String,
+      allowedReplyTopics: Set[String],
       store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String],
       dlqTopic: String
@@ -215,7 +220,7 @@ object WirelessConsumerService:
       retryDatabase("backlog_prune", payload, dlqTopic, producer) { store.pruneBacklog(now.minus(7L, ChronoUnit.DAYS)).value
       } { pruned =>
         val body = Json.obj("pruned" -> pruned.asJson, "retention_days" -> 7.asJson).noSpaces
-        publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic), body)
+        publishReply(producer, resolveReplyTopic(payload, defaultReplyTopic, allowedReplyTopics), body)
       }
     }
 
@@ -298,6 +303,7 @@ object WirelessConsumerService:
   private def handleMacLookup(
       payload: String,
       defaultReplyTopic: String,
+      allowedReplyTopics: Set[String],
       store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String]
   ): IO[Unit] =
@@ -313,7 +319,7 @@ object WirelessConsumerService:
                 IO(log.warn("mac_lookup", "status" -> "skip",
                   "error" -> errorMessage(err)))
               case Right(Right(Some(reply))) =>
-                val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
+                val replyTopic = resolveReplyTopic(payload, defaultReplyTopic, allowedReplyTopics)
                 IO(log.info("mac_lookup", (("status" -> "found") ::
                   ("reply_topic" -> replyTopic) :: macHashFields)*)) *>
                   publishReply(producer, replyTopic, reply).handleErrorWith { err =>
@@ -329,13 +335,14 @@ object WirelessConsumerService:
   private def handleNetworksAuthorized(
       payload: String,
       defaultReplyTopic: String,
+      allowedReplyTopics: Set[String],
       store: WirelessStore[IO],
       producer: KafkaProducer[IO, String, String]
   ): IO[Unit] =
     if payload == null || payload.isEmpty then IO.unit
     else store.listAuthorizedNetworks.value.flatMap {
         case Right(reply) =>
-          val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
+          val replyTopic = resolveReplyTopic(payload, defaultReplyTopic, allowedReplyTopics)
           IO(log.info("networks_authorized", "status" -> "ok", "reply_topic" -> replyTopic)) *>
             publishReply(producer, replyTopic, reply).handleErrorWith { err =>
               IO(log.error("networks_authorized", "status" -> "reply_publish_failed",
@@ -382,9 +389,13 @@ object WirelessConsumerService:
   private def errorMessage(error: Throwable): String =
     ErrorSanitizer.message(error)
 
-  private[kafka] def resolveReplyTopic(payload: String, defaultTopic: String): String =
+  private[kafka] def resolveReplyTopic(
+      payload: String,
+      defaultTopic: String,
+      configuredReplyTopics: Set[String]
+  ): String =
     extractField(payload, "reply_topic") match
-      case Some(t) if isValidKafkaTopic(t) && isAllowedReplyTopic(t) =>
+      case Some(t) if isValidKafkaTopic(t) && isAllowedReplyTopic(t, configuredReplyTopics) =>
         log.debug("resolve_reply_topic", "status" -> "valid", "topic" -> t)
         t
       case _ =>
@@ -393,12 +404,17 @@ object WirelessConsumerService:
   private[kafka] def isValidKafkaTopic(topic: String): Boolean =
     TopicPattern.matches(topic) && topic != "." && topic != ".."
 
-  private[kafka] def isAllowedReplyTopic(topic: String): Boolean =
+  private[kafka] def isAllowedReplyTopic(topic: String, configuredReplyTopics: Set[String]): Boolean =
       topic == SensorInboxPrefix.dropRight(1) || topic.startsWith(SensorInboxPrefix) ||
-      topic == "wireless.backlog.list.reply" ||
-      topic == "wireless.backlog.prune.reply" ||
-      topic == "wireless.mac.lookup.reply" ||
-      topic == "wireless.networks.authorized.reply"
+      configuredReplyTopics.contains(topic)
+
+  private def configuredReplyTopics(cfg: WirelessConfig): Set[String] =
+    Set(
+      cfg.backlogListReplyTopic,
+      cfg.backlogPruneReplyTopic,
+      cfg.macLookupReplyTopic,
+      cfg.networksAuthorizedReplyTopic
+    )
 
   private[kafka] def extractField(payload: String, field: String): Option[String] =
     parseJson(payload).toOption.flatMap { json =>

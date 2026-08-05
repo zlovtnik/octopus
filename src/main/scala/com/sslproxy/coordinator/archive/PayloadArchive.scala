@@ -73,7 +73,12 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
   ): F[Boolean] =
     value.flatMap {
       case Some(stored)
-          if stored.payloadSha256.isEmpty =>
+          if stored.payloadSha256.isEmpty && stored.size != expectedSize =>
+        Async[F].raiseError(
+          IllegalStateException(s"archive object $objectKey exists with different content")
+        )
+      case Some(stored)
+          if stored.payloadSha256.isEmpty && stored.size == expectedSize =>
         Async[F].pure(false)
       case Some(stored)
           if stored.size == expectedSize && stored.payloadSha256.contains(expectedSha256) =>
@@ -111,8 +116,7 @@ private final class MinioObjectStore(
         val value = client.statObject(
           StatObjectArgs.builder().bucket(bucket).`object`(objectKey).build()
         )
-        val storedSha256 = Option(value.userMetadata().get("sha256"))
-          .flatMap(_.asScala.headOption)
+        val storedSha256 = Option(value.userMetadata().getFirst("sha256"))
         Some(StoredArchiveObject(value.size(), storedSha256))
       catch
         case error: ErrorResponseException

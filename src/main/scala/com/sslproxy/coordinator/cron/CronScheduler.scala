@@ -199,6 +199,11 @@ final class CronScheduler private (
     Stream.awakeEvery[IO](interval).evalMap { _ =>
         val leaseTtl = (interval * 2L).max(30.seconds)
         workRunner.runOnce(processorId, leaseTtl)(_ => operation).void
+          .handleErrorWith { error =>
+            IO(log.error("cron_fenced_tick", error,
+              "status" -> "failed",
+              "processor" -> processorId.value))
+          }
     }
 
   val supportStream: Stream[IO, Unit] =
@@ -231,11 +236,15 @@ final class CronScheduler private (
 
   private def resilient(stream: Stream[IO, Unit], event: String): Stream[IO, Unit] =
     Stream
-      .unfoldEval(()) { state =>
+      .unfoldEval(0) { consecutiveFailures =>
     stream.compile.drain.attempt.flatMap {
           case Right(_) => IO.pure(None)
-          case Left( error) =>IO(log.error(event, error, "status" -> "failed"))
-              .as(Some(((), state)))
+          case Left(error) =>
+            val delay = CronScheduler.restartDelay(consecutiveFailures, cfg.idleSleepBackoffMs.millis)
+            IO(log.error(event, error, "status" -> "failed",
+              "consecutive_failures" -> (consecutiveFailures + 1).toString,
+              "restart_delay_ms" -> delay.toMillis.toString)) *>
+              IO.sleep(delay).as(Some(((), consecutiveFailures + 1)))
     }
       }
       .drain
@@ -252,32 +261,33 @@ final class CronScheduler private (
 
       case Right(pendingCount) =>
         val logPending = IO(log.info("ingest_ledger", "status" -> "pending", "count" -> pendingCount.toString))
-        val throttleCheck = if pendingCount >= budget then
-          IO(log.info("backpressure", "status" -> "throttled",
-            "pending_count" -> pendingCount.toString, "budget" -> budget.toString,
-            "ingest_batch_size" -> cfg.ingestBatchSize.toString))
-        else IO.unit
 
-        logPending *> throttleCheck *>
-          ingestionStore.processPending(
-            ingestConfig.streamNames,
-            cfg.scanMaxAttempts,
-            cfg.scanRetryBackoffSeconds,
-            cfg.ingestBatchSize
-          ).value.flatMap {
-            case Left(err) =>
-              IO(log.error("ingest_ledger", "status" -> "failed",
-                "operation" -> err.operation, "error" -> err.message)) *>
-                IO(metrics.recordIngestInvocation(false)) *>
-                IO.raiseError(databaseFailure(err))
+        if pendingCount >= budget then
+          logPending *>
+            IO(log.info("backpressure", "status" -> "throttled",
+              "pending_count" -> pendingCount.toString, "budget" -> budget.toString,
+              "ingest_batch_size" -> cfg.ingestBatchSize.toString))
+        else
+          logPending *>
+            ingestionStore.processPending(
+              ingestConfig.streamNames,
+              cfg.scanMaxAttempts,
+              cfg.scanRetryBackoffSeconds,
+              cfg.ingestBatchSize
+            ).value.flatMap {
+              case Left(err) =>
+                IO(log.error("ingest_ledger", "status" -> "failed",
+                  "operation" -> err.operation, "error" -> err.message)) *>
+                  IO(metrics.recordIngestInvocation(false)) *>
+                  IO.raiseError(databaseFailure(err))
 
-            case Right(processed) =>
-              IO(metrics.recordIngestInvocation(true)) *>
-                IO(metrics.recordIngestProcessed(processed)) *>
-                IO.whenA(processed > 0)(
-                  IO(log.info("ingest_ledger", "status" -> "processed", "count" -> processed.toString))
-                )
-          }
+              case Right(processed) =>
+                IO(metrics.recordIngestInvocation(true)) *>
+                  IO(metrics.recordIngestProcessed(processed)) *>
+                  IO.whenA(processed > 0)(
+                    IO(log.info("ingest_ledger", "status" -> "processed", "count" -> processed.toString))
+                  )
+            }
     }
 
   private def recoverStaleBatches(): IO[Unit] =
@@ -326,6 +336,9 @@ final class CronScheduler private (
 
 object CronScheduler:
   private val log = StructuredLogger(getClass)
+  private val VerificationRetryMaxAttempts = 5
+  private val VerificationRetryMaxDelay = 5.minutes
+  private val MaxRestartDelay = 5.minutes
 
   def create(
       cfg: CronConfig,
@@ -380,16 +393,36 @@ object CronScheduler:
       verify: IO[Unit],
       retryDelay: FiniteDuration
   ): IO[Unit] =
-    verify.handleErrorWith { error =>
-      TidbErrorClass.classify(error) match
-        case TidbErrorClass.Retryable =>
-          IO(log.warn(
-            "canonical_manifest_verification",
-            "status" -> "retrying",
-            "delay_ms" -> retryDelay.toMillis.toString,
-            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
-          )) *> IO.sleep(retryDelay) *> verifyCanonicalManifestWithRetry(verify, retryDelay)
-        case TidbErrorClass.Permanent =>
-          IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
-            IO.raiseError(error)
-    }
+    def loop(attempt: Int, delay: FiniteDuration): IO[Unit] =
+      verify.handleErrorWith { error =>
+        TidbErrorClass.classify(error) match
+          case TidbErrorClass.Retryable if attempt < VerificationRetryMaxAttempts =>
+            IO(log.warn(
+              "canonical_manifest_verification",
+              "status" -> "retrying",
+              "attempt" -> s"$attempt/$VerificationRetryMaxAttempts",
+              "delay_ms" -> delay.toMillis.toString,
+              "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+            )) *> IO.sleep(delay) *>
+              loop(attempt + 1, (delay * 2L).min(VerificationRetryMaxDelay))
+          case TidbErrorClass.Retryable =>
+            IO(log.error(
+              "canonical_manifest_verification",
+              error,
+              "status" -> "failed",
+              "attempts" -> attempt.toString
+            )) *> IO.raiseError(error)
+          case TidbErrorClass.Permanent =>
+            IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
+              IO.raiseError(error)
+      }
+
+    loop(1, retryDelay)
+
+  private[cron] def restartDelay(
+      consecutiveFailures: Int,
+      baseDelay: FiniteDuration
+  ): FiniteDuration =
+    val shift = consecutiveFailures.max(0).min(20)
+    val scaled = baseDelay.toMillis.max(1L) * (1L << shift)
+    scaled.min(MaxRestartDelay.toMillis).millis

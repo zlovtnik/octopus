@@ -390,13 +390,14 @@ object MaintenanceSql:
            LEFT JOIN wireless_frame_app_signals app_row ON app_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
-           WHERE radio.dedupe_key IS NULL
-              OR qos.dedupe_key IS NULL
-              OR network_row.dedupe_key IS NULL
-              OR app_row.dedupe_key IS NULL
-              OR identity_row.dedupe_key IS NULL
-              OR security_row.dedupe_key IS NULL
-           ORDER BY frame.observed_at, frame.dedupe_key
+           WHERE frame.observed_at >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP(6))
+             AND (radio.dedupe_key IS NULL
+                  OR qos.dedupe_key IS NULL
+                  OR network_row.dedupe_key IS NULL
+                  OR app_row.dedupe_key IS NULL
+                  OR identity_row.dedupe_key IS NULL
+                  OR security_row.dedupe_key IS NULL)
+           ORDER BY frame.observed_at DESC, frame.dedupe_key
            LIMIT $batchLimit
            ON DUPLICATE KEY UPDATE
              details = VALUES(details),

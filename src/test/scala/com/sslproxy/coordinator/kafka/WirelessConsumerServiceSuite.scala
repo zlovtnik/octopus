@@ -3,6 +3,12 @@ package com.sslproxy.coordinator.kafka
 import munit.FunSuite
 
 class WirelessConsumerServiceSuite extends FunSuite:
+  private val ConfiguredReplyTopics = Set(
+    "wireless.backlog.list.reply",
+    "wireless.backlog.prune.reply",
+    "wireless.mac.lookup.reply",
+    "wireless.networks.authorized.reply"
+  )
 
   test("wireless backlog identity requires non-empty dedupe and stream keys") {
     assert(WirelessConsumerService.parseBacklogIdentity("{}").isLeft)
@@ -16,8 +22,8 @@ class WirelessConsumerServiceSuite extends FunSuite:
   }
 
   test("backlog reply topics use the same allowlist as current wireless replies") {
-    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.list.reply"))
-    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.prune.reply"))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.list.reply", ConfiguredReplyTopics))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.backlog.prune.reply", ConfiguredReplyTopics))
   }
 
   // ========== extractField ==========
@@ -61,62 +67,64 @@ class WirelessConsumerServiceSuite extends FunSuite:
   // ========== isAllowedReplyTopic ==========
 
   test("isAllowedReplyTopic accepts configured reply topics"):
-    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.mac.lookup.reply"))
-    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.networks.authorized.reply"))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.mac.lookup.reply", ConfiguredReplyTopics))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.networks.authorized.reply", ConfiguredReplyTopics))
+    assert(WirelessConsumerService.isAllowedReplyTopic("wireless.custom.reply", Set("wireless.custom.reply")))
+    assert(!WirelessConsumerService.isAllowedReplyTopic("wireless.mac.lookup.reply", Set("wireless.custom.reply")))
 
   test("isAllowedReplyTopic accepts sensor inbox prefix"):
-    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.12345.7"))
-    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor."))
+    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.12345.7", ConfiguredReplyTopics))
+    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.", ConfiguredReplyTopics))
 
   test("isAllowedReplyTopic rejects unknown topic"):
-    assert(!WirelessConsumerService.isAllowedReplyTopic("wireless.attacker.reply"))
-    assert(!WirelessConsumerService.isAllowedReplyTopic("_INBOX.other_sensor.123"))
+    assert(!WirelessConsumerService.isAllowedReplyTopic("wireless.attacker.reply", ConfiguredReplyTopics))
+    assert(!WirelessConsumerService.isAllowedReplyTopic("_INBOX.other_sensor.123", ConfiguredReplyTopics))
 
   // ========== resolveReplyTopic ==========
 
   test("resolveReplyTopic uses reply_topic from payload when valid"):
     val json = """{"reply_topic": "wireless.mac.lookup.reply"}"""
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply", Set("wireless.mac.lookup.reply")),
       "wireless.mac.lookup.reply"
     )
 
   test("resolveReplyTopic falls back to default for invalid reply_topic"):
     val json = """{"reply_topic": "bad?topic"}"""
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply", Set.empty),
       "wireless.default.reply"
     )
 
   test("resolveReplyTopic falls back to default for unapproved reply_topic"):
     val json = """{"reply_topic": "wireless.unknown.reply"}"""
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply", Set.empty),
       "wireless.default.reply"
     )
 
   test("resolveReplyTopic accepts sensor inbox as reply topic"):
     val json = """{"reply_topic": "_INBOX.atheros_sensor.abc123.7"}"""
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply", Set.empty),
       "_INBOX.atheros_sensor.abc123.7"
     )
 
   test("resolveReplyTopic falls back to default when no reply_topic field"):
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic("{}", "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic("{}", "wireless.default.reply", Set.empty),
       "wireless.default.reply"
     )
 
   test("resolveReplyTopic falls back to default for empty reply_topic"):
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic("""{"reply_topic": ""}""", "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic("""{"reply_topic": ""}""", "wireless.default.reply", Set.empty),
       "wireless.default.reply"
     )
 
   test("resolveReplyTopic falls back to default for malformed JSON"):
     assertEquals(
-      WirelessConsumerService.resolveReplyTopic("not json", "wireless.default.reply"),
+      WirelessConsumerService.resolveReplyTopic("not json", "wireless.default.reply", Set.empty),
       "wireless.default.reply"
     )
 

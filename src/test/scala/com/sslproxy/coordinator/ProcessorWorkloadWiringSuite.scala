@@ -15,7 +15,7 @@ class ProcessorWorkloadWiringSuite extends FunSuite:
 
     ProcessorId.octopusOwned.foreach { id =>
       val caseName = id.productPrefix
-      val declaration = raw"ProcessorWorkload\(\s*ProcessorId\.$caseName".r
+      val declaration = raw"ProcessorWorkload\(\s*ProcessorId\.$caseName\b".r
       val count = declaration.findAllMatchIn(source).size
       assertEquals(count, 1, s"${id.value} workload declaration count")
     }

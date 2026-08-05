@@ -56,60 +56,66 @@ object IdentityGraphSql:
       .unique
 
     firstSeen.flatMap { case (minimum, maximum) =>
-      val epoch = java.sql.Timestamp.from(java.time.Instant.EPOCH)
-      for
-        cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
-                          cluster_id, cluster_name, cluster_size, first_seen, last_seen,
-                          status, projection_run_id
-                        ) VALUES (
-                          ${value.clusterId}, ${Some(s"identity-${value.clusterId.take(8)}")},
-                          ${value.members.size}, ${minimum.getOrElse(epoch)}, ${maximum.getOrElse(epoch)},
-                          'active', ${value.projectionRunId}
-                        ) ON DUPLICATE KEY UPDATE
-                          cluster_size = VALUES(cluster_size),
-                          first_seen = LEAST(first_seen, VALUES(first_seen)),
-                          last_seen = GREATEST(last_seen, VALUES(last_seen)),
-                          status = 'active',
-                          projection_run_id = VALUES(projection_run_id),
-                          updated_at = CURRENT_TIMESTAMP(6)""".update.run
-        members <- value.members.traverse { mac =>
-          sql"""INSERT INTO atheros_search.identity_cluster_members (
-                 cluster_id, mac, confidence, evidence, first_seen, last_seen
-               )
-               SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
-                      JSON_OBJECT('source', 'approved_merge_decision'),
-                      device.first_seen, device.last_seen
-               FROM devices device
-               WHERE device.mac_id = $mac
-               ON DUPLICATE KEY UPDATE
-                 cluster_id = VALUES(cluster_id),
-                 confidence = VALUES(confidence),
-                 evidence = VALUES(evidence),
-                 first_seen = LEAST(first_seen, VALUES(first_seen)),
-                 last_seen = GREATEST(last_seen, VALUES(last_seen)),
-                 updated_at = CURRENT_TIMESTAMP(6)""".update.run
-        }
-        inventory <- value.members.traverse { mac =>
-          sql"""INSERT INTO atheros_search.inventory_devices (
-                 mac, display_name, location_id, first_registered, last_seen,
-                 active, registered, tags, similarity_cluster_id,
-                 dedup_confidence, known_macs, projection_run_id
-               )
-               SELECT device.mac_id, device.display_name, NULL, device.first_seen, device.last_seen,
-                      1, 0, JSON_ARRAY(), ${value.clusterId}, ${value.confidence},
-                      CAST(${value.members.asJson.noSpaces} AS JSON), ${value.projectionRunId}
-               FROM devices device
-               WHERE device.mac_id = $mac
-               ON DUPLICATE KEY UPDATE
-                 display_name = COALESCE(VALUES(display_name), display_name),
-                 last_seen = GREATEST(last_seen, VALUES(last_seen)),
-                 similarity_cluster_id = VALUES(similarity_cluster_id),
-                 dedup_confidence = VALUES(dedup_confidence),
-                 known_macs = VALUES(known_macs),
-                 projection_run_id = VALUES(projection_run_id),
-                 updated_at = CURRENT_TIMESTAMP(6)""".update.run
-        }
-      yield cluster + members.sum + inventory.sum
+      def persistRows(min: java.sql.Timestamp, max: java.sql.Timestamp): ConnectionIO[Int] =
+        for
+          cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
+                            cluster_id, cluster_name, cluster_size, first_seen, last_seen,
+                            status, projection_run_id
+                          ) VALUES (
+                            ${value.clusterId}, ${Some(s"identity-${value.clusterId.take(8)}")},
+                            ${value.members.size}, $min, $max,
+                            'active', ${value.projectionRunId}
+                          ) ON DUPLICATE KEY UPDATE
+                            cluster_size = VALUES(cluster_size),
+                            first_seen = LEAST(first_seen, VALUES(first_seen)),
+                            last_seen = GREATEST(last_seen, VALUES(last_seen)),
+                            status = 'active',
+                            projection_run_id = VALUES(projection_run_id),
+                            updated_at = CURRENT_TIMESTAMP(6)""".update.run
+          members <- value.members.traverse { mac =>
+            sql"""INSERT INTO atheros_search.identity_cluster_members (
+                   cluster_id, mac, confidence, evidence, first_seen, last_seen
+                 )
+                 SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
+                        JSON_OBJECT('source', 'approved_merge_decision'),
+                        device.first_seen, device.last_seen
+                 FROM devices device
+                 WHERE device.mac_id = $mac
+                 ON DUPLICATE KEY UPDATE
+                   cluster_id = VALUES(cluster_id),
+                   confidence = VALUES(confidence),
+                   evidence = VALUES(evidence),
+                   first_seen = LEAST(first_seen, VALUES(first_seen)),
+                   last_seen = GREATEST(last_seen, VALUES(last_seen)),
+                   updated_at = CURRENT_TIMESTAMP(6)""".update.run
+          }
+          inventory <- value.members.traverse { mac =>
+            sql"""INSERT INTO atheros_search.inventory_devices (
+                   mac, display_name, location_id, first_registered, last_seen,
+                   active, registered, tags, similarity_cluster_id,
+                   dedup_confidence, known_macs, projection_run_id
+                 )
+                 SELECT device.mac_id, device.display_name, NULL, device.first_seen, device.last_seen,
+                        1, 0, JSON_ARRAY(), ${value.clusterId}, ${value.confidence},
+                        CAST(${value.members.asJson.noSpaces} AS JSON), ${value.projectionRunId}
+                 FROM devices device
+                 WHERE device.mac_id = $mac
+                 ON DUPLICATE KEY UPDATE
+                   display_name = COALESCE(VALUES(display_name), display_name),
+                   last_seen = GREATEST(last_seen, VALUES(last_seen)),
+                   similarity_cluster_id = VALUES(similarity_cluster_id),
+                   dedup_confidence = VALUES(dedup_confidence),
+                   known_macs = VALUES(known_macs),
+                   projection_run_id = VALUES(projection_run_id),
+                   updated_at = CURRENT_TIMESTAMP(6)""".update.run
+          }
+        yield cluster + members.sum + inventory.sum
+
+      (minimum, maximum) match
+        case (Some(min), Some(max)) => persistRows(min, max)
+        case (Some(min), None)      => persistRows(min, min)
+        case (None, Some(max))      => persistRows(max, max)
+        case (None, None)           => 0.pure[ConnectionIO]
     }
     }
 
@@ -127,11 +133,11 @@ object IdentityGraphSql:
                           FROM devices device
                           ORDER BY device.last_seen DESC, device.mac_id
                           LIMIT $batchLimit
-                          ON DUPLICATE KEY UPDATE
-                            label = VALUES(label),
-                            node_payload = VALUES(node_payload),
-                            observed_at = GREATEST(observed_at, VALUES(observed_at)),
-                            updated_at = CURRENT_TIMESTAMP(6)""".update.run
+                    ON DUPLICATE KEY UPDATE
+                      label = VALUES(label),
+                      node_payload = VALUES(node_payload),
+                      observed_at = GREATEST(COALESCE(observed_at, VALUES(observed_at)), COALESCE(VALUES(observed_at), observed_at)),
+                      updated_at = CURRENT_TIMESTAMP(6)""".update.run
       apNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                         node_id, node_kind, label, node_payload, location_id, sensor_id,
                         normalized_mac, normalized_ssid, is_threat, observed_at, projection_run_id
@@ -149,7 +155,7 @@ object IdentityGraphSql:
                         node_payload = VALUES(node_payload),
                         location_id = COALESCE(VALUES(location_id), location_id),
                         sensor_id = COALESCE(VALUES(sensor_id), sensor_id),
-                        observed_at = GREATEST(observed_at, VALUES(observed_at)),
+                        observed_at = GREATEST(COALESCE(observed_at, VALUES(observed_at)), COALESCE(VALUES(observed_at), observed_at)),
                         updated_at = CURRENT_TIMESTAMP(6)""".update.run
       clusterNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                              node_id, node_kind, label, node_payload,
@@ -163,11 +169,11 @@ object IdentityGraphSql:
                            WHERE cluster.status = 'active'
                            ORDER BY cluster.last_seen DESC, cluster.cluster_id
                            LIMIT $batchLimit
-                           ON DUPLICATE KEY UPDATE
-                             label = VALUES(label),
-                             node_payload = VALUES(node_payload),
-                             observed_at = GREATEST(observed_at, VALUES(observed_at)),
-                             updated_at = CURRENT_TIMESTAMP(6)""".update.run
+                    ON DUPLICATE KEY UPDATE
+                      label = VALUES(label),
+                      node_payload = VALUES(node_payload),
+                      observed_at = GREATEST(COALESCE(observed_at, VALUES(observed_at)), COALESCE(VALUES(observed_at), observed_at)),
+                      updated_at = CURRENT_TIMESTAMP(6)""".update.run
       edges <- sql"""INSERT INTO atheros_search.graph_edges (
                       edge_id, source_node_id, target_node_id, edge_kind,
                       weight, label, evidence, observed_at, projection_run_id
@@ -184,7 +190,7 @@ object IdentityGraphSql:
                     ON DUPLICATE KEY UPDATE
                       weight = VALUES(weight),
                       evidence = VALUES(evidence),
-                      observed_at = GREATEST(observed_at, VALUES(observed_at)),
+                      observed_at = GREATEST(COALESCE(observed_at, VALUES(observed_at)), COALESCE(VALUES(observed_at), observed_at)),
                       updated_at = CURRENT_TIMESTAMP(6)""".update.run
       identityEdges <- sql"""INSERT INTO atheros_search.graph_edges (
                               edge_id, source_node_id, target_node_id, edge_kind,
@@ -200,6 +206,6 @@ object IdentityGraphSql:
                             ON DUPLICATE KEY UPDATE
                               weight = VALUES(weight),
                               evidence = VALUES(evidence),
-                              observed_at = GREATEST(observed_at, VALUES(observed_at)),
+                              observed_at = GREATEST(COALESCE(observed_at, VALUES(observed_at)), COALESCE(VALUES(observed_at), observed_at)),
                               updated_at = CURRENT_TIMESTAMP(6)""".update.run
     yield deviceNodes + apNodes + clusterNodes + edges + identityEdges

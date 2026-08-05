@@ -6,7 +6,8 @@ import com.sslproxy.coordinator.cutover.CutoffKey
 import com.sslproxy.coordinator.domain.{
   BrokerRecordMetadata,
   IngestionDecision,
-  ResolvedScanRequestRecord
+  ResolvedScanRequestRecord,
+  ScanRequestRecord
 }
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
 
@@ -45,6 +46,12 @@ final class TidbIngestionStore(repository: TidbRepository) extends IngestionStor
       metadata: BrokerRecordMetadata
   ): DbResultT[IO, IngestionDecision] =
     EitherT(repository.recordScanRequestWithEvidence(record, metadata))
+
+  def recordSkippedScanRequest(
+      record: ScanRequestRecord,
+      metadata: BrokerRecordMetadata
+  ): DbResultT[IO, Unit] =
+    EitherT(repository.recordSkippedScanRequestEvidence(record, metadata))
 
   def findHydrationCandidates(
       after: Option[SyncEventHydrationCandidate],

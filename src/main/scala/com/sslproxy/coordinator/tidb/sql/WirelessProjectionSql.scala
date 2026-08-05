@@ -80,11 +80,11 @@ object WirelessProjectionSql:
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
       val trimmed = fr0"TRIM($candidateText)"
-      val scientific = fr0"REGEXP_LIKE($trimmed, '^[+-]?[0-9]([.][0-9]+)?[eE][+-]?[0-9]{1,3}$$')"
+      val scientific = fr0"REGEXP_LIKE($trimmed, '^[+-]?[0-9]+([.][0-9]+)?[eE][+-]?[0-9]{1,3}$$')"
       val exponent =
         fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', -1) ELSE NULL END AS SIGNED)"
       val mantissa =
-        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', 1) ELSE NULL END AS DECIMAL(18,16))"
+        fr0"CAST(CASE WHEN $scientific THEN SUBSTRING_INDEX(LOWER($trimmed), 'e', 1) ELSE NULL END AS DECIMAL(38,16))"
       val safeText =
         fr0"""CASE
              WHEN $candidateType IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'STRING')

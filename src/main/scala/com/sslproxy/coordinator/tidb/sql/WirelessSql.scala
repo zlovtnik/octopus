@@ -47,11 +47,12 @@ object WirelessSql:
   ): Fragment =
     val normalizedSsid = ssid.trim
     val normalizedBssid = observedBssid.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+    val normalizedMac = clientMac.trim.toLowerCase(java.util.Locale.ROOT)
     sql"""INSERT INTO wireless_clients (
             ssid, client_mac, known_bssid, first_seen, last_seen,
             probe_count, location_id, last_probe_batch_id
           ) VALUES (
-            $normalizedSsid, $clientMac,
+            $normalizedSsid, $normalizedMac,
             (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
              WHERE authorized.ssid = $normalizedSsid AND authorized.enabled = TRUE
                AND ($normalizedBssid IS NULL OR authorized.bssid = $normalizedBssid)

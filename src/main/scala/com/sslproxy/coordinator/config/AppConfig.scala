@@ -302,6 +302,9 @@ object AppConfig:
 
   private def kafkaErrors(config: KafkaCfg, isDevelopment: Boolean): List[String] =
     List(
+      Option.when(config.dlqSuffix.isEmpty)(
+        "kafka.dlq-suffix must not be empty"
+      ),
       Option.when(config.maxPollRecords <= 0)(
         "kafka.max-poll-records must be positive"
       ),

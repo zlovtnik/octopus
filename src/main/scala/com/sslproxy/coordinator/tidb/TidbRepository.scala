@@ -6,7 +6,7 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.cutover.CutoffKey
 import com.sslproxy.coordinator.archive.ArchiveReceipt
-import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord}
+import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ResolvedScanRequestRecord, ScanRequestRecord}
 import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
@@ -94,6 +94,23 @@ class TidbRepository(xa: Transactor[IO],
       runDb("tidb.record_scan_requests_with_evidence") {
         records.traverse((record, metadata) => ingestScanRequest(record, Some(metadata)))
       }
+
+  /** Persists durable bootstrap evidence for a broker record this consumer
+    * deliberately skipped (stream filter), so the partition offset advance is
+    * visible to loadConsumerOffsets across restarts.
+    */
+  def recordSkippedScanRequestEvidence(
+      record: ScanRequestRecord,
+      metadata: BrokerRecordMetadata
+  ): IO[Either[DatabaseError, Unit]] =
+    runDb("tidb.record_skipped_scan_request") {
+      validateBrokerMetadata(metadata) *>
+        existingBrokerEvidence(metadata).flatMap {
+          case Some(existing) => verifyBrokerEvidence(metadata, record.dedupeKey, existing)
+          case None =>
+            persistBrokerEvidence(metadata, record.dedupeKey, IngestionDisposition.Rejected)
+        }
+    }
 
   def findSyncEventsNeedingHydration(
       after: Option[SyncEventHydrationCandidate],

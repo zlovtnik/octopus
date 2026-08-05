@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.util.ErrorSanitizer
 
 private[kafka] object KafkaDatabaseResult:
   def require[A](effect: IO[Either[DatabaseError, A]]): IO[A] =
@@ -17,6 +18,6 @@ private final case class KafkaDatabaseWriteFailure(
     detail: String,
     underlying: Throwable
 ) extends RuntimeException(
-      s"durable Kafka handler failed during $operation: ${Option(detail).getOrElse("")}",
+      s"durable Kafka handler failed during $operation: ${ErrorSanitizer.sanitize(Option(detail).getOrElse(""))}",
       underlying
     )

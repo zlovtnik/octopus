@@ -83,12 +83,12 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       val scratchTombstones = s"`$scratchDatabase`.`sync_event_tombstones`"
 
       requireScratchTablesAbsent(connection, scratchDatabase)
+      cleanupAuthorized.set(true)
 
       val setup = connection.createStatement()
       setup.execute(s"CREATE TABLE $scratchTable LIKE $sourceTable")
       setup.execute(s"CREATE TABLE $scratchTombstones LIKE $sourceTombstones")
       setup.close()
-      cleanupAuthorized.set(true)
 
       val copy = connection.prepareStatement(
         s"""INSERT INTO $scratchTable

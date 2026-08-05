@@ -187,7 +187,8 @@ object IngestionSql:
 
   def advanceCursor(streamName: String, cursorEnd: String): ConnectionIO[Unit] =
     for
-      current <- cursor(streamName).option
+      current <- sql"""SELECT cursor_value FROM sync_cursors WHERE stream_name = $streamName FOR UPDATE"""
+        .query[String].option
       _ <- current match
         case Some(value) if isNumericCursor(value) != isNumericCursor(cursorEnd) =>
           doobie.free.connection.raiseError(

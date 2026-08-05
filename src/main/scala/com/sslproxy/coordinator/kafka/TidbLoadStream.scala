@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.persistence.{IngestionStore, ResultStore}
-import com.sslproxy.coordinator.tidb.TidbLoadHandler
+import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbLoadHandler}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -47,15 +47,40 @@ object TidbLoadStream:
             "group" -> locked.metadata.consumerGroup,
             "partition" -> locked.metadata.partition.toString,
             "offset" -> locked.metadata.offset.toString)) *>
-            dbSemaphore.permit.use(_ => handler.handle(load)).map(result => (locked, load, result))
+            dbSemaphore.permit.use(_ => handler.handle(load)).attempt.flatMap {
+              case Right(result) => IO.pure(Some((locked, load, result)))
+              case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
+                LockedTopicConsumer.parkNonRetriable(
+                  producer,
+                  cfg.loadTopic + cfg.dlqSuffix,
+                  cfg.loadConsumer,
+                  locked.record,
+                  error
+                ).as(None)
+              case Left(error) => IO.raiseError(error)
+            }
         }
+        successful = handled.flatten
         _ <-
-          KafkaDatabaseResult.require(
+          if successful.isEmpty then IO.unit
+          else
             resultStore.recordLoadResultsWithEvidence(
-              handled.map { case (locked, load, result) => (load, result, locked.metadata) }
-            ).value
-          )
-        _ <- handled.traverse_ { case (_, load, result) =>
+              successful.map { case (locked, load, result) => (load, result, locked.metadata) }
+            ).value.flatMap {
+              case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
+                successful.traverse_ { case (locked, _, _) =>
+                  LockedTopicConsumer.parkNonRetriable(
+                    producer,
+                    cfg.loadTopic + cfg.dlqSuffix,
+                    cfg.loadConsumer,
+                    locked.record,
+                    error.cause
+                  )
+                }
+              case other =>
+                KafkaDatabaseResult.require(IO.pure(other)).void
+            }
+        _ <- successful.traverse_ { case (_, load, result) =>
           IO(log.info("tidb_load_consumer", "status" -> "durable",
             "batch_id" -> load.batchId, "result_status" -> result.status,
             "row_count" -> result.rowCount.toString))

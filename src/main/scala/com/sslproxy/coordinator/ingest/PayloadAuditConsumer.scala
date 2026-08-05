@@ -110,8 +110,7 @@ object PayloadAuditConsumer:
 
         val writeAction = if validRecords.nonEmpty then store.recordScanRequests(validRecords).value.flatMap {
             case Right(count) =>
-              IO(metrics.recordPayloadAuditIngested(count)) *>
-                IO(metrics.recordSyncEventHydrated(count.toLong))
+              IO(metrics.recordPayloadAuditIngested(count))
             case Left(dbErr) =>
               IO(log.error("payload_audit_ingest", "status" -> "failed",
                 "operation" -> dbErr.operation, "error" -> dbErr.message)) *>

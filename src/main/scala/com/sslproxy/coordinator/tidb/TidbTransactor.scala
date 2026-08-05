@@ -642,7 +642,11 @@ object TidbTransactor:
       case other => Some(Json.fromString(other.toString))
 
   private[tidb] def parsedJson(value: Option[String]): Option[Json] =
-    value.flatMap(circeParser.parse(_).toOption)
+    value.flatMap { raw =>
+      circeParser.parse(raw).toOption match
+        case Some(json) => Some(json)
+        case None       => Some(Json.fromString(raw))
+    }
 
   private final case class WirelessAlertRow(
       rowSequence: Long,

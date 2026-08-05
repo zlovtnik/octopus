@@ -73,7 +73,7 @@ final class BatchDispatchService(
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
-      store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value.flatMap {
+    store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value.flatMap {
       case Right(disposition) =>
         val status = disposition match
           case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"

@@ -128,6 +128,9 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
     suspendedHolder.set(if suspended then 1L else 0L)
 
   def recordProcessorState(processorId: String, lifecycle: String, restartCount: Int): Unit =
+    if !ProcessorLifecycleValues.contains(lifecycle) then
+      log.warn("processor_lifecycle_unknown", "processor" -> processorId,
+        "lifecycle" -> lifecycle)
     ProcessorLifecycleValues.foreach { state =>
       val key = s"$processorId:$state"
       val holder = processorLifecycleGauges.computeIfAbsent(key, _ =>

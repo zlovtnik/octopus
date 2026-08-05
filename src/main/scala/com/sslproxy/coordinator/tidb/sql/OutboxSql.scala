@@ -42,7 +42,8 @@ object OutboxSql:
                  FROM outbox_events
                  WHERE owner_id = $ownerId
                    AND lease_token = $token
-                   AND status = 'leased'"""
+                   AND status = 'leased'
+                 LIMIT 1"""
             .query[(String, String, String, String, Int, Int, String, String, Long)]
             .unique
             .map { case (id, topic, key, payload, attempts, maxAttempts, owner, leaseToken, fence) =>
@@ -110,7 +111,8 @@ object OutboxSql:
                           AND status = 'leased'
                           AND owner_id = ${record.lease.ownerId}
                           AND lease_token = ${record.lease.token}
-                          AND fence = ${record.lease.fence}""".update.run
+                          AND fence = ${record.lease.fence}
+                          AND lease_expires_at > CURRENT_TIMESTAMP(6)""".update.run
       _ <- if updated == 1 then publishAttempt(record, status, Some(errorText))
            else doobie.free.connection.raiseError(IllegalStateException(s"lost outbox lease ${record.outboxId}"))
     yield ()

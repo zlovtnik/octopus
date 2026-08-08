@@ -31,8 +31,8 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-RUN addgroup -S coordinator \
-    && adduser -S -G coordinator coordinator
+RUN addgroup -g 1000 coordinator \
+    && adduser -u 1000 -G coordinator -S coordinator
 
 # Copy the assembled fat JAR
 COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.*/octopus.jar /app/octopus.jar
@@ -49,6 +49,6 @@ EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=20s \
   CMD wget -qO- http://localhost:8081/health || exit 1
 
-USER coordinator
+USER 1000:1000
 
 ENTRYPOINT ["java", "-jar", "/app/octopus.jar"]

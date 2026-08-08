@@ -178,7 +178,7 @@ Important gates:
 | `SEARCH_RETENTION_DAYS` | `30` | Age before a terminal superseded search document becomes deletion-eligible |
 | `SYNC_EVENT_TOMBSTONE_RETENTION_DAYS` | `45` | Replay-protection period after event deletion |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and TiDB boundary spans |
-| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; Helm uses `traceidratio` |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
 | `OCTOPUS_CUTOVER_DEV_BYPASS` | `false` | Development-only bypass; production rejects it |
 
 TiDB uses `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`,

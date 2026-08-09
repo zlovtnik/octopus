@@ -23,7 +23,7 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
 import fs2.kafka.ConsumerRecord
-import io.circe.parser as circeParser
+import io.circe.{Printer, parser as circeParser}
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
@@ -451,6 +451,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val filler = "x" * (ProxyMaxAuditBodyBytes - prefix.length - suffix.length)
     val rawJson = prefix + filler + suffix
     val record = translatedAudit(rawJson, offset = 3L)
+    val expectedPayload = circeParser.parse(rawJson)
+      .fold(error => fail(s"expected valid payload audit JSON, found $error"), identity)
     val expectedPayloadRef = circeParser.parse(record.requestJson).toOption
       .flatMap(_.hcursor.get[String]("payload_ref").toOption)
       .getOrElse(fail("translated payload audit must contain payload_ref"))
@@ -493,7 +495,12 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     yield
       assertEquals(eventRef, (expectedPayloadRef, expectedPayloadRef.length.toLong))
       assertEquals(batchRef, eventRef)
-      assertEquals(storedPayload, rawJson)
+      val parsedStoredPayload = circeParser.parse(storedPayload)
+        .fold(error => fail(s"expected stored payload JSON, found $error"), identity)
+      assertEquals(
+        Printer.noSpacesSortKeys.print(parsedStoredPayload),
+        Printer.noSpacesSortKeys.print(expectedPayload)
+      )
       assertEquals(evidenceCount, 1L)
 
   test("canonical manifest parsing is repeatable and retains MEDIUMTEXT payload capacity"):

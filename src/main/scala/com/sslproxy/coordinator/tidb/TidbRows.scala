@@ -14,7 +14,10 @@ final case class TidbRowSet(
     wirelessSignalAnomaly: List[WirelessSignalAnomalyInsert],
     wirelessPmfAttack: List[WirelessPmfAttackInsert],
     wirelessClientInventory: List[WirelessClientInventoryInsert],
-    wirelessProbeRequests: List[WirelessProbeRequestInsert]
+    wirelessProbeRequests: List[WirelessProbeRequestInsert],
+    wirelessAttackSequence: List[WirelessAttackSequenceInsert],
+    wirelessSequenceAlert: List[WirelessSequenceAlertInsert],
+    wirelessHandshakeAlert: List[WirelessHandshakeAlertInsert]
 ):
   def inputRowCount(target: TidbSinkTarget): Int =
     target match
@@ -28,6 +31,9 @@ final case class TidbRowSet(
       case TidbSinkTarget.WirelessPmfAttack       => wirelessPmfAttack.size
       case TidbSinkTarget.WirelessClientInventory => wirelessClientInventory.size
       case TidbSinkTarget.WirelessProbeRequests   => wirelessProbeRequests.size
+      case TidbSinkTarget.WirelessAttackSequence  => wirelessAttackSequence.size
+      case TidbSinkTarget.WirelessSequenceAlert   => wirelessSequenceAlert.size
+      case TidbSinkTarget.WirelessHandshakeAlert  => wirelessHandshakeAlert.size
 
 object TidbRowSet:
   val empty: TidbRowSet = TidbRowSet(
@@ -41,7 +47,10 @@ object TidbRowSet:
     wirelessSignalAnomaly = Nil,
     wirelessPmfAttack = Nil,
     wirelessClientInventory = Nil,
-    wirelessProbeRequests = Nil
+    wirelessProbeRequests = Nil,
+    wirelessAttackSequence = Nil,
+    wirelessSequenceAlert = Nil,
+    wirelessHandshakeAlert = Nil
   )
 
 // ---------------------------------------------------------------------------
@@ -257,4 +266,48 @@ final case class WirelessProbeRequestInsert(
     firstSeen: OffsetDateTime,
     lastSeen: OffsetDateTime,
     probeCount: Long
+)
+
+final case class WirelessAttackSequenceInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    ssid: Option[String],
+    attackChain: Option[String],
+    firstEventAt: OffsetDateTime,
+    lastEventAt: OffsetDateTime,
+    factorBreakdown: Option[String],
+    explanation: Option[String],
+    rawJson: Option[String]
+)
+
+final case class WirelessSequenceAlertInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    sessionKey: String,
+    sourceMac: Option[String],
+    bssid: Option[String],
+    ssid: Option[String],
+    attackTag: String,
+    sequence: Option[String],
+    firstEventAt: OffsetDateTime,
+    lastEventAt: OffsetDateTime,
+    factorBreakdown: Option[String],
+    explanation: Option[String],
+    rawJson: Option[String]
+)
+
+final case class WirelessHandshakeAlertInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    iface: String,
+    bssid: String,
+    clientMac: String,
+    signalDbm: Option[Long],
+    pmkidSha256: Option[String]
 )

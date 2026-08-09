@@ -1,111 +1,102 @@
 package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
-import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.domain.SyncLoad
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.tidb.TidbRepository
-import fs2.kafka.*
-import io.circe.syntax.*
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
+import com.sslproxy.coordinator.persistence.OutboxStore
+import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord}
+import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
+import com.sslproxy.coordinator.observability.StructuredLogger
+import io.opentelemetry.api.trace.SpanKind
 
-class BatchDispatchService(
-    repo: TidbRepository,
+import scala.concurrent.duration.*
+
+/** Publishes the transactional TiDB outbox. A broker acknowledgement followed
+  * by a process crash can produce the same stable message key again; the
+  * receiving transaction is therefore required to deduplicate that key.
+  */
+final class BatchDispatchService(
+    store: OutboxStore[IO],
     producer: KafkaProducer[IO, String, String],
-    cfg: KafkaCfg,
     metrics: CoordinatorMetrics,
-    loadStreamNames: List[String],
-    batchMaxAttempts: Int
+    ownerId: String,
+    destinationTopics: List[String],
+    leaseSeconds: Int,
+    retryBaseSeconds: Int,
+    retryMaxSeconds: Int
 ):
-  import BatchDispatchService.log
+  import BatchDispatchService.{DispatchResult, log}
 
-  def dispatchNext(): IO[Boolean] =
-    repo.getNextBatch(loadStreamNames).flatMap {
-      case Left(err) =>
-        log.error("event=batch_dispatch status=db_error operation={} error=\"{}\"",
-          err.operation, sanitize(err.message))
-        IO.pure(false)
-
-      case Right(None) =>
-        IO.pure(false)
-
-      case Right(Some(load)) =>
-        dispatchBatch(load)
+  def dispatchNext(): IO[DispatchResult] = store.claim(ownerId, destinationTopics, leaseSeconds).value.flatMap {
+      case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
+        IO(log.error("outbox_claim", "status" -> "db_error",
+          "operation" -> error.operation, "error" -> sanitized))
+          .as(DispatchResult.StopDraining)
+      case Right(None) => IO.pure(DispatchResult.NoWork)
+      case Right(Some(record)) => publish(record)
     }
 
-  private def dispatchBatch(load: SyncLoad): IO[Boolean] =
-    validateLoad(load) match
-      case Left(msg) =>
-        log.error("event=batch_dispatch status=validation_failed batch_id={} error=\"{}\"",
-          load.batchId, sanitize(msg))
-        markFailed(load.asJson.noSpaces, msg) *> IO.pure(false)
+  private def publish(record: OutboxRecord): IO[DispatchResult] =
+    val brokerRecord = ProducerRecord(
+      record.destinationTopic,
+      record.messageKey,
+      record.payload
+    )
 
-      case Right(()) =>
-        val dispatchJson = load.asJson.noSpaces
-        log.info("event=batch_dispatch status=selected batch_id={} stream_name={} attempt={}",
-          load.batchId, load.streamName, load.attempt)
-
-        val record = ProducerRecord(cfg.loadTopic, load.jobId, dispatchJson)
-        producer.produce(ProducerRecords.one(record)).flatten.attempt.flatMap {
-          case Right(_) =>
-            log.info("event=batch_dispatch status=published batch_id={} topic={}",
-              load.batchId, cfg.loadTopic)
-            IO(metrics.recordBatchDispatched()) *> IO.pure(true)
-
-          case Left(publishErr) =>
-            log.error("event=batch_dispatch status=publish_failed batch_id={} error=\"{}\"",
-              load.batchId, sanitize(publishErr.getMessage))
-            handlePublishFailure(dispatchJson, load, publishErr) *> IO.pure(false)
-        }
-
-  private def validateLoad(load: SyncLoad): Either[String, Unit] =
-    if load == null then Left("load payload must not be null")
-    else if load.jobId.isBlank then Left("job_id must not be empty")
-    else if load.batchId.isBlank then Left("batch_id must not be empty")
-    else if load.streamName.isBlank then Left("stream_name must not be empty")
-    else if load.payloadRef.isBlank then Left("payload_ref must not be empty")
-    else Right(())
-
-  private def markFailed(batchJson: String, errorText: String): IO[Unit] =
-    repo.markBatchDispatchFailed(batchJson, errorText, batchMaxAttempts).flatMap {
-      case Left(err) =>
-        log.error("event=batch_dispatch status=mark_failed_error operation={} error=\"{}\"",
-          err.operation, sanitize(err.message))
-        releaseBatch(batchJson, errorText)
-      case Right(()) =>
-        IO(log.info("event=batch_dispatch status=marked_failed"))
+    CoordinatorTracing.span(
+      "kafka.publish.outbox",
+      SpanKind.PRODUCER,
+      "messaging.system" -> "kafka",
+      "messaging.destination.name" -> record.destinationTopic,
+      "messaging.message.id" -> record.messageKey,
+      "outbox.fence" -> record.lease.fence.toString
+    ) {
+      producer.produce(ProducerRecords.one(brokerRecord)).flatten
+    }.timeout((leaseSeconds.toLong * 900L).max(1L).millis).attempt.flatMap {
+      case Right(_) => acknowledge(record)
+      case Left(error) => fail(record, error)
     }
 
-  private def handlePublishFailure(batchJson: String, load: SyncLoad, err: Throwable): IO[Unit] =
-    repo.markBatchDispatchFailed(batchJson, err.getMessage, batchMaxAttempts).flatMap {
-      case Left(dbErr) =>
-        log.error("event=batch_dispatch status=mark_failed_error batch_id={} operation={} error=\"{}\"",
-          load.batchId, dbErr.operation, sanitize(dbErr.message))
-        releaseBatch(batchJson, load, err.getMessage)
-      case Right(()) =>
-        IO(log.info("event=batch_dispatch status=marked_failed batch_id={}", load.batchId))
+  private def acknowledge(record: OutboxRecord): IO[DispatchResult] = store.acknowledge(record).value.flatMap {
+      case Right(true) =>
+        IO(metrics.recordBatchDispatched()) *>
+          IO(log.info("outbox_publish", "status" -> "published",
+            "outbox_id" -> record.outboxId, "topic" -> record.destinationTopic,
+            "message_key" -> record.messageKey, "fence" -> record.lease.fence.toString))
+            .as(DispatchResult.Dispatched)
+      case Right(false) =>
+        IO(log.warn("outbox_publish", "status" -> "lease_lost_after_publish",
+          "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString))
+          .as(DispatchResult.ContinueDraining)
+      case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
+        IO(log.error("outbox_publish", "status" -> "ack_failed",
+          "outbox_id" -> record.outboxId, "operation" -> error.operation,
+          "error" -> sanitized)).as(DispatchResult.StopDraining)
     }
 
-  private def releaseBatch(batchJson: String, errorText: String): IO[Unit] =
-    repo.releaseBatchDispatch(batchJson, errorText).flatMap {
-      case Left(err) =>
-        IO(log.error("event=batch_dispatch status=release_failed operation={} error=\"{}\"",
-          err.operation, sanitize(err.message)))
-      case Right(()) =>
-        IO(log.info("event=batch_dispatch status=released"))
+  private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
+    val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
+    store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value.flatMap {
+      case Right(disposition) =>
+        val status = disposition match
+          case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"
+          case OutboxFailureDisposition.Parked         => "parked"
+        IO(log.warn("outbox_publish", "status" -> status,
+          "outbox_id" -> record.outboxId, "attempt" -> record.attemptCount.toString,
+          "error" -> message)).as(DispatchResult.StopDraining)
+      case Left(error) =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
+        IO(log.error("outbox_publish", "status" -> "fail_transition_failed",
+          "outbox_id" -> record.outboxId, "operation" -> error.operation,
+          "error" -> sanitized)).as(DispatchResult.StopDraining)
     }
-
-  private def releaseBatch(batchJson: String, load: SyncLoad, errorText: String): IO[Unit] =
-    repo.releaseBatchDispatch(batchJson, errorText).flatMap {
-      case Left(err) =>
-        IO(log.error("event=batch_dispatch status=release_failed batch_id={} operation={} error=\"{}\"",
-          load.batchId, err.operation, sanitize(err.message)))
-      case Right(()) =>
-        IO(log.info("event=batch_dispatch status=released batch_id={}", load.batchId))
-    }
-
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
 object BatchDispatchService:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
+
+  enum DispatchResult:
+    case NoWork
+    case Dispatched
+    case ContinueDraining
+    case StopDraining

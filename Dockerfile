@@ -7,7 +7,7 @@
 FROM azul/zulu-openjdk-alpine:21 AS builder
 
 # Install sbt
-ARG SBT_VERSION=1.11.6
+ARG SBT_VERSION=1.12.14
 RUN apk add --no-cache bash curl tar \
     && curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
       -o /tmp/sbt.tgz \
@@ -17,7 +17,7 @@ RUN apk add --no-cache bash curl tar \
 
 WORKDIR /app
 COPY services/octopus/ ./
-RUN sbt assembly
+RUN sbt --batch assembly
 
 # ---- Stage 2: Runtime with Azul Zulu JRE 21 (Alpine) ----
 FROM azul/zulu-openjdk-alpine:21-jre
@@ -31,8 +31,8 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-RUN addgroup -S coordinator \
-    && adduser -S -G coordinator coordinator
+RUN addgroup -g 1000 coordinator \
+    && adduser -u 1000 -G coordinator -S coordinator
 
 # Copy the assembled fat JAR
 COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.*/octopus.jar /app/octopus.jar
@@ -49,6 +49,6 @@ EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=20s \
   CMD wget -qO- http://localhost:8081/health || exit 1
 
-USER coordinator
+USER 1000:1000
 
 ENTRYPOINT ["java", "-jar", "/app/octopus.jar"]

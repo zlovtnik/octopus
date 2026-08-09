@@ -15,7 +15,7 @@
 
 services:
   tidb:
-    image: pingcap/tidb:latest
+    image: pingcap/tidb:v8.5.7
     container_name: tidb-coordinator
     ports:
       - "4000:4000"    # MySQL protocol port

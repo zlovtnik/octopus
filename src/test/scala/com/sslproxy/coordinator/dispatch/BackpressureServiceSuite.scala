@@ -17,17 +17,18 @@ class BackpressureServiceSuite extends CatsEffectSuite:
   private val ingestBatchSize = 1000
   private val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
 
+  private def service(pending: IO[Either[DatabaseError, Long]]): IO[BackpressureService] =
+    BackpressureService.create(cfg, ingestBatchSize, pending, metrics)
+
   test("budget is ingestBatchSize * multiplier"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(0L)), metrics)
-    assertEquals(svc.budget, 4000L)
+    service(IO.pure(Right(0L))).map(svc => assertEquals(svc.budget, 4000L))
 
   test("recovery threshold is budget / 2"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(0L)), metrics)
-    assertEquals(svc.recoveryThreshold, 2000L)
+    service(IO.pure(Right(0L))).map(svc => assertEquals(svc.recoveryThreshold, 2000L))
 
   test("not suspended when pending count is below budget"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(500L)), metrics)
     for
+      svc <- service(IO.pure(Right(500L)))
       count <- svc.checkAndAct
       suspended <- svc.isConsumerSuspended
     yield
@@ -35,8 +36,8 @@ class BackpressureServiceSuite extends CatsEffectSuite:
       assertEquals(suspended, false)
 
   test("suspend when pending count reaches budget"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(4000L)), metrics)
     for
+      svc <- service(IO.pure(Right(4000L)))
       count <- svc.checkAndAct
       suspended <- svc.isConsumerSuspended
     yield
@@ -44,8 +45,8 @@ class BackpressureServiceSuite extends CatsEffectSuite:
       assertEquals(suspended, true)
 
   test("stay suspended when pending count remains above recovery threshold"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(4000L)), metrics)
     for
+      svc <- service(IO.pure(Right(4000L)))
       _ <- svc.checkAndAct
       _ <- svc.checkAndAct
       suspended <- svc.isConsumerSuspended
@@ -55,7 +56,7 @@ class BackpressureServiceSuite extends CatsEffectSuite:
   test("resume when pending count falls to recovery threshold after suspension"):
     for
       countRef <- cats.effect.kernel.Ref[IO].of(Right(5000L): Either[DatabaseError, Long])
-      svc = BackpressureService(cfg, ingestBatchSize, countRef.getAndSet(Right(5000L)), metrics)
+      svc <- service(countRef.get)
       _ <- svc.checkAndAct
       suspended1 <- svc.isConsumerSuspended
       _ <- countRef.set(Right(1500L))

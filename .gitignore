@@ -10,7 +10,8 @@ Thumbs.db
 *.userosscache
 *.sln.docstates
 .metals/
-/metals/metals.lock.db
+.bloop/
+
 
 # Node.js
 node_modules/

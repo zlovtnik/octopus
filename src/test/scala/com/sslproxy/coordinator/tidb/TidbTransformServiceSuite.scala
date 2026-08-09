@@ -23,6 +23,14 @@ class TidbTransformServiceSuite extends FunSuite:
     assertEquals(result.proxyEvents.size, 1)
     assertEquals(result.blockedEvents.size, 0)
 
+  test("transform ProxyEvents bounds blocked risk scores to DECIMAL(10,4)"):
+    val high = parse("""{"type":"tls_scan","host":"high.example","time":"2026-07-20T12:00:00Z","blocked":true,"risk_score":1000000}""").toOption.get
+    val low = parse("""{"type":"tls_scan","host":"low.example","time":"2026-07-20T12:00:00Z","blocked":true,"metrics":{"risk_score":-1000000}}""").toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.ProxyEvents, List(high, low))
+
+    assertEquals(result.blockedEvents.map(_.riskScore), List(Some(999999.9999d), Some(-999999.9999d)))
+
   test("transform ProxyPayloadAudit creates audit records"):
     val row = parse("""{"host": "example.com", "observed_at": "2026-07-20T12:00:00Z", "byte_offset": 0}""").toOption.get
     val result = TidbTransformService.transform(TidbSinkTarget.ProxyPayloadAudit, List(row))
@@ -67,6 +75,41 @@ class TidbTransformServiceSuite extends FunSuite:
     val result = TidbTransformService.transform(TidbSinkTarget.WirelessProbeRequests, List(row))
     assertEquals(result.wirelessProbeRequests.size, 1)
     assertEquals(result.wirelessProbeRequests.head.ssid, "TestNet")
+
+  test("transform attack sequence represents an absent SSID as None"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1",
+        |"first_event_at":"2026-07-20T11:59:00Z","last_event_at":"2026-07-20T12:00:00Z"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessAttackSequence, List(row))
+
+    assertEquals(result.wirelessAttackSequence.size, 1)
+    assertEquals(result.wirelessAttackSequence.head.ssid, None)
+
+  test("transform attack sequence preserves an empty hidden SSID"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1","ssid":"",
+        |"first_event_at":"2026-07-20T11:59:00Z","last_event_at":"2026-07-20T12:00:00Z"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessAttackSequence, List(row))
+
+    assertEquals(result.wirelessAttackSequence.head.ssid, Some(""))
+
+  test("transform handshake alerts accepts detected_at and minimizes handshake evidence"):
+    val row = parse(
+      """{"detected_at":"2026-07-20T12:00:00Z","sensor_id":"s1","location_id":"l1",
+        |"interface":"wlan0","bssid":"aa:bb:cc:dd:ee:01","client_mac":"aa:bb:cc:dd:ee:02",
+        |"pmkid":"sensitive-pmkid"}""".stripMargin
+    ).toOption.get
+
+    val result = TidbTransformService.transform(TidbSinkTarget.WirelessHandshakeAlert, List(row))
+    val alert = result.wirelessHandshakeAlert.head
+
+    assertEquals(alert.detectedAt.toString, "2026-07-20T12:00Z")
+    assertEquals(alert.pmkidSha256.map(_.length), Some(64))
+    assert(!alert.toString.contains("sensitive-pmkid"))
 
   test("inputRowCount returns correct counts"):
     val row = parse("""{"type": "tls_scan", "host": "a.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get

@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.tidb
 
-import io.circe.{Encoder, Json, JsonObject}
+import io.circe.{Decoder, DecodingFailure, Encoder, HCursor, Json, JsonObject}
 
 final case class TidbResult(
     jobId: String,
@@ -15,6 +15,38 @@ final case class TidbResult(
 )
 
 object TidbResult:
+  given Decoder[TidbResult] = (cursor: HCursor) =>
+    for
+      jobId <- cursor.downField("job_id").as[String]
+      batchId <- cursor.downField("batch_id").as[String]
+      status <- cursor.downField("status").as[String]
+      rowCount <- cursor.downField("row_count").as[Int]
+      checksum <- cursor.downField("checksum").as[Option[String]].map(_.getOrElse(""))
+      errorClass <- cursor.downField("error_class").as[Option[String]].map(_.getOrElse(""))
+      retryableValue <- cursor.downField("retryable").as[Option[Boolean]]
+      retryableDerived = errorClass == TidbErrorClass.Retryable.wireValue
+      retryable <- retryableValue match
+        case Some(value) if value != retryableDerived =>
+          Left(DecodingFailure(
+            s"retryable=$value conflicts with error_class=$errorClass",
+            cursor.history
+          ))
+        case Some(value) => Right(value)
+        case None        => Right(retryableDerived)
+      errorText <- cursor.downField("error_text").as[Option[String]].map(_.getOrElse(""))
+      finishedAt <- cursor.downField("finished_at").as[String]
+    yield TidbResult(
+      jobId,
+      batchId,
+      status,
+      rowCount,
+      checksum,
+      retryable,
+      errorClass,
+      errorText,
+      finishedAt
+    )
+
   given Encoder[TidbResult] = (r: TidbResult) =>
     Json.fromJsonObject(JsonObject(
       "job_id"      -> Json.fromString(r.jobId),

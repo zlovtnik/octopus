@@ -5,7 +5,6 @@ import com.sslproxy.coordinator.util.Sha256Utils
 import munit.*
 
 import java.nio.charset.StandardCharsets
-import java.util.Base64
 
 class PayloadAuditConsumerSuite extends FunSuite:
 
@@ -61,7 +60,7 @@ class PayloadAuditConsumerSuite extends FunSuite:
     val body = json.getBytes(StandardCharsets.UTF_8)
     val sha256 = Sha256Utils.sha256Hex(body)
     val dedupeKey = Sha256Utils.sha256Hex("proxy.payload_audit:" + sha256)
-    val expectedPayloadRef = s"inline://json/${Base64.getUrlEncoder.withoutPadding.encodeToString(body)}"
+    val expectedPayloadRef = s"sha256://$sha256"
 
     import io.circe.parser.decode as circeDecode
     import io.circe.Json
@@ -79,6 +78,8 @@ class PayloadAuditConsumerSuite extends FunSuite:
     val record = result.toOption.get
     assertEquals(circeDecode[Json](record.requestJson).toOption.get, circeDecode[Json](expectedRequest).toOption.get)
     assertEquals(record.payloadJson, json)
+    assertEquals(record.sourceRecordSha256, sha256)
+    assertEquals(record.eventPayloadSha256, sha256)
 
   test("empty message is treated as empty"):
     val result = translateRecord(
@@ -93,5 +94,4 @@ class PayloadAuditConsumerSuite extends FunSuite:
     )
     assert(result.isLeft)
     assertEquals(result.swap.toOption.get, PayloadAuditError.EmptyMessage)
-
 

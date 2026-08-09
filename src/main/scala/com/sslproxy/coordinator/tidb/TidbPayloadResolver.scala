@@ -1,5 +1,6 @@
 package com.sslproxy.coordinator.tidb
 
+import com.sslproxy.coordinator.domain.{ResolvedScanRequestRecord, ScanRequestRecord}
 import io.circe.Json
 import io.circe.JsonObject
 
@@ -8,6 +9,10 @@ import java.util.Base64
 
 /** Resolves payload_ref strings to JSON and extracts row arrays per sink target. */
 class TidbPayloadResolver(syncOutboxDir: String):
+
+  def resolve(record: ScanRequestRecord): ResolvedScanRequestRecord =
+    ResolvedScanRequestRecord.from(record, resolvePayload(record.payloadRef))
+      .fold(throw _, identity)
 
   def resolvePayload(payloadRef: String): String =
     val ref = if payloadRef == null then "" else payloadRef

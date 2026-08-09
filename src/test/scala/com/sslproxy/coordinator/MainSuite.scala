@@ -1,0 +1,55 @@
+package com.sslproxy.coordinator
+
+import cats.effect.IO
+import com.sslproxy.coordinator.config.RuntimeConfig
+import fs2.Stream
+import munit.CatsEffectSuite
+
+import scala.concurrent.duration.*
+
+class MainSuite extends CatsEffectSuite:
+
+  test("database worker permits use the configured connection reserve"):
+    assertEquals(Main.dbWorkerPermits(20, 2), 18L)
+    assertEquals(Main.dbWorkerPermits(20, 5), 15L)
+
+  test("database worker permits retain one worker for small pools"):
+    assertEquals(Main.dbWorkerPermits(2, 1), 1L)
+    assertEquals(Main.dbWorkerPermits(1, 1), 1L)
+
+  test("runtime flags start both processor and consumer lanes"):
+    Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
+    ).compile.toList.map(values => assertEquals(values.toSet, Set("processor", "consumer", "required")))
+
+  test("runtime flags do not start disabled lanes"):
+    val processorOnly = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
+    )
+    val consumerOnly = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = false, consumersEnabled = true),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
+    )
+    val disabled = Main.enabledRuntimeStreams(
+      RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
+      Stream.emit("processor").covary[IO],
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
+    )
+
+    for
+      processors <- processorOnly.take(2).compile.toList
+      consumers <- consumerOnly.take(2).compile.toList
+      disabledOutcome <- IO.race(IO.sleep(50.millis), disabled.compile.drain)
+    yield
+      assertEquals(processors.toSet, Set("processor", "required"))
+      assertEquals(consumers.toSet, Set("consumer", "required"))
+      assertEquals(disabledOutcome, Left(()))

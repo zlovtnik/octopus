@@ -21,6 +21,16 @@ class TidbSinkTargetSuite extends FunSuite:
     assertEquals(TidbSinkTarget.fromStreamName("wireless.client_inventory"), Some(TidbSinkTarget.WirelessClientInventory))
     assertEquals(TidbSinkTarget.fromStreamName("wireless.probe_requests"), Some(TidbSinkTarget.WirelessProbeRequests))
 
+  test("handshake alert accepts the canonical and firmware topic names"):
+    assertEquals(
+      TidbSinkTarget.fromStreamName("wireless.alert.handshake"),
+      Some(TidbSinkTarget.WirelessHandshakeAlert)
+    )
+    assertEquals(
+      TidbSinkTarget.fromStreamName("wifi.alert.handshake"),
+      Some(TidbSinkTarget.WirelessHandshakeAlert)
+    )
+
   test("checksumTag is non-empty for all targets"):
     for target <- TidbSinkTarget.values do
       assert(target.checksumTag.nonEmpty, s"${target} has empty checksumTag")

@@ -1,5 +1,6 @@
 package com.sslproxy.coordinator.tidb
 
+import com.sslproxy.coordinator.util.Sha256Utils
 import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -7,6 +8,11 @@ import JsonFields.*
 
 /** Pure JSON → case class transforms. */
 object TidbTransformService:
+
+  // proxy_blocked_host_rollups.risk_score is DECIMAL(10,4). Keep an extreme
+  // source score from rolling back the proxy event that owns the rollup.
+  private val MinRollupRiskScore = -999999.9999d
+  private val MaxRollupRiskScore = 999999.9999d
 
   def transform(target: TidbSinkTarget, rows: List[Json]): TidbRowSet =
     target match
@@ -20,6 +26,9 @@ object TidbTransformService:
       case TidbSinkTarget.WirelessPmfAttack       => TidbRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows))
       case TidbSinkTarget.WirelessClientInventory => TidbRowSet.empty.copy(wirelessClientInventory = transformClientInventory(rows))
       case TidbSinkTarget.WirelessProbeRequests   => TidbRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows))
+      case TidbSinkTarget.WirelessAttackSequence  => TidbRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows))
+      case TidbSinkTarget.WirelessSequenceAlert   => TidbRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows))
+      case TidbSinkTarget.WirelessHandshakeAlert  => TidbRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows))
 
   private def transformProxyRows(rows: List[Json]): TidbRowSet =
     val proxyRows = List.newBuilder[ProxyEventInsert]
@@ -96,7 +105,9 @@ object TidbTransformService:
           host = proxyRow.host,
           blockedBytes = blockedBytes,
           frequencyHz = optionalDouble(row, "frequency_hz").orElse(nestedDouble(row, "metrics", "frequency_hz")),
-          riskScore = optionalDouble(row, "risk_score").orElse(nestedDouble(row, "metrics", "risk_score")),
+          riskScore = boundedRollupRiskScore(
+            optionalDouble(row, "risk_score").orElse(nestedDouble(row, "metrics", "risk_score"))
+          ),
           category = optionalString(row, "category"),
           verdict = verdict,
           tarpitHeldMs = optionalLong(row, "tarpit_held_ms").getOrElse(0L),
@@ -113,6 +124,9 @@ object TidbTransformService:
           asnOrg = optionalString(row, "asn_org")
         )
       )
+
+  private def boundedRollupRiskScore(score: Option[Double]): Option[Double] =
+    score.map(value => Math.max(MinRollupRiskScore, Math.min(MaxRollupRiskScore, value)))
 
   private def transformWirelessAudit(rows: List[Json]): List[WirelessAuditFrameInsert] =
     rows.zipWithIndex.map { case (row, index) =>
@@ -132,7 +146,7 @@ object TidbTransformService:
         transmitterMac = optionalString(row, "transmitter_mac"),
         receiverMac = optionalString(row, "receiver_mac"),
         destinationBssid = optionalString(row, "destination_bssid"),
-        ssid = optionalString(row, "ssid"),
+        ssid = row.hcursor.get[String]("ssid").toOption,
         signalDbm = optionalLong(row, "signal_dbm"),
         sequenceNumber = optionalLong(row, "sequence_number"),
         rawLen = requiredLong(row, "raw_len", "wireless.audit"),
@@ -289,6 +303,59 @@ object TidbTransformService:
         firstSeen = requiredTimestamp(row, "first_seen", "wireless.probe.flush"),
         lastSeen = requiredTimestamp(row, "last_seen", "wireless.probe.flush"),
         probeCount = requiredLong(row, "probe_count", "wireless.probe.flush")
+      )
+    }
+
+  private def transformAttackSequence(rows: List[Json]): List[WirelessAttackSequenceInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessAttackSequenceInsert(
+        rowSequence = rowSequence(index, "wireless.alert.attack_sequence"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.attack_sequence"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.attack_sequence"),
+        locationId = requiredString(row, "location_id", "wireless.alert.attack_sequence"),
+        ssid = presentString(row, "ssid"),
+        attackChain = jsonArrayString(row, "attack_chain"),
+        firstEventAt = requiredTimestamp(row, "first_event_at", "wireless.alert.attack_sequence"),
+        lastEventAt = requiredTimestamp(row, "last_event_at", "wireless.alert.attack_sequence"),
+        factorBreakdown = jsonArrayString(row, "factor_breakdown"),
+        explanation = jsonArrayString(row, "explanation"),
+        rawJson = rawJson(row)
+      )
+    }
+
+  private def transformSequenceAlert(rows: List[Json]): List[WirelessSequenceAlertInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessSequenceAlertInsert(
+        rowSequence = rowSequence(index, "wireless.alert.sequence"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.sequence"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.sequence"),
+        locationId = requiredString(row, "location_id", "wireless.alert.sequence"),
+        sessionKey = requiredString(row, "session_key", "wireless.alert.sequence"),
+        sourceMac = optionalString(row, "source_mac"),
+        bssid = optionalString(row, "bssid"),
+        ssid = presentString(row, "ssid"),
+        attackTag = requiredString(row, "attack_tag", "wireless.alert.sequence"),
+        sequence = jsonArrayString(row, "sequence"),
+        firstEventAt = requiredTimestamp(row, "first_event_at", "wireless.alert.sequence"),
+        lastEventAt = requiredTimestamp(row, "last_event_at", "wireless.alert.sequence"),
+        factorBreakdown = jsonArrayString(row, "factor_breakdown"),
+        explanation = jsonArrayString(row, "explanation"),
+        rawJson = rawJson(row)
+      )
+    }
+
+  private def transformHandshakeAlert(rows: List[Json]): List[WirelessHandshakeAlertInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessHandshakeAlertInsert(
+        rowSequence = rowSequence(index, "wireless.alert.handshake"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.handshake"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.handshake"),
+        locationId = requiredString(row, "location_id", "wireless.alert.handshake"),
+        iface = requiredString(row, "interface", "wireless.alert.handshake"),
+        bssid = requiredString(row, "bssid", "wireless.alert.handshake"),
+        clientMac = requiredString(row, "client_mac", "wireless.alert.handshake"),
+        signalDbm = optionalLong(row, "signal_dbm"),
+        pmkidSha256 = optionalString(row, "pmkid").map(Sha256Utils.sha256Hex)
       )
     }
 

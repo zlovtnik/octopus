@@ -27,3 +27,9 @@ trait TidbSink:
   def insertWirelessClientInventory(batchId: String, rows: List[WirelessClientInventoryInsert]): IO[Long]
 
   def insertWirelessProbeRequests(batchId: String, rows: List[WirelessProbeRequestInsert]): IO[Long]
+
+  def insertWirelessAttackSequence(batchId: String, rows: List[WirelessAttackSequenceInsert]): IO[Long]
+
+  def insertWirelessSequenceAlert(batchId: String, rows: List[WirelessSequenceAlertInsert]): IO[Long]
+
+  def insertWirelessHandshakeAlert(batchId: String, rows: List[WirelessHandshakeAlertInsert]): IO[Long]

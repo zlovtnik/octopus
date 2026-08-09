@@ -2,76 +2,88 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
+import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbResult}
+import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
+import com.sslproxy.coordinator.persistence.{IngestionStore, ResultStore}
+import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbLoadHandler}
 import fs2.Stream
-import fs2.kafka.*
-import io.circe.Json
-import io.circe.parser.parse
-import io.circe.syntax.*
-import org.slf4j.LoggerFactory
-
-import scala.concurrent.duration.*
+import fs2.kafka.KafkaProducer
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 object TidbLoadStream:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def run(
-      components: KafkaComponents,
+      cfg: KafkaCfg,
+      artifact: VerifiedCutoverArtifact,
+      ingestionStore: IngestionStore[IO],
+      resultStore: ResultStore[IO],
       handler: TidbLoadHandler,
+      producer: KafkaProducer[IO, String, String],
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    val cfg = components.config
-    val parallelism = 4
-    components.consumer
-      .partitionedStream
-      .map { partitionStream =>
-        partitionStream
-          .filter(_.record.topic == cfg.loadTopic)
-          .evalMap { committable =>
-            dbSemaphore.permit.use { _ =>
-              val record = committable.record
-              val json = record.value
-
-              (for
-                load <- IO.fromEither(KafkaComponents.deserializeLoad(json))
-                _    <- IO(log.info("event=tidb_load_consumer status=processing batch_id={} stream_name={}",
-                           load.batchId, load.streamName))
-                result <- handler.handle(load)
-                _      <- produceResult(components, cfg, result)
-                _      <- IO(log.info("event=tidb_load_consumer status=completed batch_id={} status={} row_count={}",
-                           load.batchId, result.status, result.rowCount))
-              yield ()).handleErrorWith { err =>
-                IO(log.error("event=tidb_load_consumer status=failed error=\"{}\"", err.getMessage)) *>
-                produceDlq(components, cfg, record, err)
-              }.as(committable.offset)
-            }
-          }
+    LockedTopicConsumer.stream(cfg, cfg.loadConsumer, cfg.loadTopic, artifact, producer,
+      KafkaComponents.deserializeLoad,
+      ingestionStore.loadConsumerOffsets(cfg.loadConsumer, cfg.loadTopic).value.flatMap {
+        case Left(err) =>
+          IO(log.error("tidb_load_consumer",
+            "status" -> "offset_load_failed",
+            "consumer_group" -> cfg.loadConsumer,
+            "topic" -> cfg.loadTopic,
+            "operation" -> err.operation,
+            "error" -> err.message)) *>
+            IO.raiseError[Set[CutoffKey]](
+              new RuntimeException("cutover offset authorization unavailable"))
+        case Right(cutoffs) =>
+          IO.pure(cutoffs)
       }
-      .parJoin(parallelism.max(1))
-      .through(commitBatch(cfg.pollTimeoutMs))
-
-  private def produceResult(
-      components: KafkaComponents,
-      cfg: KafkaCfg,
-      result: TidbResult
-  ): IO[Unit] =
-    val record = ProducerRecord(cfg.resultTopic, result.jobId, result.asJson.noSpaces)
-    components.producer.produce(ProducerRecords.one(record)).flatten.void
-
-  private def produceDlq(
-      components: KafkaComponents,
-      cfg: KafkaCfg,
-      record: ConsumerRecord[String, String],
-      err: Throwable
-  ): IO[Unit] =
-    val dlqTopic = cfg.loadTopic + cfg.dlqSuffix
-    val original = parse(record.value).getOrElse(Json.fromString(record.value))
-    val error = Option(err.getMessage).fold(Json.Null)(Json.fromString)
-    val dlqValue = Json.obj("original" -> original, "error" -> error).noSpaces
-    val dlqRecord = ProducerRecord(dlqTopic, record.key, dlqValue)
-    components.producer.produce(ProducerRecords.one(dlqRecord)).flatten.void
-
-  private def commitBatch(timeoutMs: Long): fs2.Pipe[IO, CommittableOffset[IO], Unit] =
-    _.groupWithin(50, timeoutMs.millis)
-      .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
+    ) { lockedRecords =>
+      for
+        handled <- lockedRecords.traverse { locked =>
+          val load = locked.decoded
+          IO(log.info("tidb_load_consumer", "status" -> "processing",
+            "batch_id" -> load.batchId, "stream_name" -> load.streamName,
+            "group" -> locked.metadata.consumerGroup,
+            "partition" -> locked.metadata.partition.toString,
+            "offset" -> locked.metadata.offset.toString)) *>
+            dbSemaphore.permit.use(_ => handler.handle(load)).attempt.flatMap {
+              case Right(result) => IO.pure(Some((locked, load, result)))
+              case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
+                LockedTopicConsumer.parkNonRetriable(
+                  producer,
+                  cfg.loadTopic + cfg.dlqSuffix,
+                  cfg.loadConsumer,
+                  locked.record,
+                  error
+                ).as(None)
+              case Left(error) => IO.raiseError(error)
+            }
+        }
+        successful = handled.flatten
+        _ <-
+          if successful.isEmpty then IO.unit
+          else
+            resultStore.recordLoadResultsWithEvidence(
+              successful.map { case (locked, load, result) => (load, result, locked.metadata) }
+            ).value.flatMap {
+              case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
+                successful.traverse_ { case (locked, _, _) =>
+                  LockedTopicConsumer.parkNonRetriable(
+                    producer,
+                    cfg.loadTopic + cfg.dlqSuffix,
+                    cfg.loadConsumer,
+                    locked.record,
+                    error.cause
+                  )
+                }
+              case other =>
+                KafkaDatabaseResult.require(IO.pure(other)).void
+            }
+        _ <- successful.traverse_ { case (_, load, result) =>
+          IO(log.info("tidb_load_consumer", "status" -> "durable",
+            "batch_id" -> load.batchId, "result_status" -> result.status,
+            "row_count" -> result.rowCount.toString))
+        }
+      yield ()
+    }

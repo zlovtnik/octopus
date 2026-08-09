@@ -444,7 +444,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(state._5, "pending")
       assertEquals(state._6, 1L)
 
-  test("maximum accepted payload audit persists a payload_ref beyond the TEXT limit"):
+  test("maximum accepted payload audit persists a compact payload_ref and stores full payload in payload column"):
     requireDocker()
     val prefix = """{"observed_at":"2026-07-25T20:02:00Z","body":""""
     val suffix = "\"}"
@@ -456,7 +456,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .getOrElse(fail("translated payload audit must contain payload_ref"))
 
     assertEquals(rawJson.getBytes(StandardCharsets.UTF_8).length, ProxyMaxAuditBodyBytes)
-    assert(expectedPayloadRef.getBytes(StandardCharsets.UTF_8).length > 65_535)
+    assert(expectedPayloadRef.startsWith("sha256://"))
+    assert(expectedPayloadRef.getBytes(StandardCharsets.UTF_8).length < 128)
 
     for
       decision <- persist(record, offset = 3L)
@@ -473,6 +474,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[(String, Long)]
         .unique
         .transact(xa)
+      storedPayload <- sql"""SELECT CAST(payload AS CHAR)
+                             FROM sync_events
+                             WHERE dedupe_key = ${decision.dedupeKey}
+                               AND stream_name = 'proxy.payload_audit'"""
+        .query[String]
+        .unique
+        .transact(xa)
       evidenceCount <- sql"""SELECT COUNT(*)
                              FROM ingestion_evidence
                              WHERE topic = 'proxy.payload_audit'
@@ -485,6 +493,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     yield
       assertEquals(eventRef, (expectedPayloadRef, expectedPayloadRef.length.toLong))
       assertEquals(batchRef, eventRef)
+      assertEquals(storedPayload, rawJson)
       assertEquals(evidenceCount, 1L)
 
   test("canonical manifest parsing is repeatable and retains MEDIUMTEXT payload capacity"):

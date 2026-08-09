@@ -17,7 +17,7 @@ RUN apk add --no-cache bash curl tar \
 
 WORKDIR /app
 COPY services/octopus/ ./
-RUN sbt --batch assembly
+RUN sbt -Dsbt.watch.mode=polling --batch assembly
 
 # ---- Stage 2: Runtime with Azul Zulu JRE 21 (Alpine) ----
 FROM azul/zulu-openjdk-alpine:21-jre

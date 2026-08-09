@@ -77,6 +77,7 @@ object OutboxSql:
     for
       updated <- sql"""UPDATE outbox_events
                         SET status = 'failed',
+                            published_at = CURRENT_TIMESTAMP(6),
                             owner_id = NULL,
                             lease_token = NULL,
                             lease_expires_at = NULL,

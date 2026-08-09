@@ -240,3 +240,9 @@ object IngestionSql:
 
   def cursor(streamName: String): Query0[String] =
     sql"SELECT cursor_value FROM sync_cursors WHERE stream_name = $streamName".query[String]
+
+  def payloadBySha256(payloadSha256: String): Query0[String] =
+    sql"""SELECT CAST(payload AS CHAR) FROM sync_events
+           WHERE payload_sha256 = $payloadSha256
+             AND payload IS NOT NULL
+           LIMIT 1""".query[String]

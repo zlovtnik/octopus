@@ -8,7 +8,8 @@ class TidbLoadHandler(
     payloadResolver: TidbPayloadResolver,
     transformService: TidbTransformService.type,
     sink: TidbSink,
-    clock: TidbClock.type
+    clock: TidbClock.type,
+    payloadLookup: String => IO[Option[String]]
 ):
   import TidbLoadHandler.log
 
@@ -53,7 +54,16 @@ class TidbLoadHandler(
       case None         => IO.raiseError(IllegalArgumentException(s"unsupported stream_name ${load.streamName}"))
 
   private def resolvePayload(load: TidbLoad): IO[String] =
-    IO.blocking(payloadResolver.resolvePayload(load.payloadRef))
+    val ref = load.payloadRef
+    if ref.startsWith("sha256://") then
+      val sha = ref.substring("sha256://".length())
+      payloadLookup(sha).flatMap {
+        case Some(payload) => IO.pure(payload)
+        case None          => IO.raiseError(new IllegalArgumentException(
+          s"payload_ref sha256 lookup returned no result for $sha"))
+      }
+    else
+      IO.blocking(payloadResolver.resolvePayload(ref))
 
   private def parseRows(target: TidbSinkTarget, payload: String): IO[List[Json]] =
     IO.blocking(payloadResolver.payloadRows(target, payload))

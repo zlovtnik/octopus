@@ -106,7 +106,9 @@ object Main extends IOApp.Simple:
                     val tiDbRepo = new TidbRepository(tiDbDoobieTx, Some(dbSemaphore))
                     KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
                       val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-                      val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+                      val payloadLookup: String => IO[Option[String]] = sha =>
+                        IngestionSql.payloadBySha256(sha).unique.attempt.transact(tiDbDoobieTx).map(_.toOption)
+                      val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock, payloadLookup)
                       val ingestionStore = new TidbIngestionStore(tiDbRepo)
                       val outboxStore = new TidbOutboxStore(tiDbRepo)
                       val projectionStore = new TidbProjectionStore(tiDbRepo)

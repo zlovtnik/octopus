@@ -29,7 +29,9 @@ import com.sslproxy.coordinator.processor.{
   SearchRetentionProcessor
 }
 import com.sslproxy.coordinator.tidb.*
+import com.sslproxy.coordinator.tidb.sql.IngestionSql
 import doobie.Transactor
+import doobie.implicits.*
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -106,8 +108,8 @@ object Main extends IOApp.Simple:
                     val tiDbRepo = new TidbRepository(tiDbDoobieTx, Some(dbSemaphore))
                     KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
                       val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-                      val payloadLookup: String => IO[Option[String]] = sha =>
-                        IngestionSql.payloadBySha256(sha).unique.attempt.transact(tiDbDoobieTx).map(_.toOption)
+                      def payloadLookup(sha: String): IO[Option[String]] =
+                        IngestionSql.payloadBySha256(sha).unique.transact(tiDbDoobieTx).attempt.map(_.toOption)
                       val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock, payloadLookup)
                       val ingestionStore = new TidbIngestionStore(tiDbRepo)
                       val outboxStore = new TidbOutboxStore(tiDbRepo)

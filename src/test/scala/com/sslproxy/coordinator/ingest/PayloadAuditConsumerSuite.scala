@@ -5,7 +5,6 @@ import com.sslproxy.coordinator.util.Sha256Utils
 import munit.*
 
 import java.nio.charset.StandardCharsets
-import java.util.Base64
 
 class PayloadAuditConsumerSuite extends FunSuite:
 
@@ -61,7 +60,7 @@ class PayloadAuditConsumerSuite extends FunSuite:
     val body = json.getBytes(StandardCharsets.UTF_8)
     val sha256 = Sha256Utils.sha256Hex(body)
     val dedupeKey = Sha256Utils.sha256Hex("proxy.payload_audit:" + sha256)
-    val expectedPayloadRef = s"inline://json/${Base64.getUrlEncoder.withoutPadding.encodeToString(body)}"
+    val expectedPayloadRef = s"sha256://$sha256"
 
     import io.circe.parser.decode as circeDecode
     import io.circe.Json

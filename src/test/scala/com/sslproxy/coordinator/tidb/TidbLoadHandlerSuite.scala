@@ -37,7 +37,8 @@ class TidbLoadHandlerSuite extends CatsEffectSuite:
       new TidbPayloadResolver("/tmp"),
       TidbTransformService,
       new FailingProxyEventSink(cause),
-      TidbClock
+      TidbClock,
+      _ => IO.pure(None)
     )
 
     Resource

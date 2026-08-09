@@ -6,6 +6,11 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 class HealthRoutesSuite extends CatsEffectSuite:
+  test("completed database health checks remain healthy"):
+    HealthRoutes.withTimeout(IO.pure(true), 5.millis).map { healthy =>
+      assertEquals(healthy, true)
+    }
+
   test("stalled database health checks time out as unhealthy"):
     HealthRoutes.withTimeout(IO.never, 5.millis).map { healthy =>
       assertEquals(healthy, false)

@@ -181,7 +181,7 @@ class HydrationNullTruncationReproSuite extends CatsEffectSuite:
       "scientific-and-whitespace" ->
         """{"sensor_id":"fuzz-sci","signal_dbm":" -42 ","noise_dbm":"4 2","tsft":"1e19",
           |"risk_score":"1e309","schema_version":"1e5","fragment_number":" 42",
-          |"channel_number":"42 "}""".stripMargin.replaceAll("\\s+", ""),
+          |"channel_number":"42 "}""".stripMargin.linesIterator.mkString,
       "boolean-int-cross-types" ->
         """{"sensor_id":"fuzz-bool","retry":2,"protected":true,"more_data":"yes","qos_eosp":1,
           |"signal_dbm":true,"large_frame":"0","handshake_captured":"TRUE","power_save":false,
@@ -198,7 +198,7 @@ class HydrationNullTruncationReproSuite extends CatsEffectSuite:
           |"tsft":"42\n","channel_flags":"\t256"}""".stripMargin.replaceAll("\\s+", ""),
       "empty-strings" ->
         """{"sensor_id":"fuzz-empty","signal_dbm":"","ssid":"","schema_version":" ","retry":""}"""
-          .stripMargin.replaceAll("\\s+", "")
+          .stripMargin.linesIterator.mkString
     )
 
     for

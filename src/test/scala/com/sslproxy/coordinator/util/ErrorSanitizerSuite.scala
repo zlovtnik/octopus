@@ -12,3 +12,10 @@ class ErrorSanitizerSuite extends FunSuite:
     assert(!sanitized.contains("abc123"))
     assert(!sanitized.exists(_.isControl))
     assert(sanitized.length <= 512)
+
+  test("Bearer tokens are redacted with or without an authorization prefix"):
+    val header = ErrorSanitizer.sanitize("Authorization: Bearer header.token-value")
+    val standalone = ErrorSanitizer.sanitize("request failed for Bearer standalone-token")
+
+    assertEquals(header, "Authorization: Bearer [REDACTED]")
+    assertEquals(standalone, "request failed for Bearer [REDACTED]")

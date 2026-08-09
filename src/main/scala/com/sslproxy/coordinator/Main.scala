@@ -118,6 +118,7 @@ object Main extends IOApp.Simple:
                         payloadResolver,
                         metrics,
                         cfg.cron.scanFetchCount,
+                        cfg.cron.scanMaxAttempts,
                         dbSemaphore
                       )
 
@@ -412,9 +413,8 @@ object Main extends IOApp.Simple:
                                   )
                                 }
 
-                                val legacyProcessorStreams =
-                                  cronScheduler.mainLoop
-                                    .merge(cronScheduler.schemaRefresher)
+                                val requiredRuntimeStreams =
+                                  cronScheduler.schemaRefresher
                                     .merge(hydrationService.runOnce.handleErrorWith { error =>
                                       Stream.eval(
                                         IO(
@@ -427,12 +427,9 @@ object Main extends IOApp.Simple:
                                       )
                                     })
                                 val processorStreams =
-                                  if cfg.runtime.processorsEnabled && cfg.processors.enabled.isEmpty then
-                                    Stream.empty
-                                  else if cfg.processors.enabled.isEmpty then legacyProcessorStreams
+                                  if cfg.processors.enabled.isEmpty then Stream.empty
                                   else
                                     cronScheduler.supportStream
-                                      .merge(cronScheduler.schemaRefresher)
                                       .merge(supervisor.run(workloads))
 
                                 artifactOpt match
@@ -464,7 +461,8 @@ object Main extends IOApp.Simple:
                                 val streams = enabledRuntimeStreams(
                                   cfg.runtime,
                                   processorStreams,
-                                  consumerStreams
+                                  consumerStreams,
+                                  requiredRuntimeStreams
                                 )
 
                                 Resource.make(
@@ -500,10 +498,11 @@ object Main extends IOApp.Simple:
   private[coordinator] def enabledRuntimeStreams[A](
     runtime: RuntimeConfig,
     processorStreams: Stream[IO, A],
-    consumerStreams: Stream[IO, A]
+    consumerStreams: Stream[IO, A],
+    requiredRuntimeStreams: Stream[IO, A]
   ): Stream[IO, A] =
     (runtime.processorsEnabled, runtime.consumersEnabled) match
-      case (true, true) => processorStreams.merge(consumerStreams)
-      case (true, false) => processorStreams
-      case (false, true) => consumerStreams
+      case (true, true) => processorStreams.merge(consumerStreams).merge(requiredRuntimeStreams)
+      case (true, false) => processorStreams.merge(requiredRuntimeStreams) ++ Stream.never[IO]
+      case (false, true) => consumerStreams.merge(requiredRuntimeStreams) ++ Stream.never[IO]
       case (false, false) => Stream.never[IO]

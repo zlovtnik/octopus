@@ -207,7 +207,8 @@ object MaintenanceSql:
                AND owner_id = ${lease.ownerId}
                AND lease_token = ${lease.token}
                AND fence = ${lease.fence}
-               AND lease_expires_at > CURRENT_TIMESTAMP(6)""".query[Int].option
+               AND lease_expires_at > CURRENT_TIMESTAMP(6)
+             FOR UPDATE""".query[Int].option
 
     for
       guarded <- leaseGuard
@@ -294,7 +295,8 @@ object MaintenanceSql:
                AND owner_id = ${lease.ownerId}
                AND lease_token = ${lease.token}
                AND fence = ${lease.fence}
-               AND lease_expires_at > CURRENT_TIMESTAMP(6)""".query[Int].option
+               AND lease_expires_at > CURRENT_TIMESTAMP(6)
+             FOR UPDATE""".query[Int].option
 
     for
       guarded <- leaseGuard

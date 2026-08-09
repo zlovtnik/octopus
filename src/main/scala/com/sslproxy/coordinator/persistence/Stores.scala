@@ -87,7 +87,7 @@ trait WirelessStore[F[_]]:
   def flushProbeBatch(probesJson: String): DbResultT[F, Int]
 
 trait ProjectionStore[F[_]]:
-  def generateRfAlerts: DbResultT[F, List[String]]
+  def generateRfAlerts(limit: Int): DbResultT[F, List[String]]
   def normalizeWirelessFrames(limit: Int): DbResultT[F, Int]
   def projectWirelessInventory(limit: Int): DbResultT[F, Int]
   def buildSearchDocuments(limit: Int): DbResultT[F, Int]

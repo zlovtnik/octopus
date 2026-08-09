@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.tidb.sql
 
 import cats.syntax.all.*
-import doobie.ConnectionIO
+import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
 
 object WirelessProcessorSql:
@@ -131,19 +131,21 @@ object WirelessProcessorSql:
              ON DUPLICATE KEY UPDATE dedupe_key = VALUES(dedupe_key)""".update.run
 
     for
-      inserted <- frames
-      _ <- radio
-      _ <- qos
-      _ <- network
-      _ <- appSignals
-      _ <- identity
-      _ <- security
-    yield inserted
+      frameCount <- frames
+      radioCount <- radio
+      qosCount <- qos
+      networkCount <- network
+      appSignalCount <- appSignals
+      identityCount <- identity
+      securityCount <- security
+    yield frameCount + radioCount + qosCount + networkCount +
+      appSignalCount + identityCount + securityCount
 
   def projectInventory(limit: Int): ConnectionIO[Int] =
     val batchLimit = limit.max(1)
+    val candidates = inventoryCandidates(batchLimit)
     val devices =
-      sql"""INSERT INTO devices (
+      (fr"""INSERT INTO devices (
                mac_id, display_name, username, hostname, os_hint, mac_hint,
                first_seen, last_seen, entity_version, updated_at
              )
@@ -155,16 +157,8 @@ object WirelessProcessorSql:
                     frame.source_mac,
                     MIN(frame.observed_at), MAX(frame.observed_at), 1, CURRENT_TIMESTAMP(6)
              FROM wireless_frames frame
-             JOIN (
-               SELECT candidate.dedupe_key
-               FROM wireless_frames candidate
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM wireless_inventory_projection_inputs applied
-                 WHERE applied.dedupe_key = candidate.dedupe_key
-               )
-               ORDER BY candidate.created_at, candidate.dedupe_key
-               LIMIT $batchLimit
-             ) candidate ON candidate.dedupe_key = frame.dedupe_key
+             JOIN (""" ++ candidates ++ fr""") candidate
+               ON candidate.dedupe_key = frame.dedupe_key
              LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
              LEFT JOIN wireless_frame_app_signals app_row ON app_row.dedupe_key = frame.dedupe_key
              WHERE frame.source_mac IS NOT NULL
@@ -177,26 +171,18 @@ object WirelessProcessorSql:
                os_hint = COALESCE(VALUES(os_hint), devices.os_hint),
                first_seen = LEAST(devices.first_seen, VALUES(first_seen)),
                last_seen = GREATEST(devices.last_seen, VALUES(last_seen)),
-               updated_at = CURRENT_TIMESTAMP(6)""".update.run
+               updated_at = CURRENT_TIMESTAMP(6)""").update.run
 
     val clients =
-      sql"""INSERT INTO wireless_clients (
+      (fr"""INSERT INTO wireless_clients (
                ssid, client_mac, known_bssid, first_seen, last_seen,
                probe_count, location_id, updated_at
              )
              SELECT frame.ssid, frame.source_mac, MAX(frame.bssid),
                     MIN(frame.observed_at), MAX(frame.observed_at), COUNT(*),
                     MAX(frame.location_id), CURRENT_TIMESTAMP(6)
-             FROM wireless_frames frame JOIN (
-               SELECT candidate.dedupe_key
-               FROM wireless_frames candidate
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM wireless_inventory_projection_inputs applied
-                 WHERE applied.dedupe_key = candidate.dedupe_key
-               )
-               ORDER BY candidate.created_at, candidate.dedupe_key
-               LIMIT $batchLimit
-             ) candidate
+             FROM wireless_frames frame
+             JOIN (""" ++ candidates ++ fr""") candidate
                ON candidate.dedupe_key = frame.dedupe_key
              WHERE frame.source_mac IS NOT NULL AND frame.ssid IS NOT NULL
              GROUP BY frame.ssid, frame.source_mac
@@ -206,22 +192,26 @@ object WirelessProcessorSql:
                last_seen = GREATEST(wireless_clients.last_seen, VALUES(last_seen)),
                probe_count = wireless_clients.probe_count + VALUES(probe_count),
                location_id = COALESCE(VALUES(location_id), wireless_clients.location_id),
-               updated_at = CURRENT_TIMESTAMP(6)""".update.run
+               updated_at = CURRENT_TIMESTAMP(6)""").update.run
 
     val markInputs =
-      sql"""INSERT INTO wireless_inventory_projection_inputs (dedupe_key, projected_at)
+      (fr"""INSERT INTO wireless_inventory_projection_inputs (dedupe_key, projected_at)
              SELECT candidate.dedupe_key, CURRENT_TIMESTAMP(6)
-             FROM wireless_frames candidate
-             WHERE NOT EXISTS (
-               SELECT 1 FROM wireless_inventory_projection_inputs applied
-               WHERE applied.dedupe_key = candidate.dedupe_key
-             )
-             ORDER BY candidate.created_at, candidate.dedupe_key
-             LIMIT $batchLimit
-             ON DUPLICATE KEY UPDATE dedupe_key = VALUES(dedupe_key)""".update.run
+             FROM (""" ++ candidates ++ fr""") candidate
+             ON DUPLICATE KEY UPDATE dedupe_key = VALUES(dedupe_key)""").update.run
 
     for
       deviceCount <- devices
       clientCount <- clients
       _ <- markInputs
     yield deviceCount + clientCount
+
+  private def inventoryCandidates(batchLimit: Int): Fragment =
+    fr"""SELECT candidate.dedupe_key
+         FROM wireless_frames candidate
+         WHERE NOT EXISTS (
+           SELECT 1 FROM wireless_inventory_projection_inputs applied
+           WHERE applied.dedupe_key = candidate.dedupe_key
+         )
+         ORDER BY candidate.created_at, candidate.dedupe_key
+         LIMIT $batchLimit"""

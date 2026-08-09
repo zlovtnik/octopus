@@ -11,7 +11,8 @@ class SqlPlacementSuite extends FunSuite:
     val sourceRoot = serviceRoot.resolve("src/main/scala/com/sslproxy/coordinator")
     val catalogRoot = sourceRoot.resolve("tidb/sql")
     val sqlInterpolator = raw"\b(?:sql|fr|fr0)\s*\"".r
-    val instruction = raw"(?is)(?:\"\"\"|\")\s*(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b".r
+    val instruction =
+      raw"(?is)(?:\"\"\"|\")\s*(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH|CREATE|ALTER|DROP)\b".r
 
     val violations = scalaFiles(sourceRoot).filterNot(_.startsWith(catalogRoot)).flatMap { path =>
       val source = Files.readString(path, StandardCharsets.UTF_8)

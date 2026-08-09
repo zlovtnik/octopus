@@ -59,6 +59,7 @@ val micrometerVersion = "1.13.2"
 val testcontainersVersion = "1.20.6"
 val minioVersion = "9.0.3"
 val openTelemetryVersion = "1.62.0"
+val snakeYamlVersion = "2.3"
 
 lazy val root = (project in file("."))
   .settings(
@@ -93,6 +94,7 @@ lazy val root = (project in file("."))
       "net.logstash.logback" % "logstash-logback-encoder" % "9.0",
       "org.scalameta" %% "munit" % "1.3.4" % Test,
       "org.typelevel" %% "munit-cats-effect" % "2.1.0" % Test,
+      "org.yaml" % "snakeyaml" % snakeYamlVersion % Test,
       "org.testcontainers" % "kafka" % testcontainersVersion % Test,
       "org.testcontainers" % "testcontainers" % testcontainersVersion % Test
     ),

@@ -7,7 +7,7 @@ import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord,
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
@@ -15,7 +15,6 @@ import io.circe.parser as circeParser
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
-import java.util.Base64
 import scala.concurrent.duration.*
 
 object PayloadAuditConsumer:
@@ -69,7 +68,7 @@ object PayloadAuditConsumer:
           val payloadBytes = rawJson.getBytes(StandardCharsets.UTF_8)
           val payloadSha256 = Sha256Utils.sha256Hex(payloadBytes)
           val dedupeKey = Sha256Utils.sha256Hex(s"$StreamName:$payloadSha256")
-          val payloadRef = s"inline://json/${Base64.getUrlEncoder.withoutPadding.encodeToString(payloadBytes)}"
+          val payloadRef = s"sha256://$payloadSha256"
 
           import io.circe.Json
           val requestJson = Json.obj(
@@ -112,8 +111,9 @@ object PayloadAuditConsumer:
             case Right(count) =>
               IO(metrics.recordPayloadAuditIngested(count))
             case Left(dbErr) =>
+              val sanitized = ErrorSanitizer.sanitize(dbErr.message)
               IO(log.error("payload_audit_ingest", "status" -> "failed",
-                "operation" -> dbErr.operation, "error" -> dbErr.message)) *>
+                "operation" -> dbErr.operation, "error" -> sanitized)) *>
                 IO.raiseError(new RuntimeException(
                   s"${dbErr.operation}: ${dbErr.message}", dbErr.cause))
           }

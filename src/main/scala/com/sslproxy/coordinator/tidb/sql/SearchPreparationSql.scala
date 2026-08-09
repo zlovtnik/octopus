@@ -75,6 +75,8 @@ object SearchPreparationSql:
                    detail_json = VALUES(detail_json),
                    title = VALUES(title),
                    normalized_text = VALUES(normalized_text),
+                   normalized_sha256 = VALUES(normalized_sha256),
+                   source_version = VALUES(source_version),
                    metadata = VALUES(metadata),
                    updated_at = CURRENT_TIMESTAMP(6)""".update.run
       _ <- sql"DELETE FROM atheros_search.search_document_tokens WHERE document_id = ${document.documentId}".update.run

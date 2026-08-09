@@ -32,7 +32,6 @@ final class CronScheduler private (
     metrics: CoordinatorMetrics,
     verifyCanonicalManifest: IO[Unit],
     loopCounter: Ref[IO, Long],
-    lastShadowAuditMs: Ref[IO, Long],
     workRunner: FencedWorkRunner[IO]
 ):
   import CronScheduler.log
@@ -311,26 +310,23 @@ final class CronScheduler private (
     }.void
 
   private def shadowAudit(): IO[Unit] =
-    val intervalMs = 10_000L
+    def drain(total: Int): IO[Unit] =
+      projectionStore.generateRfAlerts(cfg.ingestBatchSize).value.flatMap {
+        case Left(err) =>
+          IO(log.error("shadow_audit", "status" -> "failed",
+            "operation" -> err.operation, "error" -> err.message)) *>
+            IO.raiseError(databaseFailure(err))
 
-    lastShadowAuditMs.get.flatMap { lastMs =>
-      val now = System.currentTimeMillis()
-      if now - lastMs < intervalMs then IO.unit
-      else
-        projectionStore.generateRfAlerts.value.flatMap {
-          case Left(err) =>
-            IO(log.error("shadow_audit", "status" -> "failed",
-              "operation" -> err.operation, "error" -> err.message)) *>
-              lastShadowAuditMs.set(now) *>
-              IO.raiseError(databaseFailure(err))
+        case Right(Nil) =>
+          IO.whenA(total > 0)(
+            IO(log.info("shadow_audit", "status" -> "alerts_generated",
+              "count" -> total.toString))
+          )
+        case Right(alerts) =>
+          drain(total + alerts.size)
+      }
 
-          case Right(alerts) =>
-            IO.whenA(alerts.nonEmpty)(
-              IO(log.info("shadow_audit", "status" -> "alerts_generated",
-                "count" -> alerts.size.toString))
-            ) *> lastShadowAuditMs.set(now)
-        }
-    }
+    drain(0)
 
   private def databaseFailure(error: com.sslproxy.coordinator.domain.DatabaseError): RuntimeException =
     RuntimeException(s"${error.operation}: ${error.message}", error.cause)
@@ -355,7 +351,6 @@ object CronScheduler:
   ): IO[CronScheduler] =
     for
       loopCounter <- Ref.of[IO, Long](0L)
-      lastShadowAuditMs <- Ref.of[IO, Long](0L)
       ownerId <- IO(java.util.UUID.randomUUID().toString)
     yield new CronScheduler(
       cfg,
@@ -369,7 +364,6 @@ object CronScheduler:
       metrics,
       verifyCanonicalManifest,
       loopCounter,
-      lastShadowAuditMs,
       new FencedWorkRunner(maintenanceStore, ownerId)
     )
 

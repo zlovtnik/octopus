@@ -19,74 +19,80 @@ object JobBatchSql:
     if normalizedStreams.isEmpty then 0L.pure[ConnectionIO]
     else
       val streamClause = normalizedStreams.map(value => fr0"$value").intercalate(fr",")
-      val candidates =
-        fr"""FROM sync_events e
+      val candidateQuery =
+        (fr"""SELECT e.stream_name, e.dedupe_key
+             FROM sync_events e
              WHERE e.stream_name IN (""" ++ streamClause ++ fr""" )
                AND e.status IN ('pending', 'failed')
                AND e.attempt_count < $maxAttempts
                AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSeconds, CURRENT_TIMESTAMP(6)))
              ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-             LIMIT $limit"""
-
-      val insertJobs =
-        fr"""INSERT INTO sync_jobs (
-               job_id, stream_name, dedupe_key, status, attempt_count, created_at
-             )
-             SELECT UUID(), e.stream_name, e.dedupe_key, 'pending', 0, CURRENT_TIMESTAMP(6) """ ++
-          candidates ++
-          fr""" ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id"""
-
-      val insertBatches =
-        fr"""INSERT INTO sync_batches (
-               batch_id, job_id, batch_no, payload_ref, status, row_count,
-               attempt_count, dedupe_key, stream_name, cursor_start, cursor_end,
-               created_at, updated_at
-             )
-             SELECT UUID(), j.job_id, 0, e.payload_ref, 'pending', 1,
-                    0, e.dedupe_key, e.stream_name,
-                    COALESCE(c.cursor_value, '0'),
-                    CASE
-                      WHEN e.stream_name = 'wireless.audit'
-                      THEN CAST(FLOOR(UNIX_TIMESTAMP(e.observed_at)) AS CHAR)
-                      ELSE e.dedupe_key
-                    END,
-                    CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
-             FROM sync_events e
-             JOIN sync_jobs j
-               ON j.stream_name = e.stream_name AND j.dedupe_key = e.dedupe_key
-             LEFT JOIN sync_cursors c ON c.stream_name = e.stream_name
-             WHERE e.status IN ('pending', 'failed')
-               AND e.stream_name IN (""" ++ streamClause ++ fr""" )
-               AND e.attempt_count < $maxAttempts
-               AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSeconds, CURRENT_TIMESTAMP(6)))
-             ORDER BY e.observed_at, e.stream_name, e.dedupe_key
              LIMIT $limit
-             ON DUPLICATE KEY UPDATE
-               batch_id = sync_batches.batch_id,
-               updated_at = CURRENT_TIMESTAMP(6)"""
+             FOR UPDATE""")
+          .query[(String, String)]
+          .to[List]
 
-      for
-        _ <- insertJobs.update.run
-        _ <- insertBatches.update.run
-        processed <- (fr"""UPDATE sync_events e
-                            SET e.status = 'batched',
-                                e.attempt_count = e.attempt_count + 1,
-                                e.last_error = NULL,
-                                e.updated_at = CURRENT_TIMESTAMP(6)
-                            WHERE e.status IN ('pending', 'failed')
-                              AND e.stream_name IN (""" ++ streamClause ++ fr""" )
-                              AND e.attempt_count < $maxAttempts
-                              AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSeconds, CURRENT_TIMESTAMP(6)))
-                              AND EXISTS (
-                                SELECT 1 FROM sync_batches b
-                                WHERE b.stream_name = e.stream_name
-                                  AND b.dedupe_key = e.dedupe_key
-                                  AND b.status = 'pending'
-                                  AND b.created_at >= e.updated_at
-                              )
-                            ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-                            LIMIT $limit""").update.run
-      yield processed.toLong
+      candidateQuery.flatMap {
+        case Nil => 0L.pure[ConnectionIO]
+        case selected =>
+          val selectedKeys = selected.map { case (streamName, dedupeKey) =>
+            fr0"($streamName, $dedupeKey)"
+          }.intercalate(fr",")
+          val selectedPredicate =
+            fr0"(e.stream_name, e.dedupe_key) IN (" ++ selectedKeys ++ fr0")"
+
+          val insertJobs =
+            fr"""INSERT INTO sync_jobs (
+                   job_id, stream_name, dedupe_key, status, attempt_count, created_at
+                 )
+                 SELECT UUID(), e.stream_name, e.dedupe_key, 'pending', 0, CURRENT_TIMESTAMP(6)
+                 FROM sync_events e
+                 WHERE """ ++ selectedPredicate ++
+              fr""" ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id"""
+
+          val insertBatches =
+            fr"""INSERT INTO sync_batches (
+                   batch_id, job_id, batch_no, payload_ref, status, row_count,
+                   attempt_count, dedupe_key, stream_name, cursor_start, cursor_end,
+                   created_at, updated_at
+                 )
+                 SELECT UUID(), j.job_id, 0, e.payload_ref, 'pending', 1,
+                        0, e.dedupe_key, e.stream_name,
+                        COALESCE(c.cursor_value, '0'),
+                        CASE
+                          WHEN e.stream_name = 'wireless.audit'
+                          THEN CAST(FLOOR(UNIX_TIMESTAMP(e.observed_at)) AS CHAR)
+                          ELSE e.dedupe_key
+                        END,
+                        CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+                 FROM sync_events e
+                 JOIN sync_jobs j
+                   ON j.stream_name = e.stream_name AND j.dedupe_key = e.dedupe_key
+                 LEFT JOIN sync_cursors c ON c.stream_name = e.stream_name
+                 WHERE """ ++ selectedPredicate ++
+              fr""" ON DUPLICATE KEY UPDATE
+                   batch_id = sync_batches.batch_id,
+                   updated_at = CURRENT_TIMESTAMP(6)"""
+
+          for
+            _ <- insertJobs.update.run
+            _ <- insertBatches.update.run
+            processed <- (fr"""UPDATE sync_events e
+                                SET e.status = 'batched',
+                                    e.attempt_count = e.attempt_count + 1,
+                                    e.last_error = NULL,
+                                    e.updated_at = CURRENT_TIMESTAMP(6)
+                                WHERE """ ++ selectedPredicate ++ fr"""
+                                  AND e.status IN ('pending', 'failed')
+                                  AND EXISTS (
+                                    SELECT 1 FROM sync_batches b
+                                    WHERE b.stream_name = e.stream_name
+                                      AND b.dedupe_key = e.dedupe_key
+                                      AND b.status = 'pending'
+                                      AND b.created_at >= e.updated_at
+                                  )""").update.run
+          yield processed.toLong
+      }
 
   def prepareLoadDispatch(
       streamNames: List[String],

@@ -72,9 +72,10 @@ class WirelessConsumerServiceSuite extends FunSuite:
     assert(WirelessConsumerService.isAllowedReplyTopic("wireless.custom.reply", Set("wireless.custom.reply")))
     assert(!WirelessConsumerService.isAllowedReplyTopic("wireless.mac.lookup.reply", Set("wireless.custom.reply")))
 
-  test("isAllowedReplyTopic accepts sensor inbox prefix"):
-    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.12345.7", ConfiguredReplyTopics))
-    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.", ConfiguredReplyTopics))
+  test("isAllowedReplyTopic accepts only the exact sensor inbox name"):
+    assert(WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor", ConfiguredReplyTopics))
+    assert(!WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.12345.7", ConfiguredReplyTopics))
+    assert(!WirelessConsumerService.isAllowedReplyTopic("_INBOX.atheros_sensor.", ConfiguredReplyTopics))
 
   test("isAllowedReplyTopic rejects unknown topic"):
     assert(!WirelessConsumerService.isAllowedReplyTopic("wireless.attacker.reply", ConfiguredReplyTopics))
@@ -103,11 +104,11 @@ class WirelessConsumerServiceSuite extends FunSuite:
       "wireless.default.reply"
     )
 
-  test("resolveReplyTopic accepts sensor inbox as reply topic"):
+  test("resolveReplyTopic rejects an unbound sensor inbox suffix"):
     val json = """{"reply_topic": "_INBOX.atheros_sensor.abc123.7"}"""
     assertEquals(
       WirelessConsumerService.resolveReplyTopic(json, "wireless.default.reply", Set.empty),
-      "_INBOX.atheros_sensor.abc123.7"
+      "wireless.default.reply"
     )
 
   test("resolveReplyTopic falls back to default when no reply_topic field"):

@@ -6,6 +6,7 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.{Json, parser as circeParser}
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.tidb.sql.{BatchSinkSql, SchemaChecksSql}
+import com.sslproxy.coordinator.util.ErrorSanitizer
 
 import java.sql.{BatchUpdateException, Connection, PreparedStatement, SQLException, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime, ZoneOffset}
@@ -732,7 +733,7 @@ object TidbTransactor:
           val delay = baseDelay * math.min(attemptNum, 5).toLong
           log.warn("tidb_pool_retry",
             "attempt" -> s"$attemptNum/$maxRetries",
-            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName),
+            "error" -> ErrorSanitizer.message(error),
             "delay" -> s"${delay.toSeconds}s")
           IO.sleep(delay) *> retryWithBackoff(remaining - 1, error)
         }

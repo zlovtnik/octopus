@@ -70,3 +70,10 @@ class BatchSinkSqlSuite extends FunSuite:
 
     assert(statement.contains("last_seen = GREATEST"))
     assert(statement.contains("first_seen = LEAST"))
+
+  test("bandwidth alert byte accumulation treats null operands as zero"):
+    val statement = BatchSinkSql.UpsertBandwidthAlerts
+
+    assert(statement.contains(
+      "bytes = COALESCE(wireless_alerts.bytes, 0) + COALESCE(VALUES(bytes), 0)"
+    ))

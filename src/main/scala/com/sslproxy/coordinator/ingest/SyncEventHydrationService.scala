@@ -19,30 +19,39 @@ final class SyncEventHydrationService(
     payloadResolver: TidbPayloadResolver,
     metrics: CoordinatorMetrics,
     pageSize: Int,
+    failureThreshold: Int,
     dbSemaphore: Semaphore[IO]
 ):
   import SyncEventHydrationService.log
+
+  private val totalFailureThreshold = pageSize.max(1)
+  private val consecutiveFailureThreshold = failureThreshold.max(1)
 
   private final case class Stats(
       scanned: Long,
       hydrated: Long,
       skipped: Long,
-      failed: Long
+      failed: Long,
+      consecutiveFailures: Int
   ):
     def add(result: Either[Throwable, Boolean]): Stats =
       result match
-        case Right(true)  => copy(scanned = scanned + 1, hydrated = hydrated + 1)
-        case Right(false) => copy(scanned = scanned + 1, skipped = skipped + 1)
-        case Left(_)      => copy(scanned = scanned + 1, failed = failed + 1)
+        case Right(true)  => copy(scanned = scanned + 1, hydrated = hydrated + 1, consecutiveFailures = 0)
+        case Right(false) => copy(scanned = scanned + 1, skipped = skipped + 1, consecutiveFailures = 0)
+        case Left(_)      => copy(
+          scanned = scanned + 1,
+          failed = failed + 1,
+          consecutiveFailures = consecutiveFailures + 1
+        )
 
   val runOnce: Stream[IO, Unit] =
-    Stream.eval(loop(None, Stats(0, 0, 0, 0)))
+    Stream.eval(loop(None, Stats(0, 0, 0, 0, 0)))
 
   private def loop(
       after: Option[SyncEventHydrationCandidate],
       stats: Stats
   ): IO[Unit] =
-      store.findHydrationCandidates(after, pageSize).value.flatMap {
+    store.findHydrationCandidates(after, pageSize).value.flatMap {
       case Left(error) =>
         IO.raiseError(new RuntimeException(
           s"${error.operation}: ${error.message}",
@@ -59,8 +68,7 @@ final class SyncEventHydrationService(
             "failed" -> stats.failed.toString
           ))
       case Right(candidates) =>
-        candidates.traverse(hydrateOne).flatMap { results =>
-          val nextStats = results.foldLeft(stats)((current, result) => current.add(result))
+        hydratePage(candidates, stats).flatMap { nextStats =>
           candidates.lastOption match
             case Some(next) if after.forall(cursorAdvances(_, next)) =>
               loop(Some(next), nextStats)
@@ -68,6 +76,41 @@ final class SyncEventHydrationService(
               complete(nextStats, "non_advancing_cursor")
         }
     }
+
+  private def hydratePage(
+      candidates: List[SyncEventHydrationCandidate],
+      initial: Stats
+  ): IO[Stats] =
+    candidates.foldM(initial) { (stats, candidate) =>
+      hydrateOne(candidate).flatMap { result =>
+        val next = stats.add(result)
+        if next.failed >= totalFailureThreshold ||
+            next.consecutiveFailures >= consecutiveFailureThreshold
+        then failThreshold(next)
+        else IO.pure(next)
+      }
+    }
+
+  private def failThreshold(stats: Stats): IO[Nothing] =
+    val error = IllegalStateException(
+      s"sync event hydration failure threshold reached " +
+        s"(total=${nextThreshold(stats.failed, totalFailureThreshold)}, " +
+        s"consecutive=${nextThreshold(stats.consecutiveFailures.toLong, consecutiveFailureThreshold)})"
+    )
+    IO(metrics.recordSyncEventHydrationBackfill(stats.hydrated, stats.failed)) *>
+      IO(log.error(
+        "sync_event_hydration_backfill",
+        error,
+        "status" -> "failure_threshold_reached",
+        "scanned" -> stats.scanned.toString,
+        "hydrated" -> stats.hydrated.toString,
+        "skipped" -> stats.skipped.toString,
+        "failed" -> stats.failed.toString,
+        "consecutive_failures" -> stats.consecutiveFailures.toString
+      )) *> IO.raiseError(error)
+
+  private def nextThreshold(current: Long, threshold: Int): String =
+    s"$current/$threshold"
 
   private def complete(stats: Stats, status: String): IO[Unit] =
     IO(metrics.recordSyncEventHydrationBackfill(stats.hydrated, stats.failed)) *>

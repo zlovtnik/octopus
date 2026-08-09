@@ -10,14 +10,15 @@ class DbResultTSuite extends CatsEffectSuite:
     val result = EitherT.rightT[IO, DatabaseError](42)
     result.orRaise.map(value => assertEquals(value, 42))
 
-  test("orRaise exposes the typed database operation and cause"):
-    val cause = IllegalStateException("connection lost")
+  test("orRaise exposes the typed database operation with a sanitized attached cause"):
+    val cause = IllegalStateException("connection lost password=driver-secret")
     val error: DatabaseError = DatabaseError.Retryable("tidb.claim", cause, cause.getMessage)
     val result: DbResultT[IO, Int] = EitherT.leftT[IO, Int](error)
 
     result.orRaise.attempt.map {
       case Left(failure: DatabaseOperationException) =>
         assertEquals(failure.error, error)
-        assertEquals(failure.getCause, cause)
+        assertNotEquals(failure.getCause, cause)
+        assert(!failure.getCause.getMessage.contains("driver-secret"))
       case other => fail(s"expected DatabaseOperationException, got $other")
     }

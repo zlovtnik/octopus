@@ -4,25 +4,41 @@ import cats.syntax.all.*
 import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
 
-object WirelessProjectionSql:
-  private def jsonExtract(path: String): Fragment =
-    fr0"JSON_EXTRACT(payload, $path)"
+import scala.collection.mutable
 
-  private def jsonType(path: String): Fragment =
+object WirelessProjectionSql:
+  private final class JsonExtraction:
+    private val aliases = mutable.LinkedHashMap.empty[String, String]
+
+    def value(path: String): Fragment =
+      val alias = aliases.getOrElseUpdate(path, s"json_${aliases.size}")
+      Fragment.const0(s"extracted.$alias")
+
+    def source(payloadJson: String): Fragment =
+      val columns = aliases.toList.map { case (path, alias) =>
+        fr0"JSON_EXTRACT(source.payload, $path) AS " ++ Fragment.const0(alias)
+      }.intercalate(fr0", ")
+      fr0"(SELECT " ++ columns ++
+        fr0" FROM (SELECT CAST($payloadJson AS JSON) AS payload) source) extracted"
+
+  private def jsonExtract(path: String)(using extraction: JsonExtraction): Fragment =
+    extraction.value(path)
+
+  private def jsonType(path: String)(using JsonExtraction): Fragment =
     val extracted = jsonExtract(path)
     fr0"JSON_TYPE($extracted)"
 
-  private def jsonUnquoted(path: String): Fragment =
+  private def jsonUnquoted(path: String)(using JsonExtraction): Fragment =
     val extracted = jsonExtract(path)
     fr0"JSON_UNQUOTE($extracted)"
 
   private def coalesceJson(projections: List[Fragment]): Fragment =
     fr0"COALESCE(" ++ projections.intercalate(fr0", ") ++ fr0")"
 
-  private def jsonText(maxLength: Int, path: String, aliases: String*): Fragment =
+  private def jsonText(maxLength: Int, path: String, aliases: String*)(using JsonExtraction): Fragment =
     jsonText(maxLength, preserveEmpty = false, path, aliases*)
 
-  private def jsonPresentText(maxLength: Int, path: String, aliases: String*): Fragment =
+  private def jsonPresentText(maxLength: Int, path: String, aliases: String*)(using JsonExtraction): Fragment =
     jsonText(maxLength, preserveEmpty = true, path, aliases*)
 
   private def jsonText(
@@ -30,7 +46,7 @@ object WirelessProjectionSql:
       preserveEmpty: Boolean,
       path: String,
       aliases: String*
-  ): Fragment =
+  )(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
@@ -49,7 +65,7 @@ object WirelessProjectionSql:
   )(
       positiveMax: String = "2147483647",
       negativeMagnitudeMax: String = "2147483648"
-  ): Fragment =
+  )(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
@@ -75,7 +91,7 @@ object WirelessProjectionSql:
       fr0"CAST($safeText AS SIGNED)"
     })
 
-  private def jsonDouble(path: String, aliases: String*): Fragment =
+  private def jsonDouble(path: String, aliases: String*)(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
@@ -102,7 +118,7 @@ object WirelessProjectionSql:
       fr0"CAST($safeText AS DOUBLE)"
     })
 
-  private def jsonBoolean(path: String, aliases: String*): Fragment =
+  private def jsonBoolean(path: String, aliases: String*)(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
       val candidateText = jsonUnquoted(candidate)
@@ -119,12 +135,13 @@ object WirelessProjectionSql:
            END"""
     })
 
-  private def jsonArray(path: String): Fragment =
+  private def jsonArray(path: String)(using JsonExtraction): Fragment =
     val extracted = jsonExtract(path)
     val extractedType = jsonType(path)
     fr0"CASE WHEN $extractedType = 'ARRAY' THEN $extracted ELSE NULL END"
 
-  def hydrate(dedupeKey: String): ConnectionIO[Int] =
+  def hydrate(dedupeKey: String, payloadJson: String): ConnectionIO[Int] =
+    given extraction: JsonExtraction = new JsonExtraction
     val intMax = "2147483647"
     val intMinMagnitude = "2147483648"
     val longMax = "9223372036854775807"
@@ -222,8 +239,10 @@ object WirelessProjectionSql:
       val wpsModelName = jsonText(255, "$.wps_model_name")
       val deviceFingerprint = jsonText(255, "$.device_fingerprint")
       val handshakeCaptured = jsonBoolean("$.handshake_captured")
+      val extractedPayload = extraction.source(payloadJson)
 
-      fr"""UPDATE sync_events
+      (fr"""UPDATE sync_events
+            JOIN """ ++ extractedPayload ++ fr""" ON TRUE
             SET
               sensor_id = $sensorId,
               location_id = $locationId,
@@ -312,7 +331,7 @@ object WirelessProjectionSql:
                   AND tombstone.stream_name = sync_events.stream_name
                   AND tombstone.expires_at > CURRENT_TIMESTAMP(6)
               )
-              AND payload IS NOT NULL""".update.run
+              AND payload IS NOT NULL""").update.run
 
     for
       projected <- project

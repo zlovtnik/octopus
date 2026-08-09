@@ -4,12 +4,16 @@ import cats.data.EitherT
 import cats.MonadThrow
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.util.ErrorSanitizer
 
 package object persistence:
   type DbResultT[F[_], A] = EitherT[F, DatabaseError, A]
 
   final case class DatabaseOperationException(error: DatabaseError)
-      extends RuntimeException(s"${error.operation}: ${com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)}", error.cause)
+      extends RuntimeException(
+        s"${error.operation}: ${ErrorSanitizer.sanitize(error.message)}",
+        RuntimeException(ErrorSanitizer.message(error.cause))
+      )
 
   extension [F[_]: MonadThrow, A](result: DbResultT[F, A])
     def orRaise: F[A] =

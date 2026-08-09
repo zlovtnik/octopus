@@ -3,7 +3,8 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.persistence.WirelessStore
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, WirelessStore}
+import com.sslproxy.coordinator.tidb.{TidbErrorClass}
 import com.sslproxy.coordinator.util.{ErrorSanitizer,Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
@@ -14,6 +15,7 @@ import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.sql.SQLException
 import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
 
@@ -283,16 +285,18 @@ object WirelessConsumerService:
         consumer.partitionedStream
           .map { partitionStream =>
             partitionStream.evalMap { committable =>
-                process(committable).handleErrorWith { error =>
-                  LockedTopicConsumer
-                    .parkNonRetriable(
-                      producer,
-                      topic + kafkaCfg.dlqSuffix,
-                      consumerGroup,
-                      committable.record,
-                      error
-                    )
-                    .as(committable.offset)
+                process(committable).handleErrorWith {
+                  case error if isExplicitlyNonRetriable(error) =>
+                    LockedTopicConsumer
+                      .parkNonRetriable(
+                        producer,
+                        topic + kafkaCfg.dlqSuffix,
+                        consumerGroup,
+                        committable.record,
+                        error
+                      )
+                      .as(committable.offset)
+                  case error => IO.raiseError(error)
                 }
               }
           }
@@ -405,8 +409,19 @@ object WirelessConsumerService:
     TopicPattern.matches(topic) && topic != "." && topic != ".."
 
   private[kafka] def isAllowedReplyTopic(topic: String, configuredReplyTopics: Set[String]): Boolean =
-      topic == SensorInboxPrefix.dropRight(1) || topic.startsWith(SensorInboxPrefix) ||
+      topic == SensorInboxPrefix.dropRight(1) ||
       configuredReplyTopics.contains(topic)
+
+  private def isExplicitlyNonRetriable(error: Throwable): Boolean =
+    error match
+      case _: IllegalArgumentException => true
+      case failure: DatabaseOperationException =>
+        failure.error match
+          case _: DatabaseError.Permanent => true
+          case _: DatabaseError.Retryable => false
+      case sqlError: SQLException =>
+        TidbErrorClass.classify(sqlError) == TidbErrorClass.Permanent
+      case _ => false
 
   private def configuredReplyTopics(cfg: WirelessConfig): Set[String] =
     Set(

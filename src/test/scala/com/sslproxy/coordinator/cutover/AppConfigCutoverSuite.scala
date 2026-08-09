@@ -1,14 +1,18 @@
 package com.sslproxy.coordinator.cutover
 
 import com.sslproxy.coordinator.config.{AppConfig, CutoverConfig, IngestConfig, ProcessorConfig, RuntimeConfig, TiDbConfig}
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import munit.FunSuite
 
 import scala.jdk.CollectionConverters.*
 
 class AppConfigCutoverSuite extends FunSuite:
   test("application defaults disable TiDB, consumers, processors, and the processor catalog"):
-    val config = AppConfig.load
+    val config = AppConfig.load(
+      ConfigFactory.parseResources("application.conf")
+        .withFallback(ConfigFactory.empty())
+        .resolve(ConfigResolveOptions.defaults().setUseSystemEnvironment(false))
+    )
 
     assertEquals(config.tidb.enabled, false)
     assertEquals(config.tidb.poolSize, 20)
@@ -23,6 +27,17 @@ class AppConfigCutoverSuite extends FunSuite:
     assertEquals(config.processors.restartBaseDelayMs, 1000L)
     assertEquals(config.processors.restartMaxDelayMs, 30000L)
     assertEquals(config.cutover.devBypass, false)
+
+  test("comma-separated processor configuration preserves blank entries for validation"):
+    val config = ConfigFactory.parseString(
+      """processors.enabled = "sync-job-planner,,sync-load-dispatch""""
+    ).withFallback(ConfigFactory.parseResources("application.conf"))
+      .resolve(ConfigResolveOptions.defaults().setUseSystemEnvironment(false))
+
+    val error = intercept[com.sslproxy.coordinator.config.AppConfigValidation] {
+      AppConfig.load(config)
+    }
+    assert(error.getMessage.contains("blank processor IDs"))
 
   test("deployment SYNC variables configure locked topics and consumer groups"):
     val environment = ConfigFactory.parseMap(Map(

@@ -88,7 +88,7 @@ object BatchSinkSql:
       |  detected_at = VALUES(detected_at),
       |  location_id = VALUES(location_id),
       |  ssid = VALUES(ssid),
-      |  bytes = wireless_alerts.bytes + VALUES(bytes),
+      |  bytes = COALESCE(wireless_alerts.bytes, 0) + COALESCE(VALUES(bytes), 0),
       |  details_json = VALUES(details_json),
       |  updated_at = CURRENT_TIMESTAMP(6)""".stripMargin
 

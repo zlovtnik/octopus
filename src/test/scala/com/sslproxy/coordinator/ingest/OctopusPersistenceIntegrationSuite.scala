@@ -28,6 +28,7 @@ import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.utility.DockerImageName
+import org.yaml.snakeyaml.Yaml
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
@@ -359,7 +360,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    ${inlineRef(validSignalPayload)}, $validSignalKey, $validSignalPayload,
                    'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:21', -40
                  )""".update.run.transact(xa)
-      alerts <- repository.generateShadowAlerts().map(requireRight)
+      alerts <- repository.generateShadowAlerts(100).map(requireRight)
       stored <- sql"""SELECT source_mac, signal_dbm
                        FROM wireless_shadow_alerts
                        WHERE source_mac IN ('aa:bb:cc:dd:ee:20', 'aa:bb:cc:dd:ee:21')
@@ -486,9 +487,17 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(batchRef, eventRef)
       assertEquals(evidenceCount, 1L)
 
-  test("canonical manifest is repeatable and retains MEDIUMTEXT payload capacity"):
+  test("canonical manifest parsing is repeatable and retains MEDIUMTEXT payload capacity"):
     requireDocker()
-    IO.blocking(applyCanonicalManifest()) *>
+    IO.blocking {
+      val first = canonicalStatements().map { case (path, statements) =>
+        path -> statements.size
+      }
+      val second = canonicalStatements().map { case (path, statements) =>
+        path -> statements.size
+      }
+      assertEquals(second, first)
+    } *>
       sql"""SELECT table_name, data_type, character_maximum_length
             FROM information_schema.columns
             WHERE table_schema = 'octopus_core'
@@ -664,22 +673,15 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     assume(dockerAvailable, "Docker is required for the TiDB integration suite")
 
   private def applyCanonicalManifest(): Unit =
-    val manifest = schemaRoot.resolve("manifest.yaml")
-    val applyOrder = Files.readAllLines(manifest).asScala
-      .dropWhile(_ != "apply_order:")
-      .drop(1)
-      .takeWhile(_.startsWith("  - "))
-      .map(_.drop(4).trim)
+    val manifest = canonicalManifest()
+    val parsedStatements = canonicalStatements(manifest)
 
     val connection = DriverManager.getConnection(jdbcUrl(None), "root", "")
     try
       val statement = connection.createStatement()
       try
-        applyOrder.foreach { relative =>
-          val executable = Files.readString(schemaRoot.resolve(relative)).linesIterator
-            .filterNot(_.trim.startsWith("--"))
-            .mkString("\n")
-          executable.split(";").iterator.map(_.trim).filter(_.nonEmpty).foreach { sqlStatement =>
+        parsedStatements.foreach { case (_, statements) =>
+          statements.foreach { sqlStatement =>
             val _ = statement.execute(sqlStatement)
           }
         }
@@ -691,8 +693,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
             |WHERE domain = 'octopus_core'""".stripMargin
         )
         try
-          val version = manifestValue("schema_version")
-          val checksum = manifestValue("manifest_sha256")
+          val version = manifest.schemaVersion
+          val checksum = manifest.manifestSha256
           readiness.setString(1, version)
           readiness.setString(2, version)
           readiness.setString(3, checksum)
@@ -703,10 +705,116 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     finally connection.close()
 
   private def manifestValue(key: String): String =
-    Files.readAllLines(schemaRoot.resolve("manifest.yaml")).asScala
-      .find(_.startsWith(s"$key:"))
-      .map(_.substring(key.length + 1).trim)
-      .getOrElse(throw IllegalStateException(s"missing $key in canonical manifest"))
+    val manifest = canonicalManifest()
+    key match
+      case "schema_version"  => manifest.schemaVersion
+      case "manifest_sha256" => manifest.manifestSha256
+      case _ => throw IllegalStateException(s"unsupported canonical manifest key $key")
+
+  private final case class CanonicalManifest(
+      schemaVersion: String,
+      manifestSha256: String,
+      applyOrder: List[String]
+  )
+
+  private def canonicalManifest(): CanonicalManifest =
+    val input = Files.newInputStream(schemaRoot.resolve("manifest.yaml"))
+    val root =
+      try Option(new Yaml().load[java.util.Map[String, Object]](input))
+      finally input.close()
+    val values = root.getOrElse(throw IllegalStateException("canonical manifest is empty"))
+
+    def requiredScalar(key: String): String =
+      Option(values.get(key))
+        .map(_.toString.trim)
+        .filter(_.nonEmpty)
+        .getOrElse(throw IllegalStateException(s"missing or empty $key in canonical manifest"))
+
+    val applyOrder = Option(values.get("apply_order"))
+      .map(_.asInstanceOf[java.util.List[Object]].asScala.toList)
+      .getOrElse(Nil)
+      .map(_.toString.trim)
+      .filter(_.nonEmpty)
+    if applyOrder.isEmpty then
+      throw IllegalStateException("canonical manifest apply_order must not be missing or empty")
+
+    CanonicalManifest(
+      requiredScalar("schema_version"),
+      requiredScalar("manifest_sha256"),
+      applyOrder
+    )
+
+  private def canonicalStatements(): List[(String, List[String])] =
+    canonicalStatements(canonicalManifest())
+
+  private def canonicalStatements(
+      manifest: CanonicalManifest
+  ): List[(String, List[String])] =
+    manifest.applyOrder.map { relative =>
+      val source = Files.readString(schemaRoot.resolve(relative))
+      val statements = splitSqlStatements(source, relative)
+      if statements.isEmpty then
+        throw IllegalStateException(s"canonical schema file $relative contains no complete SQL statements")
+      relative -> statements
+    }
+
+  private def splitSqlStatements(source: String, relative: String): List[String] =
+    val statements = List.newBuilder[String]
+    val current = new StringBuilder
+    var index = 0
+    var quote: Char = 0.toChar
+    var lineComment = false
+    var blockComment = false
+
+    while index < source.length do
+      val char = source.charAt(index)
+      val next = if index + 1 < source.length then source.charAt(index + 1) else 0.toChar
+
+      if lineComment then
+        if char == '\n' || char == '\r' then
+          lineComment = false
+          current.append(' ')
+      else if blockComment then
+        if char == '*' && next == '/' then
+          blockComment = false
+          index += 1
+      else if quote != 0.toChar then
+        current.append(char)
+        if char == '\\' && index + 1 < source.length then
+          current.append(next)
+          index += 1
+        else if char == quote then
+          if next == quote then
+            current.append(next)
+            index += 1
+          else quote = 0.toChar
+      else if char == '-' && next == '-' then
+        lineComment = true
+        index += 1
+      else if char == '#' then
+        lineComment = true
+      else if char == '/' && next == '*' then
+        blockComment = true
+        index += 1
+      else if char == '\'' || char == '"' || char == '`' then
+        quote = char
+        current.append(char)
+      else if char == ';' then
+        val statement = current.result().trim
+        if statement.nonEmpty then statements += statement
+        current.clear()
+      else current.append(char)
+
+      index += 1
+
+    if quote != 0.toChar then
+      throw IllegalStateException(s"unterminated quoted literal in canonical schema file $relative")
+    if blockComment then
+      throw IllegalStateException(s"unterminated block comment in canonical schema file $relative")
+    if current.result().trim.nonEmpty then
+      throw IllegalStateException(s"incomplete SQL statement without semicolon in canonical schema file $relative")
+
+    statements.result()
 
   private def schemaRoot: Path =
     Iterator.iterate(Path.of("").toAbsolutePath)(_.getParent)

@@ -309,7 +309,8 @@ object IntelligencePreparation:
     val severity =
       if score >= 1000.0d then "critical"
       else if score >= 500.0d then "high"
-      else "medium"
+      else if score >= 100.0d then "medium"
+      else "low"
     val signalId = ProjectionFunctions.stableId("dns-threat", Vector(candidate.host))
     DnsThreatProjection(
       s"dns:${candidate.host}",

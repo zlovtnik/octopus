@@ -76,7 +76,7 @@ object TidbLoadStream:
                     locked.record,
                     error.cause
                   )
-                } *> IO.raiseError(error.cause)
+                }
               case other =>
                 KafkaDatabaseResult.require(IO.pure(other)).void
             }

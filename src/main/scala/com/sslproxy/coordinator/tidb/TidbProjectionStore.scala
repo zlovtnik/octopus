@@ -5,8 +5,8 @@ import cats.effect.IO
 import com.sslproxy.coordinator.persistence.{DbResultT, ProjectionStore}
 
 final class TidbProjectionStore(repository: TidbRepository) extends ProjectionStore[IO]:
-  def generateRfAlerts: DbResultT[IO, List[String]] =
-    EitherT(repository.generateShadowAlerts())
+  def generateRfAlerts(limit: Int): DbResultT[IO, List[String]] =
+    EitherT(repository.generateShadowAlerts(limit))
 
   def normalizeWirelessFrames(limit: Int): DbResultT[IO, Int] =
     EitherT(repository.normalizeWirelessFrames(limit))

@@ -40,11 +40,7 @@ object ScanRequestStream:
       }
     ) { lockedRecords =>
       val relevant = lockedRecords.filter(_.decoded.streamName == "proxy.events")
-      val skipped = lockedRecords.filter(_.decoded.streamName != "proxy.events")
       for
-        _ <- skipped.traverse_ { locked =>
-          store.recordSkippedScanRequest(locked.decoded, locked.metadata).value.void
-        }
         resolved <- relevant.traverse { locked =>
           IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }

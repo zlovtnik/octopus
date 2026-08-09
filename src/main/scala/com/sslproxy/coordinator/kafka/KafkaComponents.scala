@@ -6,12 +6,19 @@ import com.sslproxy.coordinator.tidb.{TidbLoad, TidbResult}
 import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
+import org.apache.kafka.clients.admin.{
+  Admin,
+  AdminClientConfig,
+  CreateTopicsOptions,
+  ListTopicsOptions,
+  NewTopic
+}
 import org.apache.kafka.common.errors.{InvalidReplicationFactorException, RetriableException, TopicExistsException}
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.{Collections, Properties}
-import java.util.concurrent.ExecutionException
+import java.time.{Duration as JavaDuration}
+import java.util.concurrent.{ExecutionException, TimeUnit}
 import scala.concurrent.duration.*
 
 final class KafkaComponents(
@@ -28,20 +35,26 @@ object KafkaComponents:
   /** Create the topic on the broker if it does not already exist. */
   private def ensureTopicExists(
       cfg: KafkaCfg,
-      topic: String
+      topic: String,
+      timeout: FiniteDuration
   ): IO[Unit] =
     IO.blocking:
+      val timeoutMs = timeout.toMillis.max(1L).min(Int.MaxValue.toLong).toInt
       val props = new Properties()
       props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, cfg.bootstrapServers)
       val admin = Admin.create(props)
       try
-        val existing = admin.listTopics().names().get()
+        val listOptions = new ListTopicsOptions().timeoutMs(timeoutMs)
+        val existing = admin.listTopics(listOptions).names().get(timeoutMs.toLong, TimeUnit.MILLISECONDS)
         if !existing.contains(topic) then
           val replicationFactor = cfg.topicReplicationFactor.toShort
           val partitions = provisionedTopicPartitions(cfg, topic)
           val newTopic = new NewTopic(topic, partitions, replicationFactor)
           try
-            admin.createTopics(Collections.singletonList(newTopic)).all().get()
+            val createOptions = new CreateTopicsOptions().timeoutMs(timeoutMs)
+            admin.createTopics(Collections.singletonList(newTopic), createOptions)
+              .all()
+              .get(timeoutMs.toLong, TimeUnit.MILLISECONDS)
             log.info("topic_provision", "status" -> "created",
               "topic" -> topic, "partitions" -> partitions.toString,
               "replication" -> replicationFactor.toString)
@@ -55,7 +68,7 @@ object KafkaComponents:
         else
           log.debug("topic_provision", "status" -> "exists", "topic" -> topic)
       finally
-        admin.close()
+        admin.close(JavaDuration.ofMillis(timeoutMs.toLong))
 
   private[kafka] def isTopicAlreadyExists(error: Throwable): Boolean =
     error match
@@ -118,8 +131,10 @@ object KafkaComponents:
           IO.sleep(retryInterval)
       }
 
-    ensureTopicExists(cfg, topic) *>
-      IO.monotonic.flatMap { start => loop(start + timeout) }
+    IO.monotonic.flatMap { start =>
+      ensureTopicExists(cfg, topic, timeout).timeout(timeout) *>
+        loop(start + timeout)
+    }
 
   /** Every processor gets its own KafkaConsumer resource. There is deliberately
     * no shared consumer here: a subscription and group identity are part of the

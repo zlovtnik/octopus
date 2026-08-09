@@ -21,31 +21,35 @@ class MainSuite extends CatsEffectSuite:
     Main.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
       Stream.emit("processor").covary[IO],
-      Stream.emit("consumer").covary[IO]
-    ).compile.toList.map(values => assertEquals(values.toSet, Set("processor", "consumer")))
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
+    ).compile.toList.map(values => assertEquals(values.toSet, Set("processor", "consumer", "required")))
 
   test("runtime flags do not start disabled lanes"):
     val processorOnly = Main.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
       Stream.emit("processor").covary[IO],
-      Stream.emit("consumer").covary[IO]
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
     )
     val consumerOnly = Main.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = false, consumersEnabled = true),
       Stream.emit("processor").covary[IO],
-      Stream.emit("consumer").covary[IO]
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
     )
     val disabled = Main.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
       Stream.emit("processor").covary[IO],
-      Stream.emit("consumer").covary[IO]
+      Stream.emit("consumer").covary[IO],
+      Stream.emit("required").covary[IO]
     )
 
     for
-      processors <- processorOnly.compile.toList
-      consumers <- consumerOnly.compile.toList
+      processors <- processorOnly.take(2).compile.toList
+      consumers <- consumerOnly.take(2).compile.toList
       disabledOutcome <- IO.race(IO.sleep(50.millis), disabled.compile.drain)
     yield
-      assertEquals(processors, List("processor"))
-      assertEquals(consumers, List("consumer"))
+      assertEquals(processors.toSet, Set("processor", "required"))
+      assertEquals(consumers.toSet, Set("consumer", "required"))
       assertEquals(disabledOutcome, Left(()))

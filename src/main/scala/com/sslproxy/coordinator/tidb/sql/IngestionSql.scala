@@ -124,6 +124,13 @@ object IngestionSql:
              $jobId, $streamName, $dedupeKey, 'pending', 0, CURRENT_TIMESTAMP(6)
            ) ON DUPLICATE KEY UPDATE job_id = sync_jobs.job_id""".update
 
+  def jobId(streamName: String, dedupeKey: String): Query0[String] =
+    sql"""SELECT job_id
+           FROM sync_jobs
+           WHERE stream_name = $streamName
+             AND dedupe_key = $dedupeKey"""
+      .query[String]
+
   def insertBatch(
       batchId: String,
       jobId: String,
@@ -140,6 +147,16 @@ object IngestionSql:
              0, ${record.dedupeKey}, ${record.streamName}, $cursorStart, $cursorEnd,
              CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
            ) ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id""".update
+
+  def jobBatchIds(streamName: String, dedupeKey: String): Query0[(String, String)] =
+    sql"""SELECT job.job_id, batch.batch_id
+           FROM sync_jobs job
+           JOIN sync_batches batch ON batch.job_id = job.job_id
+           WHERE job.stream_name = $streamName
+             AND job.dedupe_key = $dedupeKey
+             AND batch.stream_name = $streamName
+             AND batch.dedupe_key = $dedupeKey"""
+      .query[(String, String)]
 
   def hydrateEvent(
       streamName: String,

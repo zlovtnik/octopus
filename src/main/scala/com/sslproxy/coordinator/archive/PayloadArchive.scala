@@ -116,7 +116,7 @@ private final class MinioObjectStore(
         val value = client.statObject(
           StatObjectArgs.builder().bucket(bucket).`object`(objectKey).build()
         )
-        val storedSha256 = Option(value.userMetadata().getFirst("sha256"))
+        val storedSha256 = Option(value.userMetadata().get("sha256")).flatMap(_.asScala.headOption)
         Some(StoredArchiveObject(value.size(), storedSha256))
       catch
         case error: ErrorResponseException

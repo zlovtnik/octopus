@@ -140,7 +140,7 @@ class TidbRepository(xa: Transactor[IO],
         case Right(_) if candidate.streamName == "wireless.audit" &&
             candidate.payloadJson.exists(_.nonEmpty) &&
             candidate.payloadSha256.contains(candidate.dedupeKey) =>
-          hydrateWirelessProjection(candidate.dedupeKey).map(_ > 0)
+          hydrateWirelessProjection(candidate.dedupeKey, payloadJson).map(_ > 0)
         case Right(_) if candidate.streamName == "wireless.audit" &&
             candidate.dedupeKey != eventPayloadSha256 =>
           FC.raiseError(IllegalArgumentException(
@@ -208,6 +208,16 @@ class TidbRepository(xa: Transactor[IO],
         _ <- advanceConsumerOffset(meta)
       yield ()
 
+    def decisionWithPersistedIds(
+        disposition: IngestionDisposition
+    ): ConnectionIO[IngestionDecision] =
+      IngestionSql.jobBatchIds(record.streamName, record.dedupeKey).option.map {
+        case Some((persistedJobId, persistedBatchId)) =>
+          IngestionDecision(disposition, record.dedupeKey, persistedJobId, persistedBatchId)
+        case None =>
+          IngestionDecision(disposition, record.dedupeKey, jobId, batchId)
+      }
+
     def createState: ConnectionIO[IngestionDecision] =
       for
         tombstoned <- IngestionSql.activeTombstone(record.streamName, record.dedupeKey).unique.map(_ == 1)
@@ -220,13 +230,15 @@ class TidbRepository(xa: Transactor[IO],
               _ <- IngestionSql.insertSyncEvent(record, observedAt.orNull, eventKind).run
               _ <- hydrateSyncEvent(record, eventKind)
               _ <- IngestionSql.insertJob(jobId, record.streamName, record.dedupeKey).run
+              persistedJobId <- IngestionSql.jobId(record.streamName, record.dedupeKey).unique
               cursor <- IngestionSql.cursor(record.streamName).option.map(_.getOrElse("0"))
               cursorEnd = if record.streamName == "wireless.audit" then
                 observedAt.fold(record.dedupeKey)(_.toInstant.getEpochSecond.toString)
               else record.dedupeKey
-              _ <- IngestionSql.insertBatch(batchId, jobId, record, cursor, cursorEnd).run
+              _ <- IngestionSql.insertBatch(batchId, persistedJobId, record, cursor, cursorEnd).run
               disposition = if existed then IngestionDisposition.Deduplicated else IngestionDisposition.Processed
-            yield IngestionDecision(disposition, record.dedupeKey, jobId, batchId)
+              decision <- decisionWithPersistedIds(disposition)
+            yield decision
       yield decision
 
     validate *> (metadata match
@@ -235,9 +247,8 @@ class TidbRepository(xa: Transactor[IO],
         existingEvidence(meta).flatMap {
           case Some(existing) =>
             verifyExisting(meta, existing) *>
-              hydrateSyncEvent(record, eventKind).as(
-                IngestionDecision(IngestionDisposition.Deduplicated, record.dedupeKey, jobId, batchId)
-              )
+              hydrateSyncEvent(record, eventKind) *>
+              decisionWithPersistedIds(IngestionDisposition.Deduplicated)
           case None =>
             createState.flatTap(decision => persistEvidence(meta, decision.disposition))
         })
@@ -275,12 +286,15 @@ class TidbRepository(xa: Transactor[IO],
             eventKind
           ).run
           _ <- if updated > 0 && stream == "wireless.audit" then
-            hydrateWirelessProjection(key)
+            hydrateWirelessProjection(key, payloadJson)
           else 0.pure[ConnectionIO]
         yield updated > 0
 
-  private def hydrateWirelessProjection(dedupeKey: String): ConnectionIO[Int] =
-    WirelessProjectionSql.hydrate(dedupeKey)
+  private def hydrateWirelessProjection(
+      dedupeKey: String,
+      payloadJson: String
+  ): ConnectionIO[Int] =
+    WirelessProjectionSql.hydrate(dedupeKey, payloadJson)
   def claimOutbox(
       ownerId: String,
       destinationTopics: List[String],
@@ -560,9 +574,9 @@ class TidbRepository(xa: Transactor[IO],
   private val signalThreshold = -50
   private val presenceWindowSecs = 300
 
-  def generateShadowAlerts(): IO[Either[DatabaseError, List[String]]] =
+  def generateShadowAlerts(limit: Int): IO[Either[DatabaseError, List[String]]] =
     runDb("tidb.generate_shadow_alerts") {
-      ProjectionSql.generateShadowAlerts(windowSecs, signalThreshold, presenceWindowSecs)
+      ProjectionSql.generateShadowAlerts(windowSecs, signalThreshold, presenceWindowSecs, limit)
     }
 
   def normalizeWirelessFrames(limit: Int): IO[Either[DatabaseError, Int]] =
@@ -918,12 +932,13 @@ class TidbRepository(xa: Transactor[IO],
             probeCount,
             locationId,
             batchId
-          ).update.run
-        }.map { affectedPerProbe =>
-          val totalAffected = affectedPerProbe.sum
+          ).update.run.map(affected => (1, affected))
+        }.map { probeResults =>
+          val logicalProbeCount = probeResults.map(_._1).sum
+          val totalAffected = probeResults.map(_._2).sum
           log.info("probe_flush_batch", "status" -> "inserted",
             "batch_id" -> batchId, "total_affected_rows" -> totalAffected.toString)
-          totalAffected
+          logicalProbeCount
         }
     }
 
@@ -964,7 +979,9 @@ class TidbRepository(xa: Transactor[IO],
                 WirelessSql.markFailed(
                   dedupeKey,
                   streamName,
-                  "stored backlog payload is not valid JSON"
+                  "failed",
+                  "stored backlog payload is not valid JSON",
+                  0L
                 ).update.run.as(Option.empty[WirelessBacklogEntry])
       }).map(_.flatten)
     }
@@ -1018,13 +1035,10 @@ object TidbRepository:
   private val transactionRetryBaseDelay = 25.millis
 
   private[tidb] def stableUuid(namespace: String, parts: String*): String =
-    val values = namespace +: parts.toVector
-    val encoded =
-      if parts.forall(part => !part.contains(':')) && !namespace.contains(':') then values.mkString(":")
-      else
-        values.map { value =>
-          s"${value.getBytes(StandardCharsets.UTF_8).length}:$value"
-        }.mkString
+    val values = s"$namespace:v2" +: parts.toVector
+    val encoded = values.map { value =>
+      s"${value.getBytes(StandardCharsets.UTF_8).length}:$value"
+    }.mkString
     UUID.nameUUIDFromBytes(encoded.getBytes(StandardCharsets.UTF_8)).toString
 
   private[tidb] def retryTransient[A](operation: String)(fa: IO[A]): IO[A] =

@@ -95,6 +95,7 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
           |SELECT * FROM %s
           |WHERE payload_archived = 0
           |  AND stream_name = 'wireless.audit'
+          |  AND payload_ref LIKE 'inline://%'
           |  AND (payload IS NULL OR event_type IS NULL OR schema_version IS NULL
           |       OR sensor_id IS NULL OR wireless_search_text IS NULL)
           |ORDER BY observed_at, dedupe_key
@@ -118,6 +119,7 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
           |FROM %s e
           |WHERE payload_archived = 0
           |  AND stream_name = 'wireless.audit'
+          |  AND payload_ref LIKE 'inline://%'
           |  AND (payload IS NULL OR event_type IS NULL OR schema_version IS NULL
           |       OR sensor_id IS NULL OR wireless_search_text IS NULL)
           |ORDER BY observed_at, dedupe_key

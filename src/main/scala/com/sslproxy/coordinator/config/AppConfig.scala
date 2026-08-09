@@ -16,10 +16,10 @@ object StringListConfigReader:
             for
               s   <- c.asString.map(_.trim)
               tail <- acc
-            yield if s.nonEmpty then s :: tail else tail
+            yield s :: tail
           }
         case Left(_) =>
-          cursor.asString.map(s => s.split(",").map(_.trim).filter(_.nonEmpty).toList)
+          cursor.asString.map(s => s.split(",", -1).map(_.trim).toList)
 
 final case class AppConfig(
     tidb: TiDbConfig,
@@ -514,6 +514,9 @@ object AppConfig:
         required(cutover.expectedClusterId, "cutover.expected-cluster-id"),
         Option.when(requiredGroups.isEmpty)(
           "cutover.required-consumer-groups must not be empty"
+        ),
+        Option.when(requiredGroups.exists(_.trim.isEmpty))(
+          "cutover.required-consumer-groups must not contain blank consumer groups"
         ),
         Option.when(requiredGroups.distinct.size != requiredGroups.size)(
           "cutover.required-consumer-groups must not contain duplicates"

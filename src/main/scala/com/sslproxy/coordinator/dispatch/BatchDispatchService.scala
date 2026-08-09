@@ -8,6 +8,8 @@ import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
 import com.sslproxy.coordinator.observability.StructuredLogger
 import io.opentelemetry.api.trace.SpanKind
 
+import scala.concurrent.duration.*
+
 /** Publishes the transactional TiDB outbox. A broker acknowledgement followed
   * by a process crash can produce the same stable message key again; the
   * receiving transaction is therefore required to deduplicate that key.
@@ -50,7 +52,7 @@ final class BatchDispatchService(
       "outbox.fence" -> record.lease.fence.toString
     ) {
       producer.produce(ProducerRecords.one(brokerRecord)).flatten
-    }.attempt.flatMap {
+    }.timeout((leaseSeconds.toLong * 900L).max(1L).millis).attempt.flatMap {
       case Right(_) => acknowledge(record)
       case Left(error) => fail(record, error)
     }

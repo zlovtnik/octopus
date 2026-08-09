@@ -22,6 +22,10 @@ final case class ScanRequestRecord(
 )
 
 object ScanRequestRecord:
+  private[domain] val StreamNameMaxLength = 255
+  private[domain] val DedupeKeyMaxLength = 255
+  private[domain] val PayloadRefMaxBytes = 16_777_215
+
   private final case class Wire(
       streamName: String,
       dedupeKey: String,
@@ -40,9 +44,15 @@ object ScanRequestRecord:
   def decodeWire(rawJson: String): Either[Throwable, ScanRequestRecord] =
     decode[Wire](rawJson).flatMap { wire =>
       if wire.streamName.isBlank then Left(IllegalArgumentException("scan request stream_name must not be empty"))
+      else if wire.streamName.length > StreamNameMaxLength then
+        Left(IllegalArgumentException(s"scan request stream_name must not exceed $StreamNameMaxLength characters"))
       else if wire.dedupeKey.isBlank then Left(IllegalArgumentException("scan request dedupe_key must not be empty"))
+      else if wire.dedupeKey.length > DedupeKeyMaxLength then
+        Left(IllegalArgumentException(s"scan request dedupe_key must not exceed $DedupeKeyMaxLength characters"))
       else if wire.payloadRef.isBlank then Left(IllegalArgumentException("scan request payload_ref must not be empty"))
-      else if !isRfc3339( wire.observedAt) then Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
+      else if wire.payloadRef.getBytes(StandardCharsets.UTF_8).length > PayloadRefMaxBytes then
+        Left(IllegalArgumentException(s"scan request payload_ref must not exceed $PayloadRefMaxBytes UTF-8 bytes"))
+      else if !isRfc3339(wire.observedAt) then Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
       else
         val sourceRecordSha256 = Sha256Utils.sha256Hex(rawJson.getBytes(StandardCharsets.UTF_8))
         Right(

@@ -8,5 +8,8 @@ class ThreatRiskSqlSuite extends FunSuite:
 
     assert(statement.contains("JOIN bssids ON bssids.bssid = COALESCE"))
     assert(statement.contains("JOIN bssids ON bssids.bssid = frame.bssid"))
-    assert(statement.contains("bssid_left.bssid = left_document.bssid"))
-    assert(statement.contains("bssid_right.bssid = right_document.bssid"))
+    assert(statement.contains("vendor_counts AS"))
+    assert(statement.contains("GROUP BY peer.ssid"))
+    assert(statement.contains("UNION ALL"))
+    assert(statement.contains("JOIN bssids ON bssids.bssid = attributed.bssid"))
+    assert(!statement.contains("GROUP BY COALESCE(left_document.bssid, right_document.bssid)"))

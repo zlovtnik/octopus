@@ -2,11 +2,10 @@ package com.sslproxy.coordinator.tidb
 
 import cats.effect.{Deferred,IO, Ref}
 import cats.effect.std.Semaphore
+import cats.syntax.all.*
 import munit.CatsEffectSuite
 
 import java.sql.SQLException
-import scala.concurrent.duration.*
-
 class TidbRepositoryRetrySuite extends CatsEffectSuite:
 
   test("retryTransient reruns retryable transactions until they succeed"):
@@ -41,6 +40,7 @@ class TidbRepositoryRetrySuite extends CatsEffectSuite:
   test("retry backoff releases the database concurrency permit"):
     for
       firstAttempt <- Deferred[IO, Unit]
+      completed <- Deferred[IO, Unit]
       attempts <- Ref.of[IO, Int](0)
       semaphore <- Semaphore[IO](1)
       transaction = attempts.updateAndGet(_ + 1).flatMap {
@@ -51,11 +51,21 @@ class TidbRepositoryRetrySuite extends CatsEffectSuite:
       }
       fiber <- TidbRepository
         .retryTransientWithPermit("tidb.test_retry_permit", Some(semaphore))(transaction)
+        .guarantee(completed.complete(()).void)
         .start
       _ <- firstAttempt.get
-      _ <- IO.sleep(5.millis)
-      availableDuringBackoff <- semaphore.available
-      result <- fiber.joinWithNever
+      observeReleasedPermit =
+        def loop: IO[Boolean] =
+          semaphore.available.flatMap {
+            case available if available >= 1L => IO.pure(true)
+            case _ =>
+              completed.tryGet.flatMap {
+                case Some(_) => IO.pure(false)
+                case None    => IO.cede *> loop
+              }
+          }
+        loop
+      outcome <- (observeReleasedPermit, fiber.joinWithNever).tupled.guarantee(fiber.cancel)
     yield
-      assertEquals(availableDuringBackoff, 1L)
-      assertEquals(result, "ok")
+      assert(outcome._1, "the permit must be observable while retry backoff is in progress")
+      assertEquals(outcome._2, "ok")

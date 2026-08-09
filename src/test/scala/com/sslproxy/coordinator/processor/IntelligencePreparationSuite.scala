@@ -110,6 +110,18 @@ class IntelligencePreparationSuite extends FunSuite:
     assertEquals(projection.score, 800.0d)
     assertEquals(projection.severity, "high")
 
+  test("DNS threat scoring assigns the low band below the medium cutoff"):
+    val projection = IntelligencePreparation.dnsThreat(DnsThreatCandidate(
+      "quiet.example",
+      blockedCount = 0L,
+      attemptedBytes = 0L,
+      recentCount = 0L,
+      Timestamp.from(Instant.parse("2026-08-03T10:00:00Z"))
+    ))
+
+    assertEquals(projection.score, 0.0d)
+    assertEquals(projection.severity, "low")
+
   test("AP risk decomposition rejects non-finite values and clamps scores"):
     val projection = IntelligencePreparation.apRisk(
       "11:22:33:44:55:66",

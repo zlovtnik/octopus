@@ -54,9 +54,16 @@ object WirelessSql:
           ) VALUES (
             $normalizedSsid, $normalizedMac,
             (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
-             WHERE authorized.ssid = $normalizedSsid AND authorized.enabled = TRUE
-               AND ($normalizedBssid IS NULL OR authorized.bssid = $normalizedBssid)
-               AND ($locationId IS NULL OR authorized.location_id = $locationId)
+             WHERE authorized.enabled = TRUE
+               AND (authorized.ssid IS NULL OR authorized.ssid = $normalizedSsid)
+               AND (
+                 authorized.bssid IS NULL
+                 OR ($normalizedBssid IS NOT NULL AND authorized.bssid = $normalizedBssid)
+               )
+               AND (
+                 authorized.location_id IS NULL
+                 OR ($locationId IS NOT NULL AND authorized.location_id = $locationId)
+               )
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId
           )           ON DUPLICATE KEY UPDATE
@@ -105,9 +112,19 @@ object WirelessSql:
           WHERE dedupe_key = $dedupeKey AND stream_name = $streamName
             AND status <> 'synced'"""
 
-  def markFailed(dedupeKey: String, streamName: String, error: String): Fragment =
+  def markFailed(
+      dedupeKey: String,
+      streamName: String,
+      status: String,
+      error: String,
+      delaySeconds: Long
+  ): Fragment =
     sql"""UPDATE sync_backlog
-          SET status = 'failed', last_error = $error, updated_at = CURRENT_TIMESTAMP(6)
+          SET status = $status,
+              last_error = $error,
+              next_attempt_at = TIMESTAMPADD(SECOND, ${delaySeconds.max(0L)}, CURRENT_TIMESTAMP(6)),
+              attempt_count = attempt_count + 1,
+              updated_at = CURRENT_TIMESTAMP(6)
           WHERE dedupe_key = $dedupeKey AND stream_name = $streamName
             AND status IN ('pending', 'sync_failed')"""
 

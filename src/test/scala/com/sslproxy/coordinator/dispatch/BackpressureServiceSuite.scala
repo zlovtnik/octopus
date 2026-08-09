@@ -56,7 +56,7 @@ class BackpressureServiceSuite extends CatsEffectSuite:
   test("resume when pending count falls to recovery threshold after suspension"):
     for
       countRef <- cats.effect.kernel.Ref[IO].of(Right(5000L): Either[DatabaseError, Long])
-      svc <- service(countRef.getAndSet(Right(5000L)))
+      svc <- service(countRef.get)
       _ <- svc.checkAndAct
       suspended1 <- svc.isConsumerSuspended
       _ <- countRef.set(Right(1500L))

@@ -347,13 +347,13 @@ object TidbTransformService:
   private def transformHandshakeAlert(rows: List[Json]): List[WirelessHandshakeAlertInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessHandshakeAlertInsert(
-        rowSequence = rowSequence(index, "wifi.alert.handshake"),
-        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wifi.alert.handshake"),
-        sensorId = requiredString(row, "sensor_id", "wifi.alert.handshake"),
-        locationId = requiredString(row, "location_id", "wifi.alert.handshake"),
-        iface = requiredString(row, "interface", "wifi.alert.handshake"),
-        bssid = requiredString(row, "bssid", "wifi.alert.handshake"),
-        clientMac = requiredString(row, "client_mac", "wifi.alert.handshake"),
+        rowSequence = rowSequence(index, "wireless.alert.handshake"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.handshake"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.handshake"),
+        locationId = requiredString(row, "location_id", "wireless.alert.handshake"),
+        iface = requiredString(row, "interface", "wireless.alert.handshake"),
+        bssid = requiredString(row, "bssid", "wireless.alert.handshake"),
+        clientMac = requiredString(row, "client_mac", "wireless.alert.handshake"),
         signalDbm = optionalLong(row, "signal_dbm"),
         pmkidSha256 = optionalString(row, "pmkid").map(Sha256Utils.sha256Hex)
       )

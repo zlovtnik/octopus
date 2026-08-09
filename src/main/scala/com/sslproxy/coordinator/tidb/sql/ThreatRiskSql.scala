@@ -24,13 +24,14 @@ object ThreatRiskSql:
              source_key, near_duplicate, shadow_open, risk_score, ap_risk,
              threat_tag_count, signal_id, signal_type, dedupe_key,
              score, severity, explanation_text, evidence, detected_at,
-             projection_run_id
+             projection_run_id, updated_at
            ) VALUES (
              ${value.sourceKey}, 0, 0, ${value.score}, 0, 1,
              ${value.signalId}, 'dns_blocked_host', ${value.signalId},
              ${value.score}, ${value.severity},
              ${s"blocked DNS/host activity exceeded the characterized seven-day score for ${value.sourceKey}"},
-             CAST(${value.evidenceJson} AS JSON), ${value.detectedAt}, ${value.projectionRunId}
+             CAST(${value.evidenceJson} AS JSON), ${value.detectedAt}, ${value.projectionRunId},
+             CURRENT_TIMESTAMP(6)
            ) ON DUPLICATE KEY UPDATE
              risk_score = VALUES(risk_score),
              score = VALUES(score),
@@ -60,31 +61,47 @@ object ThreatRiskSql:
              WHERE alert.detected_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
              GROUP BY COALESCE(alert.primary_mac, alert.secondary_mac)
            ),
+           vendor_counts AS (
+             SELECT peer.ssid, COUNT(DISTINCT peer.bssid_oui) AS vendor_count
+             FROM wireless_frames peer
+             WHERE peer.ssid IS NOT NULL
+               AND peer.observed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
+             GROUP BY peer.ssid
+           ),
            vendor_scores AS (
              SELECT frame.bssid,
-                    GREATEST(COUNT(DISTINCT peer.bssid_oui) - 1, 0) AS vendor_score
+                    GREATEST(MAX(vendor_counts.vendor_count) - 1, 0) AS vendor_score
              FROM wireless_frames frame
              JOIN bssids ON bssids.bssid = frame.bssid
-             JOIN wireless_frames peer ON peer.ssid = frame.ssid
-               AND peer.observed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
+             JOIN vendor_counts ON vendor_counts.ssid = frame.ssid
              WHERE frame.bssid IS NOT NULL AND frame.ssid IS NOT NULL
                AND frame.observed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
              GROUP BY frame.bssid
            ),
-           outlier_scores AS (
-             SELECT COALESCE(left_document.bssid, right_document.bssid) AS bssid,
-                    MAX(pair.cosine_distance) AS outlier_score
+           attributed_outliers AS (
+             SELECT left_document.bssid AS bssid, pair.cosine_distance
              FROM atheros_search.similarity_pairs pair
              JOIN atheros_search.search_documents left_document
                ON left_document.document_id = pair.left_document_id
              JOIN atheros_search.search_documents right_document
                ON right_document.document_id = pair.right_document_id
-             JOIN bssids bssid_left ON bssid_left.bssid = left_document.bssid
-             JOIN bssids bssid_right ON bssid_right.bssid = right_document.bssid
              WHERE pair.computed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
                AND pair.cosine_distance > 0.15
-               AND (left_document.bssid IS NOT NULL OR right_document.bssid IS NOT NULL)
-             GROUP BY COALESCE(left_document.bssid, right_document.bssid)
+             UNION ALL
+             SELECT right_document.bssid AS bssid, pair.cosine_distance
+             FROM atheros_search.similarity_pairs pair
+             JOIN atheros_search.search_documents left_document
+               ON left_document.document_id = pair.left_document_id
+             JOIN atheros_search.search_documents right_document
+               ON right_document.document_id = pair.right_document_id
+             WHERE pair.computed_at >= TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6))
+               AND pair.cosine_distance > 0.15
+           ),
+           outlier_scores AS (
+             SELECT attributed.bssid, MAX(attributed.cosine_distance) AS outlier_score
+             FROM attributed_outliers attributed
+             JOIN bssids ON bssids.bssid = attributed.bssid
+             GROUP BY attributed.bssid
            )
            SELECT bssids.bssid,
                   COALESCE(alert_scores.deauth_score, 0),
@@ -101,11 +118,12 @@ object ThreatRiskSql:
   def persistApRisk(value: ApRiskProjection): ConnectionIO[Int] =
     sql"""INSERT INTO atheros_search.ap_risk_scores (
              bssid, composite_risk, signal_risk, identity_risk, behaviour_risk,
-             evidence, measured_at, projection_run_id
+             evidence, measured_at, projection_run_id, updated_at
            ) VALUES (
              ${value.bssid}, ${value.composite}, ${value.signalRisk},
              ${value.identityRisk}, ${value.behaviorRisk},
-             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP(6), ${value.projectionRunId}
+             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP(6), ${value.projectionRunId},
+             CURRENT_TIMESTAMP(6)
            ) ON DUPLICATE KEY UPDATE
              composite_risk = VALUES(composite_risk),
              signal_risk = VALUES(signal_risk),
@@ -113,4 +131,5 @@ object ThreatRiskSql:
              behaviour_risk = VALUES(behaviour_risk),
              evidence = VALUES(evidence),
              measured_at = VALUES(measured_at),
-             projection_run_id = VALUES(projection_run_id)""".update.run
+             projection_run_id = VALUES(projection_run_id),
+             updated_at = CURRENT_TIMESTAMP(6)""".update.run

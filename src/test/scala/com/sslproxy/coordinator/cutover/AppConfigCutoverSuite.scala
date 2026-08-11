@@ -192,7 +192,10 @@ class AppConfigCutoverSuite extends FunSuite:
   test("topic auto-provisioning rejects an unsafe replication factor"):
     val baseline = AppConfig.load
     val invalid = baseline.copy(
-      kafka = baseline.kafka.copy(topicReplicationFactor = 1)
+      kafka = baseline.kafka.copy(topicReplicationFactor = 1),
+      tidb = enabledTiDb(baseline.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = completeCutover(configuredGroups(baseline))
     )
 
     AppConfig.validate(invalid) match
@@ -261,9 +264,24 @@ class AppConfigCutoverSuite extends FunSuite:
 
   test("stage mode permits TiDB readiness with all runtime work disabled and no cutover artifact"):
     val baseline = AppConfig.load
-    val staged = baseline.copy(tidb = enabledTiDb(baseline.tidb))
+    val staged = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 1),
+      tidb = enabledTiDb(baseline.tidb)
+    )
 
     assertEquals(AppConfig.validate(staged), Right(staged))
+
+  test("stage mode still rejects an invalid topic replication factor"):
+    val baseline = AppConfig.load
+    val staged = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 0),
+      tidb = enabledTiDb(baseline.tidb)
+    )
+
+    AppConfig.validate(staged) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
+      case Right(_) => fail("expected invalid staged replication factor rejection")
 
   test("cutover dev bypass still requires TiDB for an enabled runtime"):
     val baseline = AppConfig.load

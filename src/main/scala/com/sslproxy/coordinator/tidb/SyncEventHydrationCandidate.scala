@@ -10,3 +10,9 @@ final case class SyncEventHydrationCandidate(
     payloadJson: Option[String],
     payloadSha256: Option[String] = None
 )
+
+final case class HydrationCursor(
+    dedupeKey: String,
+    streamName: String,
+    observedAt: Timestamp
+)

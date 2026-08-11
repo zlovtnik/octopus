@@ -14,6 +14,7 @@ import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLog
 import com.sslproxy.coordinator.processor.{IntelligencePreparation, Lease, SearchDocumentPreparation}
 import com.sslproxy.coordinator.util.Sha256Utils
 import com.sslproxy.coordinator.tidb.sql.{IdentityGraphSql, IngestionSql, IntelligenceSql, JobBatchSql, MaintenanceSql, OutboxSql, ProjectionSql, ResultSql, SearchPreparationSql, ThreatRiskSql, WirelessProcessorSql, WirelessProjectionSql, WirelessSql}
+import com.sslproxy.coordinator.tidb.HydrationCursor
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -113,7 +114,7 @@ class TidbRepository(xa: Transactor[IO],
     }
 
   def findSyncEventsNeedingHydration(
-      after: Option[SyncEventHydrationCandidate],
+      after: Option[HydrationCursor],
       limit: Int
   ): IO[Either[DatabaseError, List[SyncEventHydrationCandidate]]] =
     runDb("tidb.find_sync_events_needing_hydration") {

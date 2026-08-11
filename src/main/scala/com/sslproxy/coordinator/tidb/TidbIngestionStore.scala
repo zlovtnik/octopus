@@ -10,6 +10,7 @@ import com.sslproxy.coordinator.domain.{
   ScanRequestRecord
 }
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
+import com.sslproxy.coordinator.tidb.HydrationCursor
 
 final class TidbIngestionStore(repository: TidbRepository) extends IngestionStore[IO]:
   def pendingCount: DbResultT[IO, Long] =
@@ -54,7 +55,7 @@ final class TidbIngestionStore(repository: TidbRepository) extends IngestionStor
     EitherT(repository.recordSkippedScanRequestEvidence(record, metadata))
 
   def findHydrationCandidates(
-      after: Option[SyncEventHydrationCandidate],
+      after: Option[HydrationCursor],
       limit: Int
   ): DbResultT[IO, List[SyncEventHydrationCandidate]] =
     EitherT(repository.findSyncEventsNeedingHydration(after, limit))

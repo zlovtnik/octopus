@@ -13,7 +13,7 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
-import com.sslproxy.coordinator.tidb.{SyncEventHydrationCandidate, TidbPayloadResolver}
+import com.sslproxy.coordinator.tidb.{HydrationCursor, SyncEventHydrationCandidate, TidbPayloadResolver}
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
 
@@ -92,7 +92,7 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
     ): DbResultT[IO, Unit] = unused
 
     def findHydrationCandidates(
-        after: Option[SyncEventHydrationCandidate],
+        after: Option[HydrationCursor],
         limit: Int
     ): DbResultT[IO, List[SyncEventHydrationCandidate]] =
       EitherT.rightT[IO, DatabaseError](candidates)

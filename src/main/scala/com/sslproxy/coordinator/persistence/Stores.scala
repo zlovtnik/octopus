@@ -6,6 +6,7 @@ import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.processor.{Lease, ProcessorId, ProcessorRunStatus, ProcessorStatus}
 import com.sslproxy.coordinator.tidb.{
   ArchiveCandidate,
+  HydrationCursor,
   OutboxFailureDisposition,
   OutboxRecord,
   SyncEventHydrationCandidate,
@@ -41,7 +42,7 @@ trait IngestionStore[F[_]]:
     metadata: BrokerRecordMetadata
   ): DbResultT[F, Unit]
   def findHydrationCandidates(
-    after: Option[SyncEventHydrationCandidate],
+    after: Option[HydrationCursor],
     limit: Int
   ): DbResultT[F, List[SyncEventHydrationCandidate]]
   def hydrateExistingEvent(

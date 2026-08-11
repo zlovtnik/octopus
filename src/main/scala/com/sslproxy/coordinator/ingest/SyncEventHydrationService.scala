@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.tidb.{
+  HydrationCursor,
   SyncEventHydrationCandidate,
   TidbPayloadReadException,
   TidbPayloadResolver
@@ -48,7 +49,7 @@ final class SyncEventHydrationService(
     Stream.eval(loop(None, Stats(0, 0, 0, 0, 0)))
 
   private def loop(
-      after: Option[SyncEventHydrationCandidate],
+      after: Option[HydrationCursor],
       stats: Stats
   ): IO[Unit] =
     store.findHydrationCandidates(after, pageSize).value.flatMap {
@@ -69,9 +70,11 @@ final class SyncEventHydrationService(
           ))
       case Right(candidates) =>
         hydratePage(candidates, stats).flatMap { nextStats =>
-          candidates.lastOption match
-            case Some(next) if after.forall(cursorAdvances(_, next)) =>
-              loop(Some(next), nextStats)
+          candidates.lastOption.map { next =>
+            HydrationCursor(next.dedupeKey, next.streamName, next.observedAt)
+          } match
+            case Some(cursor) if after.forall(cursorAdvances(_, cursor)) =>
+              loop(Some(cursor), nextStats)
             case _ =>
               complete(nextStats, "non_advancing_cursor")
         }
@@ -124,8 +127,8 @@ final class SyncEventHydrationService(
       ))
 
   private def cursorAdvances(
-      previous: SyncEventHydrationCandidate,
-      next: SyncEventHydrationCandidate
+      previous: HydrationCursor,
+      next: HydrationCursor
   ): Boolean =
     val observed = next.observedAt.compareTo(previous.observedAt)
     observed > 0 ||

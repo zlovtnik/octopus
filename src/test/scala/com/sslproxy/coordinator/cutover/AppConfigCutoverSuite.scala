@@ -312,6 +312,18 @@ class AppConfigCutoverSuite extends FunSuite:
       case Right(_) => fail("expected production dev bypass rejection")
     assertEquals(AppConfig.validate(development), Right(development))
 
+  test("disabled production stage rejects devBypass without an active runtime"):
+    val baseline = AppConfig.load
+    val disabledProduction = baseline.copy(
+      runtime = RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
+      cutover = baseline.cutover.copy(devBypass = true)
+    )
+
+    AppConfig.validate(disabledProduction) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("OCTOPUS_ENVIRONMENT=development")))
+      case Right(_) => fail("expected disabled production stage to reject devBypass")
+
   test("stage mode rejects loopback root blank-password or downgraded TLS TiDB"):
     val baseline = AppConfig.load
     val staged = baseline.copy(tidb = baseline.tidb.copy(enabled = true, sslMode = "REQUIRED"))

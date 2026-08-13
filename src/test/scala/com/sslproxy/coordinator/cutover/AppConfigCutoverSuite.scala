@@ -203,6 +203,20 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
       case Right(_) => fail("expected unsafe topic replication rejection")
 
+  test("active runtime rejects replication factor below the minimum"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 2),
+      tidb = enabledTiDb(baseline.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = completeCutover(configuredGroups(baseline))
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
+      case Right(_) => fail("expected replication factor below minimum to be rejected")
+
   test("development cutover bypass permits a single broker replica"):
     val baseline = AppConfig.load
     val development = baseline.copy(

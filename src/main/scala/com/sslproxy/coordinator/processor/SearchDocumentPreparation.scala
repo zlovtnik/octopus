@@ -6,7 +6,18 @@ import java.nio.charset.StandardCharsets
 import java.text.Normalizer
 import java.util.{Locale, UUID}
 
+enum SearchDocumentKind(
+    val sourceTable: String,
+    val sourceKind: String,
+    val embeddingKind: String
+):
+  case Event extends SearchDocumentKind("wireless_frames", "event", "event")
+  case Device extends SearchDocumentKind("inventory_devices", "device", "device")
+  case Behaviour extends SearchDocumentKind("behaviour_snapshots", "behaviour_window", "behaviour")
+  case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
+
 final case class SearchDocumentSource(
+    kind: SearchDocumentKind,
     sourceKey: String,
     sourceMac: Option[String],
     locationId: Option[String],
@@ -22,6 +33,7 @@ final case class SearchDocumentSource(
 )
 
 final case class PreparedSearchDocument(
+    kind: SearchDocumentKind,
     documentId: String,
     sourceKey: String,
     sourceVersion: Long,
@@ -51,7 +63,7 @@ object SearchDocumentPreparation:
     else if normalizedText.isEmpty then Left(s"search document ${source.sourceKey} has no searchable text")
     else
       val checksum = Sha256Utils.sha256Hex(normalizedText.getBytes(StandardCharsets.UTF_8))
-      val documentId = stableUuid(s"wireless_frames:${source.sourceKey}:$checksum")
+      val documentId = stableUuid(s"${source.kind.sourceTable}:${source.sourceKey}:$checksum")
       val tokenCounts = tokenize(normalizedText).groupMapReduce(identity)(_ => 1)(_ + _)
       val total = tokenCounts.values.sum.max(1)
       val tokens = tokenCounts.toList.sortBy(_._1).map { case (token, count) =>
@@ -71,6 +83,7 @@ object SearchDocumentPreparation:
         case values => Some(values.mkString(" ").take(512))
 
       Right(PreparedSearchDocument(
+        kind = source.kind,
         documentId = documentId,
         sourceKey = source.sourceKey,
         sourceVersion = java.lang.Long.parseUnsignedLong(checksum.take(15), 16),

@@ -140,7 +140,7 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | Configuration block | Environment families | Startup requirement |
 |---|---|---|
 | `tidb` | `TIDB_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
-| `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition bounds; production replication factor at least three; one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
+| `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition bounds; active production runtime replication factor at least three; a fully disabled pre-cutover stage may reflect a single broker because it does not provision or consume topics; one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |

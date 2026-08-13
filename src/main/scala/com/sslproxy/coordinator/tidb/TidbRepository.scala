@@ -592,14 +592,16 @@ class TidbRepository(xa: Transactor[IO],
 
   def buildSearchDocuments(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("tidb.build_search_documents") {
-      SearchPreparationSql.candidates(limit).to[List].flatMap { sources =>
-        sources.traverse_ { source =>
-          SearchDocumentPreparation.prepare(source).fold(
-            error => FC.raiseError[Unit](IllegalArgumentException(error)),
-            document => SearchPreparationSql.persist(document)
-          )
-        }.as(sources.size)
-      }
+      SearchPreparationSql.supportedKinds.traverse { kind =>
+        SearchPreparationSql.candidates(kind, limit).to[List].flatMap { sources =>
+          sources.traverse_ { source =>
+            SearchDocumentPreparation.prepare(source).fold(
+              error => FC.raiseError[Unit](IllegalArgumentException(error)),
+              document => SearchPreparationSql.persist(document)
+            )
+          }.as(sources.size)
+        }
+      }.map(_.sum)
     }
 
   def prepareEmbeddingJobs(
@@ -607,12 +609,14 @@ class TidbRepository(xa: Transactor[IO],
       embeddingModel: String
   ): IO[Either[DatabaseError, Int]] =
     runDb("tidb.prepare_embedding_jobs") {
-      SearchPreparationSql.documentsMissingEmbeddingJobs(embeddingModel, limit).to[List].flatMap { documents =>
-        documents.traverse_ { case (documentId, checksum) =>
-          val jobId = stableUuid("embedding", documentId, "event", embeddingModel, checksum)
-          SearchPreparationSql.enqueueEmbeddingJob(jobId, documentId, checksum, embeddingModel)
-        }.as(documents.size)
-      }
+      SearchPreparationSql.supportedKinds.traverse { kind =>
+        SearchPreparationSql.documentsMissingEmbeddingJobs(kind, embeddingModel, limit).to[List].flatMap { documents =>
+          documents.traverse_ { case (documentId, checksum) =>
+            val jobId = stableUuid("embedding", documentId, kind.embeddingKind, embeddingModel, checksum)
+            SearchPreparationSql.enqueueEmbeddingJob(kind, jobId, documentId, checksum, embeddingModel)
+          }.as(documents.size)
+        }
+      }.map(_.sum)
     }
 
   def projectBehavior(limit: Int): IO[Either[DatabaseError, Int]] =

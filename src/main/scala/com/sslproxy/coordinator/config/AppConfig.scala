@@ -179,11 +179,12 @@ object AppConfig:
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
+    val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty
     val stagedTiDbErrors =
       if config.tidb.enabled then enabledTiDbErrors(config.tidb, isDevelopment)
       else List.empty
     val runtimeErrors =
-      if config.runtime.anyEnabled || config.processors.enabled.nonEmpty then activeRuntimeErrors(config)
+      if runtimeActive then activeRuntimeErrors(config)
       else List.empty
     val errors =
       processorErrors(config.processors) ++
@@ -196,7 +197,9 @@ object AppConfig:
         archiveErrors(config.archive, config.processors) ++
         kafkaErrors(
           config.kafka,
-          isDevelopment) ++
+          isDevelopment,
+          runtimeActive
+        ) ++
         wirelessErrors( config.wireless) ++
         backpressureErrors( config.backpressure
         ) ++
@@ -300,7 +303,11 @@ object AppConfig:
       Option.when(config.maintenanceIntervalMs <= 0L)("archive.maintenance-interval-ms must be positive")
     ).flatten
 
-  private def kafkaErrors(config: KafkaCfg, isDevelopment: Boolean): List[String] =
+  private def kafkaErrors(
+      config: KafkaCfg,
+      isDevelopment: Boolean,
+      runtimeActive: Boolean
+  ): List[String] =
     List(
       Option.when(config.dlqSuffix.isEmpty)(
         "kafka.dlq-suffix must not be empty"
@@ -324,13 +331,13 @@ object AppConfig:
         "kafka.locked-batch-window-ms must be positive"
       ),
       Option.when(
-        isDevelopment &&
+        (isDevelopment || !runtimeActive) &&
           (config.topicReplicationFactor < 1 || config.topicReplicationFactor > Short.MaxValue)
       )(
-        "kafka.topic-replication-factor must be between 1 and 32767 in development mode"
+        "kafka.topic-replication-factor must be between 1 and 32767 when runtime lanes are disabled or in development mode"
       ),
       Option.when(
-        !isDevelopment &&
+        runtimeActive && !isDevelopment &&
           (config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)
       )(
         "kafka.topic-replication-factor must be between 3 and 32767"

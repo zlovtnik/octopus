@@ -1,14 +1,23 @@
 package com.sslproxy.coordinator.tidb.sql
 
 import cats.syntax.all.*
-import com.sslproxy.coordinator.processor.{PreparedSearchDocument, SearchDocumentSource}
+import com.sslproxy.coordinator.processor.{PreparedSearchDocument, SearchDocumentKind, SearchDocumentSource}
 import doobie.{ConnectionIO, Query0, Update}
 import doobie.implicits.*
 import io.circe.Json
 import io.circe.syntax.*
 
 object SearchPreparationSql:
-  def candidates(limit: Int): Query0[SearchDocumentSource] =
+  val supportedKinds: List[SearchDocumentKind] = SearchDocumentKind.values.toList
+
+  def candidates(kind: SearchDocumentKind, limit: Int): Query0[SearchDocumentSource] =
+    kind match
+      case SearchDocumentKind.Event => eventCandidates(limit)
+      case SearchDocumentKind.Device => deviceCandidates(limit)
+      case SearchDocumentKind.Behaviour => behaviourCandidates(limit)
+      case SearchDocumentKind.Sequence => sequenceCandidates(limit)
+
+  private def eventCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id,
                   frame.observed_at, frame.bssid, frame.ssid, frame.frame_subtype,
                   security.security_flags, identity_row.handshake_captured,
@@ -31,27 +40,120 @@ object SearchPreparationSql:
            LEFT JOIN atheros_search.search_documents document
              ON document.source_table = 'wireless_frames'
             AND document.source_key = frame.dedupe_key
+            AND document.source_kind = 'event'
             AND document.status = 'active'
            WHERE document.document_id IS NULL
            ORDER BY frame.observed_at, frame.dedupe_key
            LIMIT ${limit.max(1)}"""
       .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
         Option[String], Option[String], Option[String], Int, Boolean, String, String)]
-      .map(SearchDocumentSource.apply.tupled)
+      .map(row => SearchDocumentSource(SearchDocumentKind.Event, row._1, row._2, row._3, row._4,
+        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+
+  private def deviceCandidates(limit: Int): Query0[SearchDocumentSource] =
+    sql"""SELECT device.mac, device.mac, device.location_id, CAST(NULL AS CHAR),
+                  device.last_seen, CAST(NULL AS CHAR), CAST(NULL AS CHAR), CAST(NULL AS CHAR),
+                  0, FALSE,
+                  CONCAT_WS(' ', 'kind: device', device.mac, device.display_name, device.owner_id,
+                    device.location_id, cluster.cluster_name,
+                    CASE WHEN cluster.cluster_size IS NULL THEN NULL
+                         ELSE CONCAT('cluster_size: ', cluster.cluster_size) END),
+                  JSON_OBJECT(
+                    'registered', device.registered,
+                    'active', device.active,
+                    'owner_id', device.owner_id,
+                    'similarity_cluster_id', device.similarity_cluster_id,
+                    'dedup_confidence', device.dedup_confidence,
+                    'known_macs', device.known_macs,
+                    'tags', device.tags
+                  )
+           FROM atheros_search.inventory_devices device
+           LEFT JOIN atheros_search.identity_clusters cluster
+             ON cluster.cluster_id = device.similarity_cluster_id
+           LEFT JOIN atheros_search.search_documents document
+             ON document.source_table = 'inventory_devices'
+            AND document.source_key = device.mac
+            AND document.source_kind = 'device'
+            AND document.status = 'active'
+           WHERE document.document_id IS NULL OR document.updated_at < device.updated_at
+           ORDER BY device.last_seen, device.mac
+           LIMIT ${limit.max(1)}"""
+      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
+        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
+      .map(row => SearchDocumentSource(SearchDocumentKind.Device, row._1, row._2, row._3, row._4,
+        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+
+  private def behaviourCandidates(limit: Int): Query0[SearchDocumentSource] =
+    sql"""SELECT snapshot.snapshot_key, snapshot.source_mac, snapshot.location_id, snapshot.sensor_id,
+                  snapshot.window_end, CAST(NULL AS CHAR), CAST(NULL AS CHAR),
+                  CAST('behaviour_window' AS CHAR), 0, FALSE,
+                  COALESCE(NULLIF(snapshot.embedding_text, ''), snapshot.text_summary),
+                  JSON_OBJECT(
+                    'window_start', snapshot.window_start,
+                    'window_end', snapshot.window_end,
+                    'event_count', snapshot.event_count,
+                    'protocol_mix', snapshot.protocol_mix,
+                    'frame_type_distribution', snapshot.frame_type_distribution,
+                    'text_summary', snapshot.text_summary
+                  )
+           FROM atheros_search.behaviour_snapshots snapshot
+           LEFT JOIN atheros_search.search_documents document
+             ON document.source_table = 'behaviour_snapshots'
+            AND document.source_key = snapshot.snapshot_key
+            AND document.source_kind = 'behaviour_window'
+            AND document.status = 'active'
+           WHERE (document.document_id IS NULL OR document.updated_at < snapshot.updated_at)
+             AND COALESCE(NULLIF(snapshot.embedding_text, ''), NULLIF(snapshot.text_summary, '')) IS NOT NULL
+           ORDER BY snapshot.window_end, snapshot.snapshot_key
+           LIMIT ${limit.max(1)}"""
+      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
+        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
+      .map(row => SearchDocumentSource(SearchDocumentKind.Behaviour, row._1, row._2, row._3, row._4,
+        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+
+  private def sequenceCandidates(limit: Int): Query0[SearchDocumentSource] =
+    sql"""SELECT sequence_row.session_key, sequence_row.source_mac, sequence_row.location_id,
+                  sequence_row.sensor_id, sequence_row.window_end, CAST(NULL AS CHAR), CAST(NULL AS CHAR),
+                  CAST('frame_sequence' AS CHAR), 0, FALSE,
+                  COALESCE(NULLIF(sequence_row.semantic_tokens, ''), sequence_row.sequence_tokens),
+                  JSON_OBJECT(
+                    'window_start', sequence_row.window_start,
+                    'window_end', sequence_row.window_end,
+                    'frame_count', sequence_row.frame_count,
+                    'sequence_tokens', sequence_row.sequence_tokens,
+                    'semantic_tokens', sequence_row.semantic_tokens
+                  )
+           FROM atheros_search.frame_sequences sequence_row
+           LEFT JOIN atheros_search.search_documents document
+             ON document.source_table = 'frame_sequences'
+            AND document.source_key = sequence_row.session_key
+            AND document.source_kind = 'frame_sequence'
+            AND document.status = 'active'
+           WHERE (document.document_id IS NULL OR document.updated_at < sequence_row.updated_at)
+             AND COALESCE(NULLIF(sequence_row.semantic_tokens, ''), NULLIF(sequence_row.sequence_tokens, '')) IS NOT NULL
+           ORDER BY sequence_row.window_end, sequence_row.session_key
+           LIMIT ${limit.max(1)}"""
+      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
+        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
+      .map(row => SearchDocumentSource(SearchDocumentKind.Sequence, row._1, row._2, row._3, row._4,
+        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
 
   def persist(document: PreparedSearchDocument): ConnectionIO[Unit] =
+    val sourceTable = document.kind.sourceTable
+    val sourceKind = document.kind.sourceKind
     val tagsJson = document.tags.map { case (kind, value) =>
       Json.obj("type" -> kind.asJson, "value" -> value.asJson)
     }.asJson.noSpaces
     val metadata = Json.obj(
       "producer" -> "octopus".asJson,
+      "embedding_kind" -> document.kind.embeddingKind.asJson,
       "normalized_sha256" -> document.normalizedSha256.asJson
     ).noSpaces
 
     for
       _ <- sql"""UPDATE atheros_search.search_documents
                    SET status = 'superseded', updated_at = CURRENT_TIMESTAMP(6)
-                   WHERE source_table = 'wireless_frames'
+                   WHERE source_table = $sourceTable
                      AND source_key = ${document.sourceKey}
                      AND document_id <> ${document.documentId}
                      AND status = 'active'""".update.run
@@ -62,7 +164,7 @@ object SearchPreparationSql:
                    title, normalized_text, normalized_sha256, locale, status, metadata,
                    created_at, updated_at
                  ) VALUES (
-                   ${document.documentId}, ${document.sourceKey}, 'wireless_frames', 'wireless_frame',
+                   ${document.documentId}, ${document.sourceKey}, $sourceTable, $sourceKind,
                    ${document.sourceVersion}, ${document.sourceMac}, ${document.locationId},
                    ${document.sensorId}, ${document.observedAt}, ${document.bssid}, ${document.ssid},
                    ${document.frameSubtype}, $tagsJson, ${document.detailJson}, ${document.securityFlags},
@@ -71,6 +173,18 @@ object SearchPreparationSql:
                    CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
                  ) ON DUPLICATE KEY UPDATE
                    status = 'active',
+                   source_key = VALUES(source_key),
+                   source_table = VALUES(source_table),
+                   source_kind = VALUES(source_kind),
+                   source_mac = VALUES(source_mac),
+                   location_id = VALUES(location_id),
+                   sensor_id = VALUES(sensor_id),
+                   observed_at = VALUES(observed_at),
+                   bssid = VALUES(bssid),
+                   ssid = VALUES(ssid),
+                   frame_subtype = VALUES(frame_subtype),
+                   security_flags = VALUES(security_flags),
+                   handshake_captured = VALUES(handshake_captured),
                    tags = VALUES(tags),
                    detail_json = VALUES(detail_json),
                    title = VALUES(title),
@@ -90,33 +204,39 @@ object SearchPreparationSql:
     yield ()
 
   def documentsMissingEmbeddingJobs(
+      kind: SearchDocumentKind,
       embeddingModel: String,
       limit: Int
   ): Query0[(String, String)] =
+    val embeddingKind = kind.embeddingKind
+    val sourceKind = kind.sourceKind
     sql"""SELECT document.document_id, document.normalized_sha256
            FROM atheros_search.search_documents document
            LEFT JOIN atheros_search.embedding_jobs job
              ON job.document_id = document.document_id
-            AND job.embedding_kind = 'event'
+            AND job.embedding_kind = $embeddingKind
             AND job.embedding_model = $embeddingModel
             AND job.content_sha256 = document.normalized_sha256
            WHERE document.status = 'active'
+             AND document.source_kind = $sourceKind
              AND job.job_id IS NULL
            ORDER BY document.observed_at, document.document_id
            LIMIT ${limit.max(1)}""".query[(String, String)]
 
   def enqueueEmbeddingJob(
+      kind: SearchDocumentKind,
       jobId: String,
       documentId: String,
       contentSha256: String,
       embeddingModel: String
   ): ConnectionIO[Unit] =
+    val embeddingKind = kind.embeddingKind
     sql"""INSERT INTO atheros_search.embedding_jobs (
              job_id, document_id, embedding_kind, embedding_model, content_sha256,
              status, priority, attempt_count, max_attempts, next_attempt_at,
              created_at, updated_at
            ) VALUES (
-             $jobId, $documentId, 'event', $embeddingModel,
+             $jobId, $documentId, $embeddingKind, $embeddingModel,
              $contentSha256, 'pending', 100, 0, 5,
              CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
            ) ON DUPLICATE KEY UPDATE job_id = embedding_jobs.job_id""".update.run.void

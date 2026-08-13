@@ -7,6 +7,7 @@ import java.time.Instant
 
 class SearchDocumentPreparationSuite extends FunSuite:
   private val source = SearchDocumentSource(
+    kind = SearchDocumentKind.Event,
     sourceKey = "event-1",
     sourceMac = Some("aa:bb:cc:dd:ee:ff"),
     locationId = Some("lab"),
@@ -40,3 +41,9 @@ class SearchDocumentPreparationSuite extends FunSuite:
 
   test("blank content is rejected without side effects"):
     assert(SearchDocumentPreparation.prepare(source.copy(searchText = "  ")).isLeft)
+
+  test("document identifiers are isolated by source table"):
+    val event = SearchDocumentPreparation.prepare(source).fold(fail(_), identity)
+    val device = SearchDocumentPreparation.prepare(source.copy(kind = SearchDocumentKind.Device)).fold(fail(_), identity)
+
+    assertNotEquals(event.documentId, device.documentId)

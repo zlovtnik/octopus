@@ -203,6 +203,20 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
       case Right(_) => fail("expected unsafe topic replication rejection")
 
+  test("active runtime rejects replication factor below the minimum"):
+    val baseline = AppConfig.load
+    val invalid = baseline.copy(
+      kafka = baseline.kafka.copy(topicReplicationFactor = 2),
+      tidb = enabledTiDb(baseline.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      cutover = completeCutover(configuredGroups(baseline))
+    )
+
+    AppConfig.validate(invalid) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("topic-replication-factor")))
+      case Right(_) => fail("expected replication factor below minimum to be rejected")
+
   test("development cutover bypass permits a single broker replica"):
     val baseline = AppConfig.load
     val development = baseline.copy(
@@ -311,6 +325,18 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(error.errors.toList.exists(_.contains("OCTOPUS_ENVIRONMENT=development")))
       case Right(_) => fail("expected production dev bypass rejection")
     assertEquals(AppConfig.validate(development), Right(development))
+
+  test("disabled production stage rejects devBypass without an active runtime"):
+    val baseline = AppConfig.load
+    val disabledProduction = baseline.copy(
+      runtime = RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
+      cutover = baseline.cutover.copy(devBypass = true)
+    )
+
+    AppConfig.validate(disabledProduction) match
+      case Left(error) =>
+        assert(error.errors.toList.exists(_.contains("OCTOPUS_ENVIRONMENT=development")))
+      case Right(_) => fail("expected disabled production stage to reject devBypass")
 
   test("stage mode rejects loopback root blank-password or downgraded TLS TiDB"):
     val baseline = AppConfig.load

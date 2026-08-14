@@ -180,6 +180,10 @@ object AppConfig:
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
     val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty
+    val devBypassEnvironmentError =
+      if config.cutover.devBypass && config.runtime.environment != "development" then
+        List("cutover.dev-bypass requires OCTOPUS_ENVIRONMENT=development")
+      else List.empty
     val stagedTiDbErrors =
       if config.tidb.enabled then enabledTiDbErrors(config.tidb, isDevelopment)
       else List.empty
@@ -206,6 +210,7 @@ object AppConfig:
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
         tidbBoundErrors(config.tidb) ++
+        devBypassEnvironmentError ++
         stagedTiDbErrors ++
         runtimeErrors
 
@@ -496,12 +501,7 @@ object AppConfig:
       )
     ).flatten
 
-    if cutover.devBypass then
-      runtimeInvariantErrors ++ List(
-        Option.when(config.runtime.environment != "development")(
-          "cutover.dev-bypass requires OCTOPUS_ENVIRONMENT=development"
-        )
-      ).flatten
+    if cutover.devBypass then runtimeInvariantErrors
     else
       val requiredGroups = cutover.requiredConsumerGroups
       val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)

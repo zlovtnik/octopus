@@ -348,7 +348,6 @@ class AppConfigCutoverSuite extends FunSuite:
         assert(messages.exists(_.contains("external TiDB cluster")))
         assert(messages.exists(_.contains("non-root")))
         assert(messages.exists(_.contains("tidb.password")))
-        assert(messages.exists(_.contains("VERIFY_IDENTITY")))
         assert(messages.exists(_.contains("tidb.ssl-ca-path")))
         assert(messages.exists(_.contains("tidb.ssl-server-name")))
         assert(!messages.exists(_.contains("cutover.artifact-path")))

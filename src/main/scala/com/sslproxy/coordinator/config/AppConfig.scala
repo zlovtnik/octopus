@@ -437,24 +437,32 @@ object AppConfig:
       ),
       required(config.password, "tidb.password"
       ),
-      Option.when(config.sslMode != "VERIFY_IDENTITY")(
-        "tidb.ssl-mode must be VERIFY_IDENTITY"
-      ),
-      required(config.sslCaPath, "tidb.ssl-ca-path"),
-      required(config.sslServerName, "tidb.ssl-server-name"),
       Option.when(
-        config.sslServerName.trim.nonEmpty &&
-          !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
+        config.sslMode != "DISABLED" && config.sslCaPath.trim.isEmpty
+      )(
+        "tidb.ssl-ca-path is required when ssl-mode is not DISABLED"
+      ),
+      Option.when(
+        config.sslMode != "DISABLED" && config.sslServerName.trim.isEmpty
+      )(
+        "tidb.ssl-server-name is required when ssl-mode is not DISABLED"
+      ),
+      Option.when(
+        config.sslMode != "DISABLED" &&
+          config.sslServerName.trim.nonEmpty &&
+            !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
       )(
         "tidb.ssl-server-name must equal tidb.host because Connector/J verifies the JDBC host identity"
       ),
       Option.when(
-        config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.trim.nonEmpty
+        config.sslMode != "DISABLED" &&
+          config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.trim.nonEmpty
       )(
         "tidb.ssl-client-key-store-path and tidb.ssl-client-key-store-password must be configured together"
       ),
       Option.when(
-        !Set("JKS", "PKCS12").contains(config.sslClientKeyStoreType.trim.toUpperCase(java.util.Locale.ROOT))
+        config.sslMode != "DISABLED" &&
+          !Set("JKS", "PKCS12").contains(config.sslClientKeyStoreType.trim.toUpperCase(java.util.Locale.ROOT))
       )(
         "tidb.ssl-client-key-store-type must be JKS or PKCS12"
       ),

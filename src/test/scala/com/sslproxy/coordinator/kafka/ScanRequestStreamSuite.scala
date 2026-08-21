@@ -17,3 +17,11 @@ class ScanRequestStreamSuite extends FunSuite:
 
   test("unknown streams are rejected instead of silently skipped"):
     assert(!ScanRequestStream.isConfiguredStream("wireless.unknown", configured))
+
+  test("configured stream names use the same trimming behavior as the ingest ledger"):
+    assertEquals(
+      ScanRequestStream.configuredStreamNames(
+        List(" proxy.events ", "", "wireless.audit", "proxy.events")
+      ),
+      Set("proxy.events", "wireless.audit")
+    )

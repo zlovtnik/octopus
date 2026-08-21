@@ -19,3 +19,8 @@ class ProcessorWorkloadWiringSuite extends FunSuite:
       val count = declaration.findAllMatchIn(source).size
       assertEquals(count, 1, s"${id.value} workload declaration count")
     }
+    assertEquals(
+      raw"hydrationService\.runOnce".r.findAllMatchIn(source).size,
+      1,
+      "hydration backfill must run only through requiredRuntimeStreams"
+    )

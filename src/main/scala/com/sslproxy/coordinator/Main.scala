@@ -247,8 +247,7 @@ object Main extends IOApp.Simple:
                               val workloads = lockedConsumerWorkloads ++ List(
                                 ProcessorWorkload(
                                   ProcessorId.SyncJobPlanner,
-                                  cronScheduler.jobPlanningStream,
-                                  startup = hydrationService.runOnce.compile.drain
+                                  cronScheduler.jobPlanningStream
                                 ),
                                 ProcessorWorkload(
                                   ProcessorId.SyncBacklogRecovery,

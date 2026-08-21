@@ -8,7 +8,7 @@ FROM azul/zulu-openjdk-alpine:21 AS builder
 
 # Install sbt
 ARG SBT_VERSION=1.12.14
-RUN apk add --no-cache bash curl tar \
+RUN apk add --no-cache bash curl python3 tar \
     && curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
       -o /tmp/sbt.tgz \
     && tar xzf /tmp/sbt.tgz -C /opt \
@@ -16,13 +16,20 @@ RUN apk add --no-cache bash curl tar \
     && rm /tmp/sbt.tgz
 
 WORKDIR /app
+COPY scripts/octopus_image_contract.py /usr/local/bin/octopus-image-contract
 COPY services/octopus/ ./
-RUN sbt --batch assembly
+RUN sbt --batch assembly \
+    && python3 /usr/local/bin/octopus-image-contract jar target/scala-3.*/octopus.jar
 
 # ---- Stage 2: Runtime with Azul Zulu JRE 21 (Alpine) ----
 FROM azul/zulu-openjdk-alpine:21-jre
+ARG PARENT_COMMIT
+ARG OCTOPUS_COMMIT
 ENV TZ=America/New_York
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:InitialRAMPercentage=50 -XX:MaxRAMPercentage=75"
+
+LABEL org.opencontainers.image.revision="$PARENT_COMMIT" \
+      io.ssl-proxy.octopus.revision="$OCTOPUS_COMMIT"
 
 RUN apk add --no-cache \
         bash \

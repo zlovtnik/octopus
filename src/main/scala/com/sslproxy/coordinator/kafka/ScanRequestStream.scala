@@ -2,8 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
+import com.sslproxy.coordinator.config.{IngestConfig, KafkaCfg}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
@@ -16,49 +15,59 @@ object ScanRequestStream:
   private val log = StructuredLogger(getClass)
 
   def run(
-      cfg: KafkaCfg,
-      artifact: VerifiedCutoverArtifact,
-      store: IngestionStore[IO],
-      payloadResolver: TidbPayloadResolver,
-      metrics: CoordinatorMetrics,
-      producer: KafkaProducer[IO, String, String]
+    cfg: KafkaCfg,
+    ingest: IngestConfig,
+    store: IngestionStore[IO],
+    payloadResolver: TidbPayloadResolver,
+    metrics: CoordinatorMetrics,
+    producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact, producer,
-      ScanRequestRecord.decodeWire,
-      store.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).value.flatMap {
-        case Left(err) =>
-          IO(log.error("scan_request_consumer",
-            "status" -> "offset_load_failed",
-            "consumer_group" -> cfg.scanConsumer,
-            "topic" -> cfg.scanTopic,
-            "operation" -> err.operation,
-            "error" -> err.message)) *>
-            IO.raiseError[Set[CutoffKey]](
-              new RuntimeException("cutover offset authorization unavailable"))
-        case Right(cutoffs) =>
-          IO.pure(cutoffs)
-      }
+    val configuredStreams = ingest.streamNames.toSet
+    LockedTopicConsumer.stream(
+      cfg,
+      cfg.scanConsumer,
+      cfg.scanTopic,
+      producer,
+      ScanRequestRecord.decodeWire
     ) { lockedRecords =>
-      val relevant = lockedRecords.filter(_.decoded.streamName == "proxy.events")
+      val (configured, unconfigured) = lockedRecords.partition { locked =>
+        isConfiguredStream(locked.decoded.streamName, configuredStreams)
+      }
       for
-        resolved <- relevant.traverse { locked =>
+        _ <- unconfigured.traverse_ { locked =>
+          LockedTopicConsumer.parkNonRetriable(
+            producer,
+            cfg.scanTopic + cfg.dlqSuffix,
+            cfg.scanConsumer,
+            locked.record,
+            IllegalArgumentException(
+              s"scan request stream ${locked.decoded.streamName} is not configured for Octopus ingestion"
+            )
+          )
+        }
+        resolved <- configured.traverse { locked =>
           IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
         }
-        handled <- resolved.traverse { case (locked, request, record) => store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
+        handled <- resolved.traverse { case (locked, request, record) =>
+          store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))
             case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
-              LockedTopicConsumer.parkNonRetriable(
-                producer,
-                cfg.scanTopic + cfg.dlqSuffix,
-                cfg.scanConsumer,
-                locked.record,
-                error.cause
-              ).as(None)
+              LockedTopicConsumer
+                .parkNonRetriable(
+                  producer,
+                  cfg.scanTopic + cfg.dlqSuffix,
+                  cfg.scanConsumer,
+                  locked.record,
+                  error.cause
+                )
+                .as(None)
             case Left(error) =>
-              IO.raiseError(new RuntimeException(
-                s"${error.operation}: ${Option(error.message).getOrElse("")}",
-                error.cause
-              ))
+              IO.raiseError(
+                new RuntimeException(
+                  s"${error.operation}: ${Option(error.message).getOrElse("")}",
+                  error.cause
+                )
+              )
           }
         }
         _ <- handled.flatten.traverse_ { case (locked, request, decision) =>
@@ -66,38 +75,20 @@ object ScanRequestStream:
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
             )
-            _ <- IO(log.info("scan_request_consumer",
-              "status" -> decision.disposition.databaseValue,
-              "stream_name" -> request.streamName,
-              "group" -> locked.metadata.consumerGroup,
-              "partition" -> locked.metadata.partition.toString,
-              "offset" -> locked.metadata.offset.toString))
+            _ <- IO(
+              log.info(
+                "scan_request_consumer",
+                "status" -> decision.disposition.databaseValue,
+                "stream_name" -> request.streamName,
+                "group" -> locked.metadata.consumerGroup,
+                "partition" -> locked.metadata.partition.toString,
+                "offset" -> locked.metadata.offset.toString
+              )
+            )
           yield ()
         }
-        _ <- lockedRecords.filter(_.decoded.streamName != "proxy.events")
-          .traverse_ { locked =>
-            store.recordSkippedScanRequest(locked.decoded, locked.metadata).value.flatMap {
-              case Right(_) =>
-                IO(log.debug("scan_request_consumer",
-                  "status" -> "skipped",
-                  "stream_name" -> locked.decoded.streamName,
-                  "group" -> locked.metadata.consumerGroup,
-                  "partition" -> locked.metadata.partition.toString,
-                  "offset" -> locked.metadata.offset.toString))
-              case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
-                LockedTopicConsumer.parkNonRetriable(
-                  producer,
-                  cfg.scanTopic + cfg.dlqSuffix,
-                  cfg.scanConsumer,
-                  locked.record,
-                  error.cause
-                )
-              case Left(error) =>
-                IO.raiseError(new RuntimeException(
-                  s"${error.operation}: ${Option(error.message).getOrElse("")}",
-                  error.cause
-                ))
-            }
-          }
       yield ()
     }
+
+  private[kafka] def isConfiguredStream(streamName: String, configuredStreams: Set[String]): Boolean =
+    configuredStreams.contains(streamName)

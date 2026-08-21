@@ -1,97 +1,40 @@
 package com.sslproxy.coordinator.kafka
 
-import com.sslproxy.coordinator.config.{CutoverConfig, KafkaCfg}
-import com.sslproxy.coordinator.cutover.*
+import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.domain.BrokerConsumerContract
 import com.sslproxy.coordinator.tidb.TidbResult
 import munit.FunSuite
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.{InvalidReplicationFactorException, TopicExistsException}
 
-import java.nio.charset.StandardCharsets
-import java.security.{KeyPairGenerator, MessageDigest, Signature}
-import java.time.Instant
-import java.util.{Base64, HexFormat}
 import java.util.concurrent.ExecutionException
 
 class LockedTopicConsumerSuite extends FunSuite:
   private val ScanGroup = "octopus-scan-v1"
   private val ScanTopic = "sync.scan.request"
-  private val Cutoff = 100L
 
-  test("first observed partition offset must exactly equal the signed cutoff"):
-    val artifact = verifiedArtifact(ScanGroup, ScanTopic, Cutoff)
+  test("consumer contract is deterministic and derived from the versioned Kafka group"):
+    val first = BrokerConsumerContract.from(ScanGroup, ScanTopic)
+    val second = BrokerConsumerContract.from(ScanGroup, ScanTopic)
 
-    val accepted = CutoverOffsetGuard.authorize(
-      CutoverOffsetGuardState.empty,
-      artifact,
-      ScanGroup,
-      ScanTopic,
-      partition = 0,
-      offset = Cutoff
-    )
+    assertEquals(first, second)
+    assertEquals(first.toOption.map(_.groupVersion), Some(1))
+    assertEquals(first.toOption.map(_.contractSha256.length), Some(64))
 
-    accepted match
-      case Right((state, evidence)) =>
-        assert(state.contains(CutoffKey(ScanGroup, ScanTopic, 0)))
-        assertEquals(evidence.evidenceType, CutoverEvidenceType.BootstrapPosition)
-      case Left(error) => fail(error.getMessage)
+  test("consumer contract rejects unversioned groups"):
+    val result = BrokerConsumerContract.from("octopus-scan", ScanTopic)
+    assert(result.left.toOption.exists(_.getMessage.contains("version suffix")))
 
-    CutoverOffsetGuard.authorize(
-      CutoverOffsetGuardState.empty,
-      artifact,
-      ScanGroup,
-      ScanTopic,
-      partition = 0,
-      offset = Cutoff + 1L
-    ) match
-      case Left(_: CutoverBootstrapOffsetMismatch) => ()
-      case other => fail(s"expected exact bootstrap mismatch, found $other")
+  test("consumer contract changes with group or topic"):
+    val baseline = BrokerConsumerContract.from(ScanGroup, ScanTopic).toOption.get
+    val nextGroup = BrokerConsumerContract.from("octopus-scan-v2", ScanTopic).toOption.get
+    val nextTopic = BrokerConsumerContract.from(ScanGroup, "sync.scan.other").toOption.get
 
-  test("later records use at-or-after authorization and reject below-cutoff replay"):
-    val artifact = verifiedArtifact(ScanGroup, ScanTopic, Cutoff)
-    val bootstrapped = CutoverOffsetGuard.authorize(
-      CutoverOffsetGuardState.empty,
-      artifact,
-      ScanGroup,
-      ScanTopic,
-      partition = 0,
-      offset = Cutoff
-    ).toOption.get._1
+    assertNotEquals(baseline.contractSha256, nextGroup.contractSha256)
+    assertNotEquals(baseline.contractSha256, nextTopic.contractSha256)
 
-    val later = CutoverOffsetGuard.authorize(
-      bootstrapped,
-      artifact,
-      ScanGroup,
-      ScanTopic,
-      partition = 0,
-      offset = Cutoff + 7L
-    )
-    assertEquals(
-      later.toOption.map(_._2.evidenceType),
-      Some(CutoverEvidenceType.RecordOffsetAuthorization)
-    )
-
-    CutoverOffsetGuard.authorize(
-      bootstrapped,
-      artifact,
-      ScanGroup,
-      ScanTopic,
-      partition = 0,
-      offset = Cutoff - 1L
-    ) match
-      case Left(_: CutoverOffsetBelowCutoff) => ()
-      case other => fail(s"expected below-cutoff rejection, found $other")
-
-  test("missing assigned partition coverage fails closed"):
-    val artifact = verifiedArtifact(ScanGroup, ScanTopic, Cutoff)
-    val assigned = List(new TopicPartition(ScanTopic, 0), new TopicPartition(ScanTopic, 1))
-
-    LockedTopicConsumer.validateCoverage(artifact, ScanGroup, ScanTopic, assigned) match
-      case Left(_: MissingCutoverCoverage) => ()
-      case other => fail(s"expected missing coverage rejection, found $other")
-
-  test("locked consumer settings use earliest with a guard-enforced cutoff"):
+  test("locked consumer settings replay from earliest and commit manually"):
     val settings = KafkaComponents.consumerSettings(kafkaConfig, kafkaConfig.loadConsumer)
 
     assertEquals(settings.properties(ConsumerConfig.GROUP_ID_CONFIG), kafkaConfig.loadConsumer)
@@ -100,21 +43,38 @@ class LockedTopicConsumerSuite extends FunSuite:
     assertEquals(settings.properties(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG), "false")
     assertEquals(settings.properties(ConsumerConfig.ISOLATION_LEVEL_CONFIG), "read_committed")
 
+  test("assignment validation rejects an unexpected topic"):
+    val expected = List(new TopicPartition(ScanTopic, 0), new TopicPartition(ScanTopic, 1))
+    val unexpected = expected :+ new TopicPartition("sync.scan.other", 0)
+
+    assertEquals(LockedTopicConsumer.validateAssignments(ScanTopic, expected), Right(()))
+    assert(LockedTopicConsumer.validateAssignments(ScanTopic, unexpected).isLeft)
+
   test("topic provisioning accepts an already-existing topic race only"):
-    assert(KafkaComponents.isTopicAlreadyExists(
-      new ExecutionException(new TopicExistsException("topic already exists"))
-    ))
-    assert(!KafkaComponents.isTopicAlreadyExists(
-      new ExecutionException(new IllegalStateException("topic creation failed"))
-    ))
+    assert(
+      KafkaComponents.isTopicAlreadyExists(
+        new ExecutionException(new TopicExistsException("topic already exists"))
+      )
+    )
+    assert(
+      !KafkaComponents.isTopicAlreadyExists(
+        new ExecutionException(new IllegalStateException("topic creation failed"))
+      )
+    )
 
   test("topic provisioning detects invalid replication factor"):
-    assert(KafkaComponents.isInvalidReplicationFactor(
-      new ExecutionException(new InvalidReplicationFactorException("Unable to allocate topic with given replication factor"))
-    ))
-    assert(!KafkaComponents.isInvalidReplicationFactor(
-      new ExecutionException(new IllegalStateException("replication failed"))
-    ))
+    assert(
+      KafkaComponents.isInvalidReplicationFactor(
+        new ExecutionException(
+          new InvalidReplicationFactorException("Unable to allocate topic with given replication factor")
+        )
+      )
+    )
+    assert(
+      !KafkaComponents.isInvalidReplicationFactor(
+        new ExecutionException(new IllegalStateException("replication failed"))
+      )
+    )
 
   test("topic provisioning reserves the expanded count for locked sync topics"):
     val cfg = kafkaConfig
@@ -159,50 +119,5 @@ class LockedTopicConsumerSuite extends FunSuite:
       lockedBatchSize = 100,
       lockedBatchWindowMs = 250L,
       topicPartitions = 24,
-      topicReplicationFactor = 3
+      topicReplicationFactor = 1
     )
-
-  private def verifiedArtifact(
-      groupId: String,
-      topic: String,
-      cutoff: Long
-  ): VerifiedCutoverArtifact =
-    val keyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
-    val payload =
-      s"{\"artifact_id\":\"locked-topic-test\",\"captured_at\":\"2026-07-21T20:00:00Z\"," +
-        s"\"cluster_id\":\"redpanda-test\",\"cutoffs\":[{\"cutoff_offset\":$cutoff," +
-        s"\"group_id\":\"$groupId\",\"partition\":0,\"topic\":\"$topic\"}]," +
-        "\"group_version\":1,\"schema_version\":1}"
-    val artifactSha256 = sha256(payload.getBytes(StandardCharsets.UTF_8))
-    val document =
-      s"{\"artifact_id\":\"locked-topic-test\",\"artifact_sha256\":\"$artifactSha256\"," +
-        s"\"captured_at\":\"2026-07-21T20:00:00Z\",\"cluster_id\":\"redpanda-test\"," +
-        s"\"cutoffs\":[{\"cutoff_offset\":$cutoff,\"group_id\":\"$groupId\"," +
-        s"\"partition\":0,\"topic\":\"$topic\"}],\"group_version\":1,\"schema_version\":1}"
-    val documentBytes = document.getBytes(StandardCharsets.UTF_8)
-    val signer = Signature.getInstance("Ed25519")
-    signer.initSign(keyPair.getPrivate)
-    signer.update(documentBytes)
-    val signatureBytes = Base64.getEncoder.encode(signer.sign())
-    val publicKey = keyPair.getPublic.getEncoded
-    val config = CutoverConfig(
-      artifactPath = "/not-used/cutover.json",
-      signaturePath = "/not-used/cutover.sig",
-      publicKeyPath = "",
-      publicKeyBase64 = Base64.getEncoder.encodeToString(publicKey),
-      publicKeySha256 = sha256(publicKey),
-      expectedSchemaVersion = 1,
-      expectedClusterId = "redpanda-test",
-      requiredConsumerGroups = List(groupId)
-    )
-
-    CutoverArtifactVerifier.verify(
-      documentBytes,
-      signatureBytes,
-      Base64.getEncoder.encode(publicKey),
-      config,
-      Instant.parse("2026-07-21T20:05:00Z")
-    ).fold(error => fail(error.getMessage), identity)
-
-  private def sha256(bytes: Array[Byte]): String =
-    HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))

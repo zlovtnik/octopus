@@ -57,6 +57,20 @@ class AppConfigSuite extends FunSuite:
 
     assert(validationMessages(invalid).exists(_.contains("require runtime.consumers-enabled=true")))
 
+  test("an explicit processor catalog includes every enabled locked consumer"):
+    val baseline = defaults
+    val invalid = baseline.copy(
+      tidb = enabledTiDb(baseline.tidb),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+      processors = baseline.processors.copy(enabled = List("sync-job-planner"))
+    )
+
+    val messages = validationMessages(invalid)
+    assert(messages.exists(_.contains("requires locked-consumer processors")))
+    assert(messages.exists(_.contains("sync-scan-ingestion")))
+    assert(messages.exists(_.contains("sync-load-consumer")))
+    assert(messages.exists(_.contains("sync-result-consumer")))
+
   test("deployment SYNC variables configure locked topics and consumer groups"):
     val environment = ConfigFactory.parseMap(Map(
       "SYNC_SCAN_TOPIC" -> "sync.scan.request.cluster",

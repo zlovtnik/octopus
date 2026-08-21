@@ -11,6 +11,8 @@ ARG SBT_VERSION=1.12.14
 RUN apk add --no-cache bash curl python3 tar \
     && curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
       -o /tmp/sbt.tgz \
+    && echo "cd17daae220ff264faa4251334522444518584f0eb2ee82da01523a9b9002b7e  /tmp/sbt.tgz" \
+      | sha256sum -c - \
     && tar xzf /tmp/sbt.tgz -C /opt \
     && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt \
     && rm /tmp/sbt.tgz
@@ -27,6 +29,9 @@ ARG PARENT_COMMIT
 ARG OCTOPUS_COMMIT
 ENV TZ=America/New_York
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:InitialRAMPercentage=50 -XX:MaxRAMPercentage=75"
+
+RUN test -n "$PARENT_COMMIT" \
+    && test -n "$OCTOPUS_COMMIT"
 
 LABEL org.opencontainers.image.revision="$PARENT_COMMIT" \
       io.ssl-proxy.octopus.revision="$OCTOPUS_COMMIT"

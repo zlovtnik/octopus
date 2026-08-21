@@ -473,12 +473,22 @@ object AppConfig:
       config.processors.enabled
         .flatMap(ProcessorId.fromString(_).toOption)
         .filter(lockedConsumerProcessorIds.contains)
+    val missingLockedConsumers =
+      lockedConsumerProcessorIds -- enabledLockedConsumers.toSet
     List(
       Option.when(!config.tidb.enabled)(
         "an enabled runtime requires tidb.enabled=true"
       ),
       Option.when(enabledLockedConsumers.nonEmpty && !config.runtime.consumersEnabled)(
         s"locked-consumer processors ${enabledLockedConsumers.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"
+      ),
+      Option.when(
+        config.runtime.consumersEnabled &&
+          config.processors.enabled.nonEmpty &&
+          missingLockedConsumers.nonEmpty
+      )(
+        s"runtime.consumers-enabled=true with an explicit processor catalog requires locked-consumer processors: " +
+          missingLockedConsumers.toList.map(_.value).sorted.mkString(", ")
       ),
       Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
         "every configured consumer group must end in a non-zero version suffix such as -v1"

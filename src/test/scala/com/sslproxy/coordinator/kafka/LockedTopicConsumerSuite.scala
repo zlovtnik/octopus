@@ -47,6 +47,7 @@ class LockedTopicConsumerSuite extends FunSuite:
     val expected = List(new TopicPartition(ScanTopic, 0), new TopicPartition(ScanTopic, 1))
     val unexpected = expected :+ new TopicPartition("sync.scan.other", 0)
 
+    assertEquals(LockedTopicConsumer.validateAssignments(ScanTopic, List.empty), Right(()))
     assertEquals(LockedTopicConsumer.validateAssignments(ScanTopic, expected), Right(()))
     assert(LockedTopicConsumer.validateAssignments(ScanTopic, unexpected).isLeft)
 

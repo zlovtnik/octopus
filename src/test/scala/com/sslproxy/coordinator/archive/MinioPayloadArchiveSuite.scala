@@ -33,6 +33,10 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
     assert(result.left.exists(_.isInstanceOf[IllegalArgumentException])
     )
 
+  test("bucket provisioning ignores only a bucket already owned by this principal"):
+    assert(MinioPayloadArchive.isBucketAlreadyOwnedByCaller("BucketAlreadyOwnedByYou"))
+    assert(!MinioPayloadArchive.isBucketAlreadyOwnedByCaller("BucketAlreadyExists"))
+
   test("a duplicate archive reuses verified content without another upload"):
     for
       store <- MemoryStore.create()

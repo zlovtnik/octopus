@@ -22,7 +22,7 @@ object ScanRequestStream:
     metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
-    val configuredStreams = ingest.streamNames.toSet
+    val configuredStreams = configuredStreamNames(ingest.streamNames)
     LockedTopicConsumer.stream(
       cfg,
       cfg.scanConsumer,
@@ -92,3 +92,6 @@ object ScanRequestStream:
 
   private[kafka] def isConfiguredStream(streamName: String, configuredStreams: Set[String]): Boolean =
     configuredStreams.contains(streamName)
+
+  private[kafka] def configuredStreamNames(streamNames: List[String]): Set[String] =
+    streamNames.map(_.trim).filter(_.nonEmpty).toSet

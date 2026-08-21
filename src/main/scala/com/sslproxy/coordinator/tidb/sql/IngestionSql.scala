@@ -4,7 +4,7 @@ import cats.syntax.all.*
 
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDisposition, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.tidb.HydrationCursor
-import doobie.{ConnectionIO,Fragment, Query0, Update0}
+import doobie.{ConnectionIO, Fragment, Query0, Update0}
 import doobie.implicits.*
 
 object IngestionSql:
@@ -14,13 +14,9 @@ object IngestionSql:
     sql"""SELECT COUNT(*) FROM sync_events
            WHERE status IN ('pending', 'processing')""".query[Long]
 
-  def consumerPartitions(groupId: String, topic: String): Query0[Int] =
-    sql"""SELECT partition_id FROM consumer_offsets
-           WHERE group_id = $groupId AND topic = $topic""".query[Int]
-
   def hydrationCandidates(
-      after: Option[HydrationCursor],
-      limit: Int
+    after: Option[HydrationCursor],
+    limit: Int
   ): Query0[(String, String, java.sql.Timestamp, String, Option[String], Option[String])] =
     val cursorClause = after.fold(Fragment.empty) { cursor =>
       fr"""AND (
@@ -59,7 +55,7 @@ object IngestionSql:
       .query[(String, String, java.sql.Timestamp, String, Option[String], Option[String])]
 
   def existingEvidence(
-      metadata: BrokerRecordMetadata
+    metadata: BrokerRecordMetadata
   ): Query0[(String, String, String)] =
     sql"""SELECT payload_sha256, artifact_sha256, dedupe_key
            FROM ingestion_evidence
@@ -70,10 +66,10 @@ object IngestionSql:
       .query[(String, String, String)]
 
   def persistEvidence(
-      metadata: BrokerRecordMetadata,
-      payloadSha256: String,
-      dedupeKey: String,
-      disposition: IngestionDisposition
+    metadata: BrokerRecordMetadata,
+    payloadSha256: String,
+    dedupeKey: String,
+    disposition: IngestionDisposition
   ): Update0 =
     sql"""INSERT INTO ingestion_evidence (
              topic, partition_id, record_offset, group_id, group_version,
@@ -102,9 +98,9 @@ object IngestionSql:
            )""".query[Int]
 
   def insertSyncEvent(
-      record: ResolvedScanRequestRecord,
-      observedAt: java.sql.Timestamp,
-      eventKind: Option[String]
+    record: ResolvedScanRequestRecord,
+    observedAt: java.sql.Timestamp,
+    eventKind: Option[String]
   ): Update0 =
     val payload = Option(record.payloadJson)
     sql"""INSERT INTO sync_events (
@@ -132,11 +128,11 @@ object IngestionSql:
       .query[String]
 
   def insertBatch(
-      batchId: String,
-      jobId: String,
-      record: ResolvedScanRequestRecord,
-      cursorStart: String,
-      cursorEnd: String
+    batchId: String,
+    jobId: String,
+    record: ResolvedScanRequestRecord,
+    cursorStart: String,
+    cursorEnd: String
   ): Update0 =
     sql"""INSERT INTO sync_batches (
              batch_id, job_id, batch_no, payload_ref, status, row_count,
@@ -159,11 +155,11 @@ object IngestionSql:
       .query[(String, String)]
 
   def hydrateEvent(
-      streamName: String,
-      dedupeKey: String,
-      payloadJson: String,
-      payloadSha256: String,
-      eventKind: Option[String]
+    streamName: String,
+    dedupeKey: String,
+    payloadJson: String,
+    payloadSha256: String,
+    eventKind: Option[String]
   ): Update0 =
     sql"""UPDATE sync_events
            SET payload = $payloadJson,
@@ -205,7 +201,8 @@ object IngestionSql:
   def advanceCursor(streamName: String, cursorEnd: String): ConnectionIO[Unit] =
     for
       current <- sql"""SELECT cursor_value FROM sync_cursors WHERE stream_name = $streamName FOR UPDATE"""
-        .query[String].option
+        .query[String]
+        .option
       _ <- current match
         case Some(value) if isNumericCursor(value) != isNumericCursor(cursorEnd) =>
           doobie.free.connection.raiseError(

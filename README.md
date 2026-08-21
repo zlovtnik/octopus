@@ -13,7 +13,7 @@ runtime fallbacks.
 
 The currently wired binary provides:
 
-- signed-cutover bootstrap for the three locked consumers;
+- ordinary Kafka consumer-group restart positions for the three locked consumers;
 - at-least-once ingestion evidence keyed by consumer group, topic, partition,
   and offset;
 - durable scan ingestion from `sync.scan.request`;
@@ -54,8 +54,7 @@ remain disabled by default.
 | Package | Responsibility |
 |---|---|
 | `config` | PureConfig model, environment overrides, and fail-closed validation |
-| `cutover` | Signature, key-pin, cluster, group, partition, and offset verification |
-| `kafka` | Locked consumers, common durable offset bootstrap, DLQ conversion, and wireless handlers |
+| `kafka` | Locked consumers, committed-offset restart, DLQ conversion, and wireless handlers |
 | `tidb` | Repository implementations, transaction retry, transforms, checksums, schema preflight, and typed batch sinks |
 | `tidb.sql` | Named JDBC SQL constants and total parameterized query builders |
 | `persistence` | Effect-polymorphic store algebras, `DbResultT`, and `BatchStatement` |
@@ -109,7 +108,8 @@ publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 
 ## Persistence and delivery guarantees
 
-- Delivery is at least once after the signed cutover offset.
+- Delivery is at least once from each consumer group's committed Kafka offset;
+  a group without committed offsets starts at the earliest retained record.
 - Ingestion evidence is unique by group/topic/partition/offset.
 - Consumer offsets advance monotonically in the same TiDB transaction as
   durable processing evidence.
@@ -134,19 +134,18 @@ The complete configuration reference is the checked-in
 [`application.conf`](src/main/resources/application.conf). Each environment
 override is declared directly beside its typed default, so the file is the
 authoritative list of accepted variable names and defaults. `AppConfig.validate`
-is the authoritative startup-requirement check; `AppConfigCutoverSuite` loads
+is the authoritative startup-requirement check; `AppConfigSuite` loads
 the reference and exercises the fail-closed bounds and conditional gates.
 
 | Configuration block | Environment families | Startup requirement |
 |---|---|---|
 | `tidb` | `TIDB_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
-| `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition bounds; active production runtime replication factor at least three; a fully disabled pre-cutover stage may reflect a single broker because it does not provision or consume topics; one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
+| `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition/replication bounds, versioned consumer groups, earliest retained startup for new groups, manual commit after durable processing, and one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |
 | `processors` | `OCTOPUS_PROCESSOR_*`, `OCTOPUS_ENABLED_PROCESSORS`, similarity/distance variables | Enabled IDs must be Octopus-owned with dependencies enabled; delays, interval, and batch size positive; scores finite and in range |
 | `archive` | `OCTOPUS_ARCHIVE_ENABLED`, `MINIO_*`, retention and archive variables | Credentials and bucket required when enabled; retention ordering, intervals, and batch size validated |
-| `cutover` | `OCTOPUS_CUTOVER_*`, `OCTOPUS_ENVIRONMENT` | Signed artifact, one public-key source, key pin, cluster ID, schema version, and exact group set required outside development bypass |
 
 Unknown or obsolete overrides are not alternate configuration sources. In
 particular, `WIRELESS_DLQ_SUFFIX` is retired; use `SYNC_DLQ_SUFFIX` for every
@@ -158,7 +157,7 @@ Important gates:
 |---|---|---|
 | `TIDB_ENABLED` | `false` | Enables TiDB after TLS, least-privilege, and schema validation |
 | `TIDB_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
-| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables signed-cutover Kafka consumers |
+| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables Kafka consumers using durable committed offsets |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane |
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs |
 | `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Initial retry delay |
@@ -179,19 +178,17 @@ Important gates:
 | `SYNC_EVENT_TOMBSTONE_RETENTION_DAYS` | `45` | Replay-protection period after event deletion |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and TiDB boundary spans |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
-| `OCTOPUS_CUTOVER_DEV_BYPASS` | `false` | Development-only bypass; production rejects it |
 
 TiDB uses `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`,
 `TIDB_PASSWORD`, `TIDB_POOL_SIZE`, and explicit `TIDB_SSL_MODE`. Canonical
 Kustomize sets `DISABLED`; CA and server-name inputs remain optional for
 verified-TLS deployments. Enabled runtime rejects loopback, root accounts,
-warn-only schema validation, and incomplete cutover evidence.
+warn-only schema validation, and invalid consumer-group contracts.
 
-Roll out canonical schema first, then a binary with all new processors
-disabled. Enable processors in dependency order with
-`OCTOPUS_ENABLED_PROCESSORS`, run bounded reconciliation comparisons, and only
-then schedule live work. Rollback disables processors and replays durable work;
-it never reverses schema or deletes ingestion evidence.
+The checked-in Kubernetes deployment enables both runtime lanes, archival, and
+all 26 Octopus-owned processors. A new consumer group replays every retained
+record; an existing group resumes from its committed Kafka offsets. Rollback
+must preserve consumer offsets, schemas, and ingestion evidence.
 
 ## Health and diagnosis
 
@@ -209,7 +206,7 @@ persisted restart count, and supervised retry counters. Existing ingestion,
 pending-ledger, backpressure, outbox, and DLQ counters remain available on the
 same surface.
 
-When work stalls, check the signed cutover artifact, consumer lag, ingestion
+When work stalls, check consumer membership and committed offsets, lag, ingestion
 evidence, pending jobs/batches, outbox lease/fence state, retry timestamps, and
 DLQ topics in that order. Do not repair incidents by deleting offsets, outbox
 rows, tombstones, or authoritative ingestion evidence.

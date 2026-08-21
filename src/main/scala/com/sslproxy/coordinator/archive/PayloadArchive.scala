@@ -7,7 +7,7 @@ import com.sslproxy.coordinator.config.ArchiveConfig
 import com.sslproxy.coordinator.tidb.ArchiveCandidate
 import com.sslproxy.coordinator.util.Sha256Utils
 import io.minio.errors.ErrorResponseException
-import io.minio.{MinioClient, PutObjectArgs, StatObjectArgs}
+import io.minio.{BucketExistsArgs, MakeBucketArgs, MinioClient, PutObjectArgs, StatObjectArgs}
 
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
@@ -20,8 +20,8 @@ trait PayloadArchive[F[_]]:
   def archive(candidate: ArchiveCandidate): F[ArchiveReceipt]
 
 private[archive] final case class StoredArchiveObject(
-    size: Long,
-    payloadSha256: Option[String]
+  size: Long,
+  payloadSha256: Option[String]
 )
 
 private[archive] trait ArchiveObjectStore[F[_]]:
@@ -29,8 +29,8 @@ private[archive] trait ArchiveObjectStore[F[_]]:
   def put(objectKey: String, bytes: Array[Byte], payloadSha256: String): F[Unit]
 
 private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
-    store: ArchiveObjectStore[F],
-    bucket: String
+  store: ArchiveObjectStore[F],
+  bucket: String
 ) extends PayloadArchive[F]:
   def archive(candidate: ArchiveCandidate): F[ArchiveReceipt] =
     val bytes = candidate.payload.getBytes(StandardCharsets.UTF_8)
@@ -42,9 +42,11 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
         )
       )
     else if actualSha256 != candidate.payloadSha256 then
-      Async[F].raiseError(IllegalArgumentException(
-        s"archive payload hash mismatch for ${candidate.streamName}/${candidate.dedupeKey}"
-      ))
+      Async[F].raiseError(
+        IllegalArgumentException(
+          s"archive payload hash mismatch for ${candidate.streamName}/${candidate.dedupeKey}"
+        )
+      )
     else
       val objectKey = MinioPayloadArchive.objectKey(candidate)
       val receipt = ArchiveReceipt(
@@ -57,7 +59,7 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
         case false =>
           store.put(objectKey, bytes, actualSha256) *>
             verify(store.stat(objectKey), objectKey, bytes.length.toLong, actualSha256).flatMap {
-              case true  => Async[F].pure(receipt)
+              case true => Async[F].pure(receipt)
               case false =>
                 Async[F].raiseError(
                   IllegalStateException(s"archive object $objectKey failed post-upload verification")
@@ -66,22 +68,19 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
       }
 
   private def verify(
-      value: F[Option[StoredArchiveObject]],
-      objectKey: String,
-      expectedSize: Long,
-      expectedSha256: String
+    value: F[Option[StoredArchiveObject]],
+    objectKey: String,
+    expectedSize: Long,
+    expectedSha256: String
   ): F[Boolean] =
     value.flatMap {
-      case Some(stored)
-          if stored.payloadSha256.isEmpty && stored.size != expectedSize =>
+      case Some(stored) if stored.payloadSha256.isEmpty && stored.size != expectedSize =>
         Async[F].raiseError(
           IllegalStateException(s"archive object $objectKey exists with different content")
         )
-      case Some(stored)
-          if stored.payloadSha256.isEmpty && stored.size == expectedSize =>
+      case Some(stored) if stored.payloadSha256.isEmpty && stored.size == expectedSize =>
         Async[F].pure(false)
-      case Some(stored)
-          if stored.size == expectedSize && stored.payloadSha256.contains(expectedSha256) =>
+      case Some(stored) if stored.size == expectedSize && stored.payloadSha256.contains(expectedSha256) =>
         Async[F].pure(true)
       case Some(_) =>
         Async[F].raiseError(
@@ -91,15 +90,16 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
     }
 
 private final class MinioObjectStore(
-    client: MinioClient,
-    bucket: String
+  client: MinioClient,
+  bucket: String
 ) extends ArchiveObjectStore[IO]:
   def put(objectKey: String, bytes: Array[Byte], payloadSha256: String): IO[Unit] =
     IO.blocking {
       val stream = new ByteArrayInputStream(bytes)
       try
         client.putObject(
-          PutObjectArgs.builder()
+          PutObjectArgs
+            .builder()
             .bucket(bucket)
             .`object`(objectKey)
             .contentType("application/json")
@@ -127,15 +127,28 @@ private final class MinioObjectStore(
 object MinioPayloadArchive:
   private val LowercaseSha256 = "^[0-9a-f]{64}$".r
   def resource(config: ArchiveConfig): Resource[IO, PayloadArchive[IO]] =
-    Resource.make(IO.blocking {
-      MinioClient.builder()
-        .endpoint(config.endpoint)
-        .credentials(config.accessKey, config.secretKey)
-        .region(config.region)
-        .build()
-    })(client => IO.blocking(client.close())).map { client =>
-      new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket)
-    }
+    Resource
+      .make(IO.blocking {
+        val client = MinioClient
+          .builder()
+          .endpoint(config.endpoint)
+          .credentials(config.accessKey, config.secretKey)
+          .region(config.region)
+          .build()
+        val bucketExists = client.bucketExists(
+          BucketExistsArgs.builder().bucket(config.bucket).build()
+        )
+        if !bucketExists then
+          try client.makeBucket(MakeBucketArgs.builder().bucket(config.bucket).build())
+          catch
+            case error: ErrorResponseException
+                if Set("BucketAlreadyExists", "BucketAlreadyOwnedByYou").contains(error.errorResponse().code()) =>
+              ()
+        client
+      })(client => IO.blocking(client.close()))
+      .map { client =>
+        new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket)
+      }
 
   private[archive] def objectKey(candidate: ArchiveCandidate): String =
     require(isLowercaseSha256(candidate.dedupeKey), "archive dedupe key must be a lowercase SHA-256 value")

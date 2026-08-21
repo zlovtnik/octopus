@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.persistence
 
-import com.sslproxy.coordinator.cutover.CutoffKey
-import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision, ResolvedScanRequestRecord, ScanRequestRecord}
+import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.processor.{Lease, ProcessorId, ProcessorRunStatus, ProcessorStatus}
 import com.sslproxy.coordinator.tidb.{
@@ -31,16 +30,11 @@ trait IngestionStore[F[_]]:
     batchMaxAttempts: Int,
     limit: Int
   ): DbResultT[F, Int]
-  def loadConsumerOffsets(groupId: String, topic: String): DbResultT[F, Set[CutoffKey]]
   def recordScanRequests(records: List[ResolvedScanRequestRecord]): DbResultT[F, Int]
   def recordScanRequestWithEvidence(
     record: ResolvedScanRequestRecord,
     metadata: BrokerRecordMetadata
   ): DbResultT[F, IngestionDecision]
-  def recordSkippedScanRequest(
-    record: ScanRequestRecord,
-    metadata: BrokerRecordMetadata
-  ): DbResultT[F, Unit]
   def findHydrationCandidates(
     after: Option[HydrationCursor],
     limit: Int

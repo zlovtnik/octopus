@@ -14,7 +14,7 @@ object StringListConfigReader:
         case Right(cursors) =>
           cursors.foldRight(Right(Nil): Either[ConfigReaderFailures, List[String]]) { (c, acc) =>
             for
-              s   <- c.asString.map(_.trim)
+              s <- c.asString.map(_.trim)
               tail <- acc
             yield s :: tail
           }
@@ -22,141 +22,128 @@ object StringListConfigReader:
           cursor.asString.map(s => s.split(",", -1).map(_.trim).toList)
 
 final case class AppConfig(
-    tidb: TiDbConfig,
-    kafka: KafkaCfg,
-    cron: CronConfig,
-    ingest: IngestConfig,
-    backpressure: BackpressureConfig,
-    http: HttpConfig,
-    sync: SyncConfig,
-    wireless: WirelessConfig,
-    runtime: RuntimeConfig,
-    processors: ProcessorConfig,
-    archive: ArchiveConfig,
-    cutover: CutoverConfig
+  tidb: TiDbConfig,
+  kafka: KafkaCfg,
+  cron: CronConfig,
+  ingest: IngestConfig,
+  backpressure: BackpressureConfig,
+  http: HttpConfig,
+  sync: SyncConfig,
+  wireless: WirelessConfig,
+  runtime: RuntimeConfig,
+  processors: ProcessorConfig,
+  archive: ArchiveConfig
 ) derives ConfigReader
 
 final case class TiDbConfig(
-    host: String,
-    port: Int,
-    database: String,
-    user: String,
-    password: String,
-    poolSize: Int,
-    healthcheckReserve: Int,
-    connectionTimeoutMs: Long,
-    statementTimeoutSecs: Int,
-    enabled: Boolean,
-    warnOnly: Boolean,
-    sslMode: String = "DISABLED",
-    sslCaPath: String = "",
-    sslServerName: String = "",
-    sslClientKeyStorePath: String = "",
-    sslClientKeyStorePassword: String = "",
-    sslClientKeyStoreType: String = "PKCS12",
-    localDevAllowPublicKeyRetrieval: Boolean = false,
-    manifestSha256: String = ""
+  host: String,
+  port: Int,
+  database: String,
+  user: String,
+  password: String,
+  poolSize: Int,
+  healthcheckReserve: Int,
+  connectionTimeoutMs: Long,
+  statementTimeoutSecs: Int,
+  enabled: Boolean,
+  warnOnly: Boolean,
+  sslMode: String = "DISABLED",
+  sslCaPath: String = "",
+  sslServerName: String = "",
+  sslClientKeyStorePath: String = "",
+  sslClientKeyStorePassword: String = "",
+  sslClientKeyStoreType: String = "PKCS12",
+  localDevAllowPublicKeyRetrieval: Boolean = false,
+  manifestSha256: String = ""
 ) derives ConfigReader
 
 final case class KafkaCfg(
-    bootstrapServers: String,
-    loadTopic: String,
-    resultTopic: String,
-    scanTopic: String,
-    payloadAuditTopic: String,
-    dlqSuffix: String,
-    scanConsumer: String,
-    resultConsumer: String,
-    payloadAuditConsumer: String,
-    loadConsumer: String,
-    maxPollRecords: Int,
-    pollTimeoutMs: Long,
-    lockedBatchSize: Int,
-    lockedBatchWindowMs: Long,
-    topicPartitions: Int,
-    topicReplicationFactor: Int
+  bootstrapServers: String,
+  loadTopic: String,
+  resultTopic: String,
+  scanTopic: String,
+  payloadAuditTopic: String,
+  dlqSuffix: String,
+  scanConsumer: String,
+  resultConsumer: String,
+  payloadAuditConsumer: String,
+  loadConsumer: String,
+  maxPollRecords: Int,
+  pollTimeoutMs: Long,
+  lockedBatchSize: Int,
+  lockedBatchWindowMs: Long,
+  topicPartitions: Int,
+  topicReplicationFactor: Int
 ) derives ConfigReader
 
 final case class CronConfig(
-    idleSleepMs: Int,
-    idleSleepBackoffMs: Int,
-    dispatchBatchSize: Int,
-    ingestBatchSize: Int,
-    scanMaxAttempts: Int,
-    scanRetryBackoffSeconds: Int,
-    batchDispatchLeaseSeconds: Int,
-    batchDispatchRetryMaxSeconds: Int,
-    batchMaxAttempts: Int,
-    heartbeatLogIntervalMs: Int,
-    schemaRefreshIntervalSeconds: Int,
-    scanFetchCount: Int,
-    resultFetchCount: Int
+  idleSleepMs: Int,
+  idleSleepBackoffMs: Int,
+  dispatchBatchSize: Int,
+  ingestBatchSize: Int,
+  scanMaxAttempts: Int,
+  scanRetryBackoffSeconds: Int,
+  batchDispatchLeaseSeconds: Int,
+  batchDispatchRetryMaxSeconds: Int,
+  batchMaxAttempts: Int,
+  heartbeatLogIntervalMs: Int,
+  schemaRefreshIntervalSeconds: Int,
+  scanFetchCount: Int,
+  resultFetchCount: Int
 ) derives ConfigReader
 
 final case class IngestConfig(
-    streamNames: List[String],
-    loadStreamNames: List[String]
+  streamNames: List[String],
+  loadStreamNames: List[String]
 ) derives ConfigReader
 
 final case class BackpressureConfig(
-    budgetMultiplier: Int,
-    adaptivePullChangeThreshold: Int,
-    adaptivePullMinRestartIntervalMs: Int
+  budgetMultiplier: Int,
+  adaptivePullChangeThreshold: Int,
+  adaptivePullMinRestartIntervalMs: Int
 ) derives ConfigReader
 
 final case class HttpConfig(
-    port: Int
+  port: Int
 ) derives ConfigReader
 
 final case class SyncConfig(
-    outboxDir: String
+  outboxDir: String
 ) derives ConfigReader
 
 final case class RuntimeConfig(
-    processorsEnabled: Boolean,
-    consumersEnabled: Boolean,
-    environment: String = "production"
+  processorsEnabled: Boolean,
+  consumersEnabled: Boolean,
+  environment: String = "production"
 ) derives ConfigReader:
   def anyEnabled: Boolean = processorsEnabled || consumersEnabled
 
 final case class ProcessorConfig(
-    enabled: List[String],
-    restartBaseDelayMs: Long,
-    restartMaxDelayMs: Long,
-    batchSize: Int = 250,
-    intervalSeconds: Int = 10,
-    embeddingModel: String = "sentence-transformers/all-MiniLM-L6-v2",
-    eventDuplicateDistance: Double = 0.05d,
-    behaviorSimilarityThreshold: Double = 0.88d,
-    sequenceDistanceThreshold: Double = 0.10d
+  enabled: List[String],
+  restartBaseDelayMs: Long,
+  restartMaxDelayMs: Long,
+  batchSize: Int = 250,
+  intervalSeconds: Int = 10,
+  embeddingModel: String = "sentence-transformers/all-MiniLM-L6-v2",
+  eventDuplicateDistance: Double = 0.05d,
+  behaviorSimilarityThreshold: Double = 0.88d,
+  sequenceDistanceThreshold: Double = 0.10d
 ) derives ConfigReader
 
 final case class ArchiveConfig(
-    enabled: Boolean = false,
-    endpoint: String = "http://minio:9000",
-    accessKey: String = "",
-    secretKey: String = "",
-    bucket: String = "ssl-proxy-wireless-raw-archive",
-    region: String = "us-east-1",
-    hotDays: Int = 7,
-    eventRetentionDays: Int = 30,
-    searchRetentionDays: Int = 30,
-    tombstoneRetentionDays: Int = 45,
-    batchSize: Int = 100,
-    intervalMs: Long = 300000L,
-    maintenanceIntervalMs: Long = 3600000L
-) derives ConfigReader
-
-final case class CutoverConfig(
-    artifactPath: String,
-    signaturePath: String,
-    publicKeyPath: String,
-    publicKeyBase64: String,
-    publicKeySha256: String,
-    expectedSchemaVersion: Int,
-    expectedClusterId: String,
-    requiredConsumerGroups: List[String],
-    devBypass: Boolean = false
+  enabled: Boolean = false,
+  endpoint: String = "http://minio:9000",
+  accessKey: String = "",
+  secretKey: String = "",
+  bucket: String = "ssl-proxy-wireless-raw-archive",
+  region: String = "us-east-1",
+  hotDays: Int = 7,
+  eventRetentionDays: Int = 30,
+  searchRetentionDays: Int = 30,
+  tombstoneRetentionDays: Int = 45,
+  batchSize: Int = 100,
+  intervalMs: Long = 300000L,
+  maintenanceIntervalMs: Long = 3600000L
 ) derives ConfigReader
 
 final case class AppConfigValidation(errors: NonEmptyList[String])
@@ -178,12 +165,8 @@ object AppConfig:
     validate(loaded).fold(error => throw error, identity)
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
-    val isDevelopment = config.cutover.devBypass && config.runtime.environment == "development"
+    val isDevelopment = config.runtime.environment == "development"
     val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty
-    val devBypassEnvironmentError =
-      if config.cutover.devBypass && config.runtime.environment != "development" then
-        List("cutover.dev-bypass requires OCTOPUS_ENVIRONMENT=development")
-      else List.empty
     val stagedTiDbErrors =
       if config.tidb.enabled then enabledTiDbErrors(config.tidb, isDevelopment)
       else List.empty
@@ -200,23 +183,19 @@ object AppConfig:
         ingestErrors(config.ingest) ++
         archiveErrors(config.archive, config.processors) ++
         kafkaErrors(
-          config.kafka,
-          isDevelopment,
-          runtimeActive
+          config.kafka
         ) ++
-        wirelessErrors( config.wireless) ++
-        backpressureErrors( config.backpressure
-        ) ++
+        wirelessErrors(config.wireless) ++
+        backpressureErrors(config.backpressure) ++
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
         tidbBoundErrors(config.tidb) ++
-        devBypassEnvironmentError ++
         stagedTiDbErrors ++
         runtimeErrors
 
     NonEmptyList.fromList(errors) match
       case Some(values) => Left(AppConfigValidation(values))
-      case None         => Right(config)
+      case None => Right(config)
 
   private def ingestErrors(config: IngestConfig): List[String] =
     List(
@@ -239,12 +218,17 @@ object AppConfig:
 
   private def processorErrors(config: ProcessorConfig): List[String] =
     val idErrors = config.enabled.flatMap { id =>
-      ProcessorId.fromString(id).fold(
-        error => List(error),
-        processor => Option.when(processor.owner != com.sslproxy.coordinator.processor.ProcessorOwner.Octopus)(
-          s"processor $id is owned by ${processor.owner.value}, not octopus"
-        ).toList
-      )
+      ProcessorId
+        .fromString(id)
+        .fold(
+          error => List(error),
+          processor =>
+            Option
+              .when(processor.owner != com.sslproxy.coordinator.processor.ProcessorOwner.Octopus)(
+                s"processor $id is owned by ${processor.owner.value}, not octopus"
+              )
+              .toList
+        )
     }
 
     List(
@@ -270,15 +254,18 @@ object AppConfig:
         "processors.embedding-model must not be blank"
       ),
       Option.when(
-        !config.eventDuplicateDistance.isFinite ||config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d)(
+        !config.eventDuplicateDistance.isFinite || config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d
+      )(
         "processors.event-duplicate-distance must be between 0 and 2"
       ),
       Option.when(
-        !config.behaviorSimilarityThreshold.isFinite ||config.behaviorSimilarityThreshold < -1.0d || config.behaviorSimilarityThreshold > 1.0d)(
+        !config.behaviorSimilarityThreshold.isFinite || config.behaviorSimilarityThreshold < -1.0d || config.behaviorSimilarityThreshold > 1.0d
+      )(
         "processors.behavior-similarity-threshold must be between -1 and 1"
       ),
       Option.when(
-        !config.sequenceDistanceThreshold.isFinite ||config.sequenceDistanceThreshold < 0.0d || config.sequenceDistanceThreshold > 2.0d)(
+        !config.sequenceDistanceThreshold.isFinite || config.sequenceDistanceThreshold < 0.0d || config.sequenceDistanceThreshold > 2.0d
+      )(
         "processors.sequence-distance-threshold must be between 0 and 2"
       )
     ).flatten ++ idErrors
@@ -308,11 +295,7 @@ object AppConfig:
       Option.when(config.maintenanceIntervalMs <= 0L)("archive.maintenance-interval-ms must be positive")
     ).flatten
 
-  private def kafkaErrors(
-      config: KafkaCfg,
-      isDevelopment: Boolean,
-      runtimeActive: Boolean
-  ): List[String] =
+  private def kafkaErrors(config: KafkaCfg): List[String] =
     List(
       Option.when(config.dlqSuffix.isEmpty)(
         "kafka.dlq-suffix must not be empty"
@@ -336,16 +319,9 @@ object AppConfig:
         "kafka.locked-batch-window-ms must be positive"
       ),
       Option.when(
-        (isDevelopment || !runtimeActive) &&
-          (config.topicReplicationFactor < 1 || config.topicReplicationFactor > Short.MaxValue)
+        config.topicReplicationFactor < 1 || config.topicReplicationFactor > Short.MaxValue
       )(
-        "kafka.topic-replication-factor must be between 1 and 32767 when runtime lanes are disabled or in development mode"
-      ),
-      Option.when(
-        runtimeActive && !isDevelopment &&
-          (config.topicReplicationFactor < 3 || config.topicReplicationFactor > Short.MaxValue)
-      )(
-        "kafka.topic-replication-factor must be between 3 and 32767"
+        "kafka.topic-replication-factor must be between 1 and 32767"
       )
     ).flatten
 
@@ -402,10 +378,8 @@ object AppConfig:
     ).flatten
 
   private def tidbBoundErrors(config: TiDbConfig): List[String] =
-
     List(
-      Option.when(config.port <= 0 || config.port > 65535)(
-        "tidb.port must be between 1 and 65535"),
+      Option.when(config.port <= 0 || config.port > 65535)("tidb.port must be between 1 and 65535"),
       Option.when(config.poolSize <= 0)("tidb.pool-size must be positive"),
       Option.when(config.healthcheckReserve < 0)(
         "tidb.healthcheck-reserve must not be negative"
@@ -435,8 +409,7 @@ object AppConfig:
       Option.when(config.user.trim.equalsIgnoreCase("root"))(
         "tidb.user must be a least-privilege non-root account"
       ),
-      required(config.password, "tidb.password"
-      ),
+      required(config.password, "tidb.password"),
       Option.when(
         config.sslMode != "DISABLED" && config.sslCaPath.trim.isEmpty
       )(
@@ -450,7 +423,7 @@ object AppConfig:
       Option.when(
         config.sslMode != "DISABLED" &&
           config.sslServerName.trim.nonEmpty &&
-            !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
+          !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
       )(
         "tidb.ssl-server-name must equal tidb.host because Connector/J verifies the JDBC host identity"
       ),
@@ -470,7 +443,7 @@ object AppConfig:
         "tidb.warn-only must be false when TiDB readiness is enabled"
       ),
       Option.when(config.localDevAllowPublicKeyRetrieval && !isDevelopment)(
-        "tidb.local-dev-allow-public-key-retrieval requires development cutover bypass"
+        "tidb.local-dev-allow-public-key-retrieval requires OCTOPUS_ENVIRONMENT=development"
       ),
       Option.when(!Sha256Hex.matches(config.manifestSha256))(
         "tidb.manifest-sha-256 must be 64 lowercase hexadecimal characters"
@@ -478,7 +451,6 @@ object AppConfig:
     ).flatten
 
   private def activeRuntimeErrors(config: AppConfig): List[String] =
-    val cutover = config.cutover
     val configuredGroups = List(
       config.kafka.scanConsumer,
       config.kafka.resultConsumer,
@@ -498,54 +470,23 @@ object AppConfig:
       ProcessorId.SyncResultConsumer
     )
     val enabledLockedConsumers =
-      config.processors.enabled.flatMap(ProcessorId.fromString(_).toOption)
+      config.processors.enabled
+        .flatMap(ProcessorId.fromString(_).toOption)
         .filter(lockedConsumerProcessorIds.contains)
-    val runtimeInvariantErrors = List(
+    List(
       Option.when(!config.tidb.enabled)(
         "an enabled runtime requires tidb.enabled=true"
       ),
       Option.when(enabledLockedConsumers.nonEmpty && !config.runtime.consumersEnabled)(
         s"locked-consumer processors ${enabledLockedConsumers.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"
+      ),
+      Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
+        "every configured consumer group must end in a non-zero version suffix such as -v1"
+      ),
+      Option.when(configuredGroups.distinct.size != configuredGroups.size)(
+        "configured consumer groups must not contain duplicates"
       )
     ).flatten
-
-    if cutover.devBypass then runtimeInvariantErrors
-    else
-      val requiredGroups = cutover.requiredConsumerGroups
-      val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
-
-      runtimeInvariantErrors ++ List(
-        required(cutover.artifactPath, "cutover.artifact-path"),
-        required(cutover.signaturePath, "cutover.signature-path"),
-        Option.when(keySources != 1)(
-          "exactly one of cutover.public-key-path or cutover.public-key-base-64 is required"
-        ),
-        Option.when(!Sha256Hex.matches(cutover.publicKeySha256))(
-          "cutover.public-key-sha-256 must be 64 lowercase hexadecimal characters"
-        ),
-        Option.when(cutover.expectedSchemaVersion <= 0)(
-          "cutover.expected-schema-version must be positive"
-        ),
-        required(cutover.expectedClusterId, "cutover.expected-cluster-id"),
-        Option.when(requiredGroups.isEmpty)(
-          "cutover.required-consumer-groups must not be empty"
-        ),
-        Option.when(requiredGroups.exists(_.trim.isEmpty))(
-          "cutover.required-consumer-groups must not contain blank consumer groups"
-        ),
-        Option.when(requiredGroups.distinct.size != requiredGroups.size)(
-          "cutover.required-consumer-groups must not contain duplicates"
-        ),
-        Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
-          "every configured consumer group must end in a non-zero version suffix such as -v1"
-        ),
-        Option.when(requiredGroups.exists(group => !isVersionedConsumerGroup(group)))(
-          "every cutover.required-consumer-groups entry must end in a non-zero version suffix such as -v1"
-        ),
-        Option.when(configuredGroups.toSet != requiredGroups.toSet)(
-          "cutover.required-consumer-groups must exactly match the configured consumer groups"
-        )
-      ).flatten
 
   private def required(value: String, path: String): Option[String] =
     Option.when(value.trim.isEmpty)(s"$path must not be blank")

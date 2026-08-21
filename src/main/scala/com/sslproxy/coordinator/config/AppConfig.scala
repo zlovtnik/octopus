@@ -48,7 +48,7 @@ final case class TiDbConfig(
     statementTimeoutSecs: Int,
     enabled: Boolean,
     warnOnly: Boolean,
-    sslMode: String = "VERIFY_IDENTITY",
+    sslMode: String = "DISABLED",
     sslCaPath: String = "",
     sslServerName: String = "",
     sslClientKeyStorePath: String = "",

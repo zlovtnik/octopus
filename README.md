@@ -182,8 +182,9 @@ Important gates:
 | `OCTOPUS_CUTOVER_DEV_BYPASS` | `false` | Development-only bypass; production rejects it |
 
 TiDB uses `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`,
-`TIDB_PASSWORD`, `TIDB_POOL_SIZE`, and the `TIDB_SSL_*` settings. Enabled
-runtime rejects loopback, root accounts, missing TLS identity verification,
+`TIDB_PASSWORD`, `TIDB_POOL_SIZE`, and explicit `TIDB_SSL_MODE`. Canonical
+Kustomize sets `DISABLED`; CA and server-name inputs remain optional for
+verified-TLS deployments. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and incomplete cutover evidence.
 
 Roll out canonical schema first, then a binary with all new processors

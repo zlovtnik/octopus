@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.ingest
 import cats.effect.IO
 import cats.effect.implicits.*
 import cats.syntax.all.*
-import com.sslproxy.coordinator.config.TiDbConfig
+import com.sslproxy.coordinator.config.PostgresConfig
 import com.sslproxy.coordinator.domain.{
   BrokerRecordMetadata,
   DatabaseError,
@@ -12,11 +12,11 @@ import com.sslproxy.coordinator.domain.{
   ResolvedScanRequestRecord,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.tidb.{
-  TidbPayloadResolver,
-  TidbRepository,
-  TidbSchemaPreflight,
-  TidbTransactor
+import com.sslproxy.coordinator.postgres.{
+  PostgresPayloadResolver,
+  PostgresRepository,
+  PostgresSchemaPreflight,
+  PostgresTransactor
 }
 import com.sslproxy.coordinator.util.Sha256Utils
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -43,31 +43,28 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private val ProxyMaxAuditBodyBytes = 65_536
   private var containerStarted = false
 
-  private final class TestTiDbContainer(image: DockerImageName)
-      extends GenericContainer[TestTiDbContainer](image)
+  private final class TestPostgresContainer(image: DockerImageName)
+      extends GenericContainer[TestPostgresContainer](image)
 
-  private lazy val tidb =
-    new TestTiDbContainer(DockerImageName.parse("pingcap/tidb:v8.5.7"))
-      .withExposedPorts(4000)
-      .withCommand(
-        "--store=unistore",
-        "--path=/tmp/tidb",
-        "--log-file="
-      )
+  private lazy val postgres =
+    new TestPostgresContainer(DockerImageName.parse("pgvector/pgvector:pg16"))
+      .withExposedPorts(5432)
+      .withEnv("POSTGRES_USER", "postgres")
+      .withEnv("POSTGRES_PASSWORD", "postgres")
+      .withEnv("POSTGRES_DB", "sync")
 
-  private def jdbcUrl(database: Option[String]): String =
-    val databasePath = database.fold("")(name => s"/$name")
-    s"jdbc:mysql://${tidb.getHost}:${tidb.getMappedPort(4000)}$databasePath" +
-      "?rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true"
+  private def jdbcUrl: String =
+    s"jdbc:postgresql://${postgres.getHost}:${postgres.getMappedPort(5432)}/sync?sslmode=disable"
 
   private lazy val dataSource =
     val config = new HikariConfig()
-    config.setJdbcUrl(jdbcUrl(Some("octopus_core")))
-    config.setUsername("root")
-    config.setPassword("")
-    config.setDriverClassName("com.mysql.cj.jdbc.Driver")
+    config.setJdbcUrl(jdbcUrl)
+    config.setUsername("postgres")
+    config.setPassword("postgres")
+    config.setDriverClassName("org.postgresql.Driver")
     config.setMaximumPoolSize(4)
-    config.setConnectionInitSql("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
+    config.setConnectionInitSql("SET TIME ZONE 'UTC'; SET search_path TO octopus_core, atheros_search")
+    config.addDataSourceProperty("stringtype", "unspecified")
     new HikariDataSource(config)
 
   private lazy val doobieExecutor = Executors.newFixedThreadPool(2)
@@ -78,13 +75,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       ExecutionContext.fromExecutorService(doobieExecutor)
     )
 
-  private lazy val repository = new TidbRepository(xa)
-  private lazy val schemaConfig = TiDbConfig(
-    host = tidb.getHost,
-    port = tidb.getMappedPort(4000).intValue(),
-    database = "octopus_core",
-    user = "root",
-    password = "",
+  private lazy val repository = new PostgresRepository(xa)
+  private lazy val schemaConfig = PostgresConfig(
+    host = postgres.getHost,
+    port = postgres.getMappedPort(5432).intValue(),
+    database = "sync",
+    user = "postgres",
+    password = "postgres",
     poolSize = 4,
     healthcheckReserve = 1,
     connectionTimeoutMs = 5000L,
@@ -93,13 +90,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     warnOnly = false,
     manifestSha256 = manifestValue("manifest_sha256")
   )
-  private lazy val schemaTransactor = TidbTransactor.fromDataSource(dataSource, schemaConfig)
+  private lazy val schemaTransactor = PostgresTransactor.fromDataSource(dataSource, schemaConfig)
   private lazy val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
 
   override def beforeAll(): Unit =
     super.beforeAll()
     if dockerAvailable then
-      tidb.start()
+      postgres.start()
       containerStarted = true
       applyCanonicalManifest()
 
@@ -107,7 +104,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     if containerStarted then
       dataSource.close()
       doobieExecutor.shutdown()
-      tidb.stop()
+      postgres.stop()
     super.afterAll()
 
   test("wireless scan ingestion hydrates payload hashes and projected columns"):
@@ -162,7 +159,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       topic = "sync.scan.request",
       partition = 0,
       offset = 41L,
-      consumerGroup = "octopus-scan-tidb-v1",
+      consumerGroup = "octopus-scan-postgres-v1",
       groupVersion = 1,
       artifactSha256 = ArtifactSha256,
       messageKey = None,
@@ -177,15 +174,15 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                      FROM sync_events
                      WHERE dedupe_key = ${resolved.dedupeKey}
                        AND stream_name = 'wireless.audit'"""
-        .query[(String, Int)].unique.transact(xa)
+        .query[(String, Boolean)].unique.transact(xa)
       evidenceHash <- sql"""SELECT payload_sha256
                             FROM ingestion_evidence
                             WHERE topic = 'sync.scan.request'
                               AND partition_id = 0
                               AND record_offset = 41
-                              AND group_id = 'octopus-scan-tidb-v1'"""
+                              AND group_id = 'octopus-scan-postgres-v1'"""
         .query[String].unique.transact(xa)
-      projectionJson <- sql"""SELECT JSON_OBJECT(
+      projectionJson <- sql"""SELECT jsonb_build_object(
                                 'event_type', event_type,
                                 'sensor_id', sensor_id,
                                 'source_mac', source_mac,
@@ -213,7 +210,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[String].unique.transact(xa)
       projection = circeParser.parse(projectionJson).fold(throw _, identity).hcursor
     yield
-      assertEquals(hashes, (resolved.eventPayloadSha256, 1))
+      assertEquals(hashes, (resolved.eventPayloadSha256, true))
       assertEquals(evidenceHash, resolved.sourceRecordSha256)
       assertEquals(projection.get[String]("event_type"), Right("wifi_data_frame"))
       assertEquals(projection.get[String]("sensor_id"), Right("sensor-projection"))
@@ -224,14 +221,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(projection.get[Int]("frequency_mhz"), Right(5180))
       assertEquals(projection.get[Int]("channel_flags"), Right(256))
       assertEquals(projection.get[Int]("qos_tid"), Right(5))
-      assertEquals(projection.get[Int]("qos_eosp"), Right(0))
+      assertEquals(projection.get[Boolean]("qos_eosp"), Right(false))
       assertEquals(projection.get[String]("src_ip"), Right("192.0.2.10"))
       assertEquals(projection.get[Int]("dst_port"), Right(1900))
       assertEquals(projection.get[String]("app_protocol"), Right("ssdp"))
       assertEquals(projection.get[String]("session_key"), Right("session-key"))
       assertEquals(projection.get[String]("frame_fingerprint"), Right("frame-fingerprint"))
-      assertEquals(projection.get[Int]("retry"), Right(0))
-      assertEquals(projection.get[Int]("protected"), Right(1))
+      assertEquals(projection.get[Boolean]("retry"), Right(false))
+      assertEquals(projection.get[Boolean]("protected"), Right(true))
       assertEquals(projection.get[Double]("risk_score"), Right(0.6))
       assertEquals(projection.get[String]("identity_source"), Right("observed_identity"))
       assert(projection.get[String]("wireless_search_text").toOption.exists(_.contains("sensor-projection")))
@@ -254,37 +251,37 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    payload, status, producer, payload_archived
                  ) VALUES (
-                   $payloadHash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:00'),
-                   $payloadRef, $payloadHash, $payload, 'completed', 'ssl-proxy', 0
+                   $payloadHash, 'wireless.audit', TIMESTAMP '2026-07-27 12:01:00',
+                   $payloadRef, $payloadHash, $payload, 'completed', 'ssl-proxy', false
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_events (
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    payload, status, producer, payload_archived
                  ) VALUES (
-                   $nullSchemaHash, 'wireless.audit', TIMESTAMP('2026-07-27 12:01:30'),
+                   $nullSchemaHash, 'wireless.audit', TIMESTAMP '2026-07-27 12:01:30',
                    $nullSchemaRef, $nullSchemaHash, $nullSchemaPayload,
-                   'completed', 'ssl-proxy', 0
+                   'completed', 'ssl-proxy', false
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_events (
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    status, producer, payload_archived
                  ) VALUES (
-                   $archivedHash, 'proxy.events', TIMESTAMP('2026-07-27 12:02:00'),
-                   $payloadRef, ${"1" * 64}, 'completed', 'ssl-proxy', 1
+                   $archivedHash, 'proxy.events', TIMESTAMP '2026-07-27 12:02:00',
+                   $payloadRef, ${"1" * 64}, 'completed', 'ssl-proxy', true
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_events (
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    status, producer, payload_archived
                  ) VALUES (
-                   $tombstonedHash, 'proxy.events', TIMESTAMP('2026-07-27 12:03:00'),
-                   $payloadRef, ${"2" * 64}, 'completed', 'ssl-proxy', 0
+                   $tombstonedHash, 'proxy.events', TIMESTAMP '2026-07-27 12:03:00',
+                   $payloadRef, ${"2" * 64}, 'completed', 'ssl-proxy', false
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_event_tombstones (
                    dedupe_key, stream_name, payload_sha256, observed_at, expires_at
                  ) VALUES (
                    $tombstonedHash, 'proxy.events', ${"2" * 64},
-                   TIMESTAMP('2026-07-27 12:03:00'),
-                   TIMESTAMPADD(DAY, 1, CURRENT_TIMESTAMP(6))
+                   TIMESTAMP '2026-07-27 12:03:00',
+                   CURRENT_TIMESTAMP + INTERVAL '1 day'
                  )""".update.run.transact(xa)
       rawBefore <- sql"""SELECT CAST(payload AS CHAR), payload_sha256, payload_ref
                           FROM sync_events
@@ -303,7 +300,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         nullSchemaCandidate,
         nullSchemaPayload
       ).map(requireRight)
-      rawAfter <- sql"""SELECT CAST(payload AS CHAR), payload_sha256, payload_ref
+      rawAfter <- sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
                          FROM sync_events
                          WHERE dedupe_key = $payloadHash
                            AND stream_name = 'wireless.audit'"""
@@ -314,7 +311,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                      FROM sync_events
                      WHERE dedupe_key = $payloadHash
                        AND stream_name = 'wireless.audit'"""
-        .query[(Int, String, Int, Option[Int], Int, Int, Int, Int, Int, Option[Double], Option[Int], Int)]
+        .query[(Int, String, Int, Option[Int], Int, Int, Int, Int, Boolean, Option[Double], Option[Boolean], Boolean)]
         .unique.transact(xa)
       nullSchemaVersion <- sql"""SELECT schema_version
                                   FROM sync_events
@@ -330,7 +327,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(rawAfter._3, payloadRef)
       assertEquals(
         state,
-        (1, "null", -42, None, 5180, 256, 0, 0, 1, None, None, 0)
+        (1, "null", -42, None, 5180, 256, 0, 0, true, None, None, false)
       )
       assertEquals(nullSchemaVersion, 1)
       assert(!remaining.exists(_.dedupeKey == payloadHash))
@@ -348,7 +345,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    payload, status, producer, source_mac, signal_dbm
                  ) VALUES (
-                   $nullSignalKey, 'wireless.audit', CURRENT_TIMESTAMP(6),
+                   $nullSignalKey, 'wireless.audit', CURRENT_TIMESTAMP,
                    ${inlineRef(nullSignalPayload)}, $nullSignalKey, $nullSignalPayload,
                    'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:20', NULL
                  )""".update.run.transact(xa)
@@ -356,7 +353,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                    payload, status, producer, source_mac, signal_dbm
                  ) VALUES (
-                   $validSignalKey, 'wireless.audit', CURRENT_TIMESTAMP(6),
+                   $validSignalKey, 'wireless.audit', CURRENT_TIMESTAMP,
                    ${inlineRef(validSignalPayload)}, $validSignalKey, $validSignalPayload,
                    'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:21', -40
                  )""".update.run.transact(xa)
@@ -488,7 +485,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                              WHERE topic = 'proxy.payload_audit'
                                AND partition_id = 0
                                AND record_offset = 3
-                               AND group_id = 'octopus-payload-audit-tidb-v1'"""
+                               AND group_id = 'octopus-payload-audit-postgres-v1'"""
         .query[Long]
         .unique
         .transact(xa)
@@ -503,7 +500,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       )
       assertEquals(evidenceCount, 1L)
 
-  test("canonical manifest parsing is repeatable and retains MEDIUMTEXT payload capacity"):
+  test("canonical manifest parsing is repeatable and retains TEXT payload capacity"):
     requireDocker()
     IO.blocking {
       val first = canonicalStatements().map { case (path, statements) =>
@@ -520,22 +517,22 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
               AND column_name = 'payload_ref'
               AND table_name IN ('sync_batches', 'sync_events')
             ORDER BY table_name"""
-        .query[(String, String, Long)]
+        .query[(String, String, Option[Long])]
         .to[List]
         .transact(xa)
         .map { columns =>
           assertEquals(
             columns,
             List(
-              ("sync_batches", "mediumtext", 16_777_215L),
-              ("sync_events", "mediumtext", 16_777_215L)
+              ("sync_batches", "text", None),
+              ("sync_events", "text", None)
             )
           )
         }
 
   test("startup schema preflight accepts canonical payload_ref column types"):
     requireDocker()
-    new TidbSchemaPreflight(schemaTransactor, schemaConfig).validate()
+    new PostgresSchemaPreflight(schemaTransactor, schemaConfig).validate()
 
   test("scan request evidence batch rolls back atomically when one record is invalid"):
     requireDocker()
@@ -599,7 +596,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
             ) VALUES (
               $outboxId, 'test', $outboxId, 'test.concurrent.claim',
               $topic, ${s"message-$index"}, '{"test":true}', 'pending',
-              0, 5, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+              0, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )""".update.run.void
     }
 
@@ -617,13 +614,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     requireDocker()
     schemaTransactor.preflightCheckColumnTypes(List(
       ("sync_events" -> "payload_ref") -> "longtext",
-      ("sync_events" -> "missing_payload_ref") -> "mediumtext"
+      ("sync_events" -> "missing_payload_ref") -> "text"
     )).map { invalid =>
       assertEquals(
         invalid,
         List(
-          "sync_events.payload_ref (expected longtext, found mediumtext)",
-          "sync_events.missing_payload_ref (expected mediumtext, found missing)"
+          "sync_events.payload_ref (expected longtext, found text)",
+          "sync_events.missing_payload_ref (expected text, found missing)"
         )
       )
     }
@@ -641,7 +638,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       )
     ).noSpaces
     val source = ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
-    new TidbPayloadResolver("/unused").resolve(source)
+    new PostgresPayloadResolver("/unused").resolve(source)
 
   private def inlineRef(payload: String): String =
     "inline://json/" + Base64.getUrlEncoder.withoutPadding
@@ -657,7 +654,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       topic = "proxy.payload_audit",
       partition = 0,
       offset = offset,
-      consumerGroup = "octopus-payload-audit-tidb-v1",
+      consumerGroup = "octopus-payload-audit-postgres-v1",
       groupVersion = 1,
       artifactSha256 = ArtifactSha256,
       messageKey = None,
@@ -678,7 +675,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     sql"""UPDATE outbox_events
            SET status = 'failed',
                last_error = 'superseded by integration test isolation',
-               updated_at = CURRENT_TIMESTAMP(6)
+               updated_at = CURRENT_TIMESTAMP
            WHERE destination_topic = 'sync.oracle.load'
              AND status = 'pending'""".update.run.void.transact(xa)
 
@@ -686,13 +683,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     result.fold(error => fail(s"${error.operation}: ${error.message}"), identity)
 
   private def requireDocker(): Unit =
-    assume(dockerAvailable, "Docker is required for the TiDB integration suite")
+    assume(dockerAvailable, "Docker is required for the PostgreSQL integration suite")
 
   private def applyCanonicalManifest(): Unit =
     val manifest = canonicalManifest()
     val parsedStatements = canonicalStatements(manifest)
 
-    val connection = DriverManager.getConnection(jdbcUrl(None), "root", "")
+    val connection = DriverManager.getConnection(jdbcUrl, "postgres", "postgres")
     try
       val statement = connection.createStatement()
       try
@@ -704,8 +701,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         val readiness = connection.prepareStatement(
           """UPDATE octopus_core.schema_readiness
             |SET required_version = ?, applied_version = ?,
-            |    required_checksum = ?, applied_checksum = ?, ready = 1,
-            |    checked_at = UTC_TIMESTAMP(6)
+            |    required_checksum = ?, applied_checksum = ?, ready = true,
+            |    checked_at = CURRENT_TIMESTAMP
             |WHERE domain = 'octopus_core'""".stripMargin
         )
         try
@@ -835,6 +832,6 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private def schemaRoot: Path =
     Iterator.iterate(Path.of("").toAbsolutePath)(_.getParent)
       .takeWhile(_ != null)
-      .map(_.resolve("sql/tidb/octopus_core"))
+      .map(_.resolve("sql/postgres/octopus_core"))
       .find(path => Files.isDirectory(path))
       .getOrElse(throw IllegalStateException("cannot locate canonical octopus_core schema"))

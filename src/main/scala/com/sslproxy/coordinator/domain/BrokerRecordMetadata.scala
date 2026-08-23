@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.domain
 import com.sslproxy.coordinator.util.Sha256Utils
 
 /** Immutable broker coordinates used for durable idempotency evidence. Kafka
-  * owns the restart position through committed consumer-group offsets; TiDB
+  * owns the restart position through committed consumer-group offsets; PostgreSQL
   * independently records every processed broker coordinate.
   *
   * `groupVersion` and `artifactSha256` retain their persisted column names for

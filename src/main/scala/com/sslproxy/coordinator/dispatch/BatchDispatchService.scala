@@ -3,14 +3,14 @@ package com.sslproxy.coordinator.dispatch
 import cats.effect.IO
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
 import com.sslproxy.coordinator.persistence.OutboxStore
-import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord}
+import com.sslproxy.coordinator.postgres.{OutboxFailureDisposition, OutboxRecord}
 import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
 import com.sslproxy.coordinator.observability.StructuredLogger
 import io.opentelemetry.api.trace.SpanKind
 
 import scala.concurrent.duration.*
 
-/** Publishes the transactional TiDB outbox. A broker acknowledgement followed
+/** Publishes the transactional PostgreSQL outbox. A broker acknowledgement followed
   * by a process crash can produce the same stable message key again; the
   * receiving transaction is therefore required to deduplicate that key.
   */

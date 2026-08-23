@@ -3,14 +3,14 @@ package com.sslproxy.coordinator.persistence
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.processor.{Lease, ProcessorId, ProcessorRunStatus, ProcessorStatus}
-import com.sslproxy.coordinator.tidb.{
+import com.sslproxy.coordinator.postgres.{
   ArchiveCandidate,
   HydrationCursor,
   OutboxFailureDisposition,
   OutboxRecord,
   SyncEventHydrationCandidate,
-  TidbLoad,
-  TidbResult,
+  PostgresLoad,
+  PostgresResult,
   WirelessBacklogEntry
 }
 import io.circe.Json
@@ -57,14 +57,14 @@ trait OutboxStore[F[_]]:
 
 trait ResultStore[F[_]]:
   def recordResultWithEvidence(
-    result: TidbResult,
+    result: PostgresResult,
     metadata: BrokerRecordMetadata
   ): DbResultT[F, Unit]
   def recordLoadResultsWithEvidence(
-    records: List[(TidbLoad, TidbResult, BrokerRecordMetadata)]
+    records: List[(PostgresLoad, PostgresResult, BrokerRecordMetadata)]
   ): DbResultT[F, Unit]
   def recordResultsWithEvidence(
-    records: List[(TidbResult, BrokerRecordMetadata)]
+    records: List[(PostgresResult, BrokerRecordMetadata)]
   ): DbResultT[F, Unit]
 
 trait WirelessStore[F[_]]:

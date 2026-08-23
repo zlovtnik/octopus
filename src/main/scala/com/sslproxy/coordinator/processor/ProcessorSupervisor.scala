@@ -7,7 +7,7 @@ import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.persistence.ProcessorStateStore
-import com.sslproxy.coordinator.tidb.TidbErrorClass
+import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
@@ -120,7 +120,7 @@ final class ProcessorSupervisor private (
         case Left(error: ProcessorPersistenceException) =>
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
             IO.pure(error)
-        case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
+        case Left(error) if PostgresErrorClass.classify(error) == PostgresErrorClass.Permanent =>
           failTerminal(workload, runId, restartCount, error)
         case Left(error) =>
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>

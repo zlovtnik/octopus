@@ -5,11 +5,11 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.tidb.{
+import com.sslproxy.coordinator.postgres.{
   HydrationCursor,
   SyncEventHydrationCandidate,
-  TidbPayloadReadException,
-  TidbPayloadResolver
+  PostgresPayloadReadException,
+  PostgresPayloadResolver
 }
 import fs2.Stream
 
@@ -17,7 +17,7 @@ import scala.concurrent.duration.*
 
 final class SyncEventHydrationService(
     store: IngestionStore[IO],
-    payloadResolver: TidbPayloadResolver,
+    payloadResolver: PostgresPayloadResolver,
     metrics: CoordinatorMetrics,
     pageSize: Int,
     failureThreshold: Int,
@@ -169,7 +169,7 @@ final class SyncEventHydrationService(
     dbSemaphore.permit.use { _ =>
       IO.blocking(payloadResolver.resolvePayload(payloadRef))
     }.handleErrorWith {
-      case _: TidbPayloadReadException if attempt < 3 =>
+      case _: PostgresPayloadReadException if attempt < 3 =>
         IO.sleep((25L * (1L << (attempt - 1))).millis) *>
           resolveWithRetry(payloadRef, attempt + 1)
       case error => IO.raiseError(error)

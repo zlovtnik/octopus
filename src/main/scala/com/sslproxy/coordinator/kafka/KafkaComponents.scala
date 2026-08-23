@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.tidb.{TidbLoad, TidbResult}
+import com.sslproxy.coordinator.postgres.{PostgresLoad, PostgresResult}
 import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
@@ -169,11 +169,11 @@ object KafkaComponents:
 
     fs2.kafka.KafkaProducer.resource(producerSettings)
 
-  def deserializeLoad(json: String): Either[Throwable, TidbLoad] =
-    circeDecode[TidbLoad](json)
+  def deserializeLoad(json: String): Either[Throwable, PostgresLoad] =
+    circeDecode[PostgresLoad](json)
 
-  def deserializeResult(json: String): Either[Throwable, TidbResult] =
-    circeDecode[TidbResult](json)
+  def deserializeResult(json: String): Either[Throwable, PostgresResult] =
+    circeDecode[PostgresResult](json)
 
-  def serializeResult(result: TidbResult): String =
+  def serializeResult(result: PostgresResult): String =
     result.asJson.noSpaces

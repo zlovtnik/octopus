@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.http
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.processor.ProcessorReadiness
-import com.sslproxy.coordinator.tidb.TidbTransactor
+import com.sslproxy.coordinator.postgres.PostgresTransactor
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.circe.Json
 import org.http4s.HttpRoutes
@@ -13,7 +13,7 @@ import org.http4s.circe.*
 import scala.concurrent.duration.*
 
 class HealthRoutes(
-    transactor: TidbTransactor,
+    transactor: PostgresTransactor,
     metrics: CoordinatorMetrics,
     processorReadiness: Option[ProcessorReadiness] = None,
     databaseCheckTimeout: FiniteDuration = 5.seconds
@@ -32,7 +32,7 @@ class HealthRoutes(
       val json = Json.obj(
         "status" -> Json.fromString(status),
         "components" -> Json.obj(
-          "tidb" -> Json.obj("status" -> Json.fromString(if databaseHealthy then "UP" else "DOWN")),
+          "postgres" -> Json.obj("status" -> Json.fromString(if databaseHealthy then "UP" else "DOWN")),
           "processors" -> Json.obj("status" -> Json.fromString(if processorsHealthy then "UP" else "DOWN"))
         )
       )

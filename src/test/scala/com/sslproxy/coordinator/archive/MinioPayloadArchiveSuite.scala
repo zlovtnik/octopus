@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.archive
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import com.sslproxy.coordinator.tidb.ArchiveCandidate
+import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import com.sslproxy.coordinator.util.Sha256Utils
 import munit.CatsEffectSuite
 

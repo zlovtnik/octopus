@@ -14,8 +14,8 @@ import com.sslproxy.coordinator.ingest.{PayloadAuditConsumer, SyncEventHydration
 import com.sslproxy.coordinator.kafka.{
   KafkaComponents,
   ScanRequestStream,
-  TidbLoadStream,
-  TidbResultStream,
+  PostgresLoadStream,
+  PostgresResultStream,
   WirelessConsumerService
 }
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
@@ -27,8 +27,8 @@ import com.sslproxy.coordinator.processor.{
   ProcessorWorkload,
   SearchRetentionProcessor
 }
-import com.sslproxy.coordinator.tidb.*
-import com.sslproxy.coordinator.tidb.sql.IngestionSql
+import com.sslproxy.coordinator.postgres.*
+import com.sslproxy.coordinator.postgres.sql.IngestionSql
 import doobie.Transactor
 import doobie.implicits.*
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -46,10 +46,10 @@ object Main extends IOApp.Simple:
     val blockingEc: scala.concurrent.ExecutionContext =
       scala.concurrent.ExecutionContext.fromExecutor(
         java.util.concurrent.Executors.newFixedThreadPool(
-          cfg.tidb.poolSize,
+          cfg.postgres.poolSize,
           new java.util.concurrent.ThreadFactory:
             def newThread(r: Runnable): Thread =
-              val t = new Thread(r, "doobie-tidb-pool")
+              val t = new Thread(r, "doobie-postgres-pool")
               t.setDaemon(true)
               t
         )
@@ -57,16 +57,16 @@ object Main extends IOApp.Simple:
     val meterRegistry = new SimpleMeterRegistry()
     val metrics = new CoordinatorMetrics(meterRegistry)
 
-    if !cfg.tidb.enabled then
-      log.warn("startup", "status" -> "disabled", "tidb_sink" -> "disabled")
-      IO.println("TiDB sink disabled (set TIDB_ENABLED=true to enable)").void
+    if !cfg.postgres.enabled then
+      log.warn("startup", "status" -> "disabled", "postgres_sink" -> "disabled")
+      IO.println("PostgreSQL sink disabled (set POSTGRES_ENABLED=true to enable)").void
     else
       val appResource: Resource[IO, Fiber[IO, Throwable, Unit]] =
         CoordinatorTracing.resource.flatMap { _ =>
-          TidbTransactor.resource(cfg.tidb).flatMap { oldTx =>
-            val tiDbDs = oldTx.dataSource
-            val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
-            val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
+          PostgresTransactor.resource(cfg.postgres).flatMap { oldTx =>
+            val postgresDs = oldTx.dataSource
+            val postgresDoobieTx = Transactor.fromDataSource[IO](postgresDs, blockingEc)
+            val preflight = new PostgresSchemaPreflight(oldTx, cfg.postgres)
 
             Resource.eval(preflight.validate()).flatMap { _ =>
               val enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
@@ -74,25 +74,25 @@ object Main extends IOApp.Simple:
                 .eval(
                   Semaphore[IO](
                     dbWorkerPermits(
-                      cfg.tidb.poolSize,
-                      cfg.tidb.healthcheckReserve
+                      cfg.postgres.poolSize,
+                      cfg.postgres.healthcheckReserve
                     )
                   )
                 )
                 .flatMap { dbSemaphore =>
-                  val tiDbRepo = new TidbRepository(tiDbDoobieTx, Some(dbSemaphore))
+                  val postgresRepo = new PostgresRepository(postgresDoobieTx, Some(dbSemaphore))
                   KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
-                    val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
+                    val payloadResolver = new PostgresPayloadResolver(cfg.sync.outboxDir)
                     def payloadLookup(sha: String): IO[Option[String]] =
-                      IngestionSql.payloadBySha256(sha).unique.transact(tiDbDoobieTx).attempt.map(_.toOption)
+                      IngestionSql.payloadBySha256(sha).unique.transact(postgresDoobieTx).attempt.map(_.toOption)
                     val handler =
-                      new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock, payloadLookup)
-                    val ingestionStore = new TidbIngestionStore(tiDbRepo)
-                    val outboxStore = new TidbOutboxStore(tiDbRepo)
-                    val projectionStore = new TidbProjectionStore(tiDbRepo)
-                    val maintenanceStore = new TidbMaintenanceStore(tiDbRepo)
-                    val resultStore = new TidbResultStore(tiDbRepo)
-                    val wirelessStore = new TidbWirelessStore(tiDbRepo)
+                      new PostgresLoadHandler(payloadResolver, PostgresTransformService, oldTx, PostgresClock, payloadLookup)
+                    val ingestionStore = new PostgresIngestionStore(postgresRepo)
+                    val outboxStore = new PostgresOutboxStore(postgresRepo)
+                    val projectionStore = new PostgresProjectionStore(postgresRepo)
+                    val maintenanceStore = new PostgresMaintenanceStore(postgresRepo)
+                    val resultStore = new PostgresResultStore(postgresRepo)
+                    val wirelessStore = new PostgresWirelessStore(postgresRepo)
                     val hydrationService = new SyncEventHydrationService(
                       ingestionStore,
                       payloadResolver,
@@ -135,7 +135,7 @@ object Main extends IOApp.Simple:
                     yield cronScheduler
 
                     Resource.eval(scheduler).flatMap { cronScheduler =>
-                      val processorStateStore = new TidbProcessorStateStore(tiDbDoobieTx, Some(dbSemaphore))
+                      val processorStateStore = new PostgresProcessorStateStore(postgresDoobieTx, Some(dbSemaphore))
                       val maintenanceOwnerId = java.util.UUID.randomUUID().toString
                       val leaseTtlSeconds = ((cfg.archive.maintenanceIntervalMs / 1000L) * 2L)
                         .max(60L)
@@ -185,7 +185,7 @@ object Main extends IOApp.Simple:
                               oldTx,
                               metrics,
                               Some(supervisor.readiness),
-                              cfg.tidb.connectionTimeoutMs.millis
+                              cfg.postgres.connectionTimeoutMs.millis
                             )
 
                             val httpPort = Port
@@ -222,14 +222,14 @@ object Main extends IOApp.Simple:
                                 metrics,
                                 kafka.producer
                               )
-                              val loadStream = TidbLoadStream.run(
+                              val loadStream = PostgresLoadStream.run(
                                 cfg.kafka,
                                 resultStore,
                                 handler,
                                 kafka.producer,
                                 dbSemaphore
                               )
-                              val resultStream = TidbResultStream.run(
+                              val resultStream = PostgresResultStream.run(
                                 cfg.kafka,
                                 resultStore,
                                 kafka.producer
@@ -434,7 +434,7 @@ object Main extends IOApp.Simple:
                               )
 
                               Resource.make(
-                                tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
+                                postgresRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
                                   streams.compile.drain.start
                               )(_.cancel)
                             }
@@ -450,9 +450,9 @@ object Main extends IOApp.Simple:
       log.info(
         "startup",
         "status" -> "starting",
-        "tidb_host" -> cfg.tidb.host,
-        "tidb_port" -> cfg.tidb.port.toString,
-        "tidb_database" -> cfg.tidb.database
+        "postgres_host" -> cfg.postgres.host,
+        "postgres_port" -> cfg.postgres.port.toString,
+        "postgres_database" -> cfg.postgres.database
       )
 
       appResource.use(_.joinWithNever)

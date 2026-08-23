@@ -12,7 +12,7 @@ class DbResultTSuite extends CatsEffectSuite:
 
   test("orRaise exposes the typed database operation with a sanitized attached cause"):
     val cause = IllegalStateException("connection lost password=driver-secret")
-    val error: DatabaseError = DatabaseError.Retryable("tidb.claim", cause, cause.getMessage)
+    val error: DatabaseError = DatabaseError.Retryable("postgres.claim", cause, cause.getMessage)
     val result: DbResultT[IO, Int] = EitherT.leftT[IO, Int](error)
 
     result.orRaise.attempt.map {

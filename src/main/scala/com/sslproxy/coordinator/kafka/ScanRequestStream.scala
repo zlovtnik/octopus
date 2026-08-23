@@ -6,7 +6,7 @@ import com.sslproxy.coordinator.config.{IngestConfig, KafkaCfg}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.tidb.{TidbErrorClass, TidbPayloadResolver}
+import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresPayloadResolver}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -18,7 +18,7 @@ object ScanRequestStream:
     cfg: KafkaCfg,
     ingest: IngestConfig,
     store: IngestionStore[IO],
-    payloadResolver: TidbPayloadResolver,
+    payloadResolver: PostgresPayloadResolver,
     metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
@@ -51,7 +51,7 @@ object ScanRequestStream:
         handled <- resolved.traverse { case (locked, request, record) =>
           store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))
-            case Left(error) if TidbErrorClass.classify(error.cause) == TidbErrorClass.Permanent =>
+            case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
               LockedTopicConsumer
                 .parkNonRetriable(
                   producer,

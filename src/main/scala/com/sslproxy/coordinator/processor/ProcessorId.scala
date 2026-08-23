@@ -73,7 +73,7 @@ final case class ProcessorContract(
 )
 
 /** Runtime view of the shared processor contract in
-  * `sql/tidb/contracts/processors.json`. Tests keep both representations exact.
+  * `sql/postgres/contracts/processors.json`. Tests keep both representations exact.
   */
 object ProcessorCatalog:
   val contracts: List[ProcessorContract] = List(

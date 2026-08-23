@@ -5,7 +5,7 @@ import cats.effect.{Deferred, IO, Ref}
 import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.persistence.{DbResultT, MaintenanceStore}
-import com.sslproxy.coordinator.tidb.ArchiveCandidate
+import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import munit.CatsEffectSuite
 
 import java.time.Instant

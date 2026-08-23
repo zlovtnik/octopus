@@ -9,9 +9,9 @@ class AppConfigSuite extends FunSuite:
   test("application defaults keep local runtime lanes disabled"):
     val config = defaults
 
-    assertEquals(config.tidb.enabled, false)
-    assertEquals(config.tidb.poolSize, 20)
-    assertEquals(config.tidb.healthcheckReserve, 2)
+    assertEquals(config.postgres.enabled, false)
+    assertEquals(config.postgres.poolSize, 20)
+    assertEquals(config.postgres.healthcheckReserve, 2)
     assertEquals(config.kafka.lockedBatchSize, 500)
     assertEquals(config.kafka.lockedBatchWindowMs, 250L)
     assertEquals(config.kafka.topicPartitions, 24)
@@ -22,25 +22,25 @@ class AppConfigSuite extends FunSuite:
   test("active runtime uses Kafka offsets and accepts the deployed single-broker replication"):
     val baseline = defaults
     val active = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb),
+      postgres = enabledPostgres(baseline.postgres),
       kafka = baseline.kafka.copy(topicReplicationFactor = 1),
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true)
     )
 
     assertEquals(AppConfig.validate(active), Right(active))
 
-  test("active runtime still requires TiDB"):
+  test("active runtime still requires PostgreSQL"):
     val baseline = defaults
     val invalid = baseline.copy(
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true)
     )
 
-    assert(validationMessages(invalid).exists(_.contains("requires tidb.enabled=true")))
+    assert(validationMessages(invalid).exists(_.contains("requires postgres.enabled=true")))
 
   test("all Kafka consumer groups remain explicitly versioned"):
     val baseline = defaults
     val invalid = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb),
+      postgres = enabledPostgres(baseline.postgres),
       kafka = baseline.kafka.copy(scanConsumer = "octopus-scan"),
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true)
     )
@@ -50,7 +50,7 @@ class AppConfigSuite extends FunSuite:
   test("locked consumer processors require the consumer lane"):
     val baseline = defaults
     val invalid = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb),
+      postgres = enabledPostgres(baseline.postgres),
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
       processors = baseline.processors.copy(enabled = List("sync-scan-ingestion"))
     )
@@ -60,7 +60,7 @@ class AppConfigSuite extends FunSuite:
   test("an explicit processor catalog includes every enabled locked consumer"):
     val baseline = defaults
     val invalid = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb),
+      postgres = enabledPostgres(baseline.postgres),
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
       processors = baseline.processors.copy(enabled = List("sync-job-planner"))
     )
@@ -129,7 +129,7 @@ class AppConfigSuite extends FunSuite:
   test("public key retrieval is restricted to explicit development mode"):
     val baseline = defaults
     val production = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb).copy(localDevAllowPublicKeyRetrieval = true)
+      postgres = enabledPostgres(baseline.postgres).copy(localDevAllowPublicKeyRetrieval = true)
     )
     val development = production.copy(runtime = production.runtime.copy(environment = "development"))
 
@@ -190,15 +190,15 @@ class AppConfigSuite extends FunSuite:
       "wireless.max-poll-records"
     ).foreach(expected => assert(messages.exists(_.contains(expected)), expected))
 
-  test("enabled TiDB requires an exact canonical manifest checksum"):
+  test("enabled PostgreSQL requires an exact canonical manifest checksum"):
     val baseline = defaults
     val invalid = baseline.copy(
-      tidb = enabledTiDb(baseline.tidb).copy(manifestSha256 = "not-a-checksum")
+      postgres = enabledPostgres(baseline.postgres).copy(manifestSha256 = "not-a-checksum")
     )
 
     assert(validationMessages(invalid).exists(_.contains("manifest-sha-256")))
 
-  test("proxy.events remains in both ingest and TiDB load streams"):
+  test("proxy.events remains in both ingest and PostgreSQL load streams"):
     val baseline = defaults
     val invalid = baseline.copy(
       ingest = IngestConfig(
@@ -209,7 +209,7 @@ class AppConfigSuite extends FunSuite:
 
     val messages = validationMessages(invalid)
     assert(messages.exists(_.contains("ingest.stream-names must contain proxy.events")))
-    assert(messages.exists(_.contains("persisted to TiDB")))
+    assert(messages.exists(_.contains("persisted to PostgreSQL")))
 
   private def defaults: AppConfig =
     AppConfig.load(
@@ -223,15 +223,15 @@ class AppConfigSuite extends FunSuite:
       fail("expected invalid configuration")
     )
 
-  private def enabledTiDb(config: TiDbConfig): TiDbConfig =
+  private def enabledPostgres(config: PostgresConfig): PostgresConfig =
     config.copy(
-      host = "tidb.example.internal",
-      database = "octopus_core",
+      host = "postgres.example.internal",
+      database = "sync",
       user = "octopus_runtime",
       password = "not-a-real-secret",
       enabled = true,
       warnOnly = false,
-      sslMode = "VERIFY_IDENTITY",
-      sslCaPath = "/etc/tidb-tls/ca.crt",
-      sslServerName = "tidb.example.internal"
+      sslMode = "verify-full",
+      sslCaPath = "/etc/postgres-tls/ca.crt",
+      sslServerName = "postgres.example.internal"
     )

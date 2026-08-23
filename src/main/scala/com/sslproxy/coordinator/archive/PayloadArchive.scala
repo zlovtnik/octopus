@@ -4,7 +4,7 @@ import cats.effect.kernel.Async
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.ArchiveConfig
-import com.sslproxy.coordinator.tidb.ArchiveCandidate
+import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import com.sslproxy.coordinator.util.Sha256Utils
 import io.minio.errors.ErrorResponseException
 import io.minio.{BucketExistsArgs, MakeBucketArgs, MinioClient, PutObjectArgs, StatObjectArgs}

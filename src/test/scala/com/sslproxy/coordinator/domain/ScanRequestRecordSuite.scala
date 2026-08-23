@@ -12,7 +12,7 @@ class ScanRequestRecordSuite extends FunSuite:
   test("wire decoder rejects malformed timestamps"):
     assert(ScanRequestRecord.decodeWire(request("2026-08-03 12:34:56")).isLeft)
 
-  test("wire decoder rejects identifiers wider than TiDB columns"):
+  test("wire decoder rejects identifiers wider than PostgreSQL columns"):
     val streamTooLong =
       s"""{"stream_name":"${"s" * 256}","dedupe_key":"dedupe","payload_ref":"payload.json","observed_at":"2026-08-03T12:34:56Z"}"""
     val dedupeTooLong =
@@ -21,7 +21,7 @@ class ScanRequestRecordSuite extends FunSuite:
     assert(ScanRequestRecord.decodeWire(streamTooLong).isLeft)
     assert(ScanRequestRecord.decodeWire(dedupeTooLong).isLeft)
 
-  test("wire decoder rejects payload references wider than TiDB MEDIUMTEXT"):
+  test("wire decoder rejects payload references wider than PostgreSQL MEDIUMTEXT"):
     val payloadRef = "\u20ac" * ((ScanRequestRecord.PayloadRefMaxBytes / 3) + 1)
     val oversized =
       s"""{"stream_name":"proxy.events","dedupe_key":"dedupe","payload_ref":"$payloadRef","observed_at":"2026-08-03T12:34:56Z"}"""

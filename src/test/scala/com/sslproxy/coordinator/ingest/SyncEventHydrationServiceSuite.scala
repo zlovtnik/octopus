@@ -11,7 +11,7 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
-import com.sslproxy.coordinator.tidb.{HydrationCursor, SyncEventHydrationCandidate, TidbPayloadResolver}
+import com.sslproxy.coordinator.postgres.{HydrationCursor, SyncEventHydrationCandidate, PostgresPayloadResolver}
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
 
@@ -36,7 +36,7 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
       metrics = new CoordinatorMetrics(SimpleMeterRegistry())
       service = new SyncEventHydrationService(
         store,
-        new TidbPayloadResolver("/unused"),
+        new PostgresPayloadResolver("/unused"),
         metrics,
         pageSize = 10,
         failureThreshold = 2,
@@ -95,7 +95,7 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
           .as(
             Left(
               DatabaseError.Permanent(
-                "tidb.hydrate_existing_sync_event",
+                "postgres.hydrate_existing_sync_event",
                 IllegalStateException("invalid stored payload"),
                 "invalid stored payload"
               )

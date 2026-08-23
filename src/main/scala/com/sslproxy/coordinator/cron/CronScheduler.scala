@@ -13,7 +13,7 @@ import com.sslproxy.coordinator.persistence.{
   OutboxStore,
   ProjectionStore
 }
-import com.sslproxy.coordinator.tidb.TidbErrorClass
+import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import com.sslproxy.coordinator.processor.{FencedWorkRunner, ProcessorId}
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -390,8 +390,8 @@ object CronScheduler:
   ): IO[Unit] =
     def loop(attempt: Int, delay: FiniteDuration): IO[Unit] =
       verify.handleErrorWith { error =>
-        TidbErrorClass.classify(error) match
-          case TidbErrorClass.Retryable if attempt < VerificationRetryMaxAttempts =>
+        PostgresErrorClass.classify(error) match
+          case PostgresErrorClass.Retryable if attempt < VerificationRetryMaxAttempts =>
             IO(log.warn(
               "canonical_manifest_verification",
               "status" -> "retrying",
@@ -400,14 +400,14 @@ object CronScheduler:
               "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
             )) *> IO.sleep(delay) *>
               loop(attempt + 1, (delay * 2L).min(VerificationRetryMaxDelay))
-          case TidbErrorClass.Retryable =>
+          case PostgresErrorClass.Retryable =>
             IO(log.error(
               "canonical_manifest_verification",
               error,
               "status" -> "failed",
               "attempts" -> attempt.toString
             )) *> IO.raiseError(error)
-          case TidbErrorClass.Permanent =>
+          case PostgresErrorClass.Permanent =>
             IO(log.error("canonical_manifest_verification", error, "status" -> "failed")) *>
               IO.raiseError(error)
       }

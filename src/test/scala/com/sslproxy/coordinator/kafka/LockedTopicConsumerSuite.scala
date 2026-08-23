@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.BrokerConsumerContract
-import com.sslproxy.coordinator.tidb.TidbResult
+import com.sslproxy.coordinator.postgres.PostgresResult
 import munit.FunSuite
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.TopicPartition
@@ -86,7 +86,7 @@ class LockedTopicConsumerSuite extends FunSuite:
     assertEquals(KafkaComponents.provisionedTopicPartitions(cfg, "wireless.mac.lookup"), 3)
 
   test("result codec preserves the locked result payload"):
-    val expected = TidbResult(
+    val expected = PostgresResult(
       jobId = "job-1",
       batchId = "batch-1",
       status = "success",

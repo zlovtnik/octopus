@@ -22,7 +22,7 @@ object StringListConfigReader:
           cursor.asString.map(s => s.split(",", -1).map(_.trim).toList)
 
 final case class AppConfig(
-  tidb: TiDbConfig,
+  postgres: PostgresConfig,
   kafka: KafkaCfg,
   cron: CronConfig,
   ingest: IngestConfig,
@@ -35,7 +35,7 @@ final case class AppConfig(
   archive: ArchiveConfig
 ) derives ConfigReader
 
-final case class TiDbConfig(
+final case class PostgresConfig(
   host: String,
   port: Int,
   database: String,
@@ -47,7 +47,7 @@ final case class TiDbConfig(
   statementTimeoutSecs: Int,
   enabled: Boolean,
   warnOnly: Boolean,
-  sslMode: String = "DISABLED",
+  sslMode: String = "verify-full",
   sslCaPath: String = "",
   sslServerName: String = "",
   sslClientKeyStorePath: String = "",
@@ -167,8 +167,8 @@ object AppConfig:
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val isDevelopment = config.runtime.environment == "development"
     val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty
-    val stagedTiDbErrors =
-      if config.tidb.enabled then enabledTiDbErrors(config.tidb, isDevelopment)
+    val stagedPostgresErrors =
+      if config.postgres.enabled then enabledPostgresErrors(config.postgres, isDevelopment)
       else List.empty
     val runtimeErrors =
       if runtimeActive then activeRuntimeErrors(config)
@@ -189,8 +189,8 @@ object AppConfig:
         backpressureErrors(config.backpressure) ++
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
-        tidbBoundErrors(config.tidb) ++
-        stagedTiDbErrors ++
+        postgresBoundErrors(config.postgres) ++
+        stagedPostgresErrors ++
         runtimeErrors
 
     NonEmptyList.fromList(errors) match
@@ -203,7 +203,7 @@ object AppConfig:
         s"ingest.stream-names must contain $ProxyEventsStream"
       ),
       Option.when(!config.loadStreamNames.contains(ProxyEventsStream))(
-        s"ingest.load-stream-names must contain $ProxyEventsStream so proxy events are persisted to TiDB"
+        s"ingest.load-stream-names must contain $ProxyEventsStream so proxy events are persisted to PostgreSQL"
       ),
       Option.when(config.streamNames.distinct.size != config.streamNames.size)(
         "ingest.stream-names must not contain duplicates"
@@ -377,76 +377,79 @@ object AppConfig:
       Option.when(config.resultFetchCount <= 0)("cron.result-fetch-count must be positive")
     ).flatten
 
-  private def tidbBoundErrors(config: TiDbConfig): List[String] =
+  private def postgresBoundErrors(config: PostgresConfig): List[String] =
     List(
-      Option.when(config.port <= 0 || config.port > 65535)("tidb.port must be between 1 and 65535"),
-      Option.when(config.poolSize <= 0)("tidb.pool-size must be positive"),
+      Option.when(config.port <= 0 || config.port > 65535)("postgres.port must be between 1 and 65535"),
+      Option.when(config.poolSize <= 0)("postgres.pool-size must be positive"),
       Option.when(config.healthcheckReserve < 0)(
-        "tidb.healthcheck-reserve must not be negative"
+        "postgres.healthcheck-reserve must not be negative"
       ),
       Option.when(config.healthcheckReserve >= config.poolSize)(
-        "tidb.healthcheck-reserve must be smaller than tidb.pool-size"
+        "postgres.healthcheck-reserve must be smaller than postgres.pool-size"
       ),
       Option.when(config.connectionTimeoutMs <= 0L)(
-        "tidb.connection-timeout-ms must be positive"
+        "postgres.connection-timeout-ms must be positive"
       ),
       Option.when(config.statementTimeoutSecs <= 0)(
-        "tidb.statement-timeout-secs must be positive"
+        "postgres.statement-timeout-secs must be positive"
       )
     ).flatten
 
-  private def enabledTiDbErrors(config: TiDbConfig, isDevelopment: Boolean): List[String] =
+  private def enabledPostgresErrors(config: PostgresConfig, isDevelopment: Boolean): List[String] =
     val normalizedHost = config.host.trim.toLowerCase(java.util.Locale.ROOT)
     val loopbackHosts = Set("localhost", "127.0.0.1", "::1", "[::1]")
 
     List(
-      required(config.host, "tidb.host"),
+      required(config.host, "postgres.host"),
       Option.when(loopbackHosts.contains(normalizedHost))(
-        "tidb.host must reference the external TiDB cluster, not loopback"
+        "postgres.host must reference the external PostgreSQL cluster, not loopback"
       ),
-      required(config.database, "tidb.database"),
-      required(config.user, "tidb.user"),
-      Option.when(config.user.trim.equalsIgnoreCase("root"))(
-        "tidb.user must be a least-privilege non-root account"
+      required(config.database, "postgres.database"),
+      required(config.user, "postgres.user"),
+      Option.when(Set("root", "postgres").contains(config.user.trim.toLowerCase(java.util.Locale.ROOT)))(
+        "postgres.user must be a least-privilege non-superuser account"
       ),
-      required(config.password, "tidb.password"),
+      Option.when(config.database.trim != "sync")(
+        "postgres.database must select sync"
+      ),
+      required(config.password, "postgres.password"),
       Option.when(
-        config.sslMode != "DISABLED" && config.sslCaPath.trim.isEmpty
+        config.sslMode != "disable" && config.sslCaPath.trim.isEmpty
       )(
-        "tidb.ssl-ca-path is required when ssl-mode is not DISABLED"
+        "postgres.ssl-ca-path is required when ssl-mode is not disable"
       ),
       Option.when(
-        config.sslMode != "DISABLED" && config.sslServerName.trim.isEmpty
+        config.sslMode != "disable" && config.sslServerName.trim.isEmpty
       )(
-        "tidb.ssl-server-name is required when ssl-mode is not DISABLED"
+        "postgres.ssl-server-name is required when ssl-mode is not disable"
       ),
       Option.when(
-        config.sslMode != "DISABLED" &&
+        config.sslMode != "disable" &&
           config.sslServerName.trim.nonEmpty &&
           !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
       )(
-        "tidb.ssl-server-name must equal tidb.host because Connector/J verifies the JDBC host identity"
+        "postgres.ssl-server-name must equal postgres.host because the PostgreSQL driver verifies the endpoint identity"
       ),
       Option.when(
-        config.sslMode != "DISABLED" &&
+        config.sslMode != "disable" &&
           config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.trim.nonEmpty
       )(
-        "tidb.ssl-client-key-store-path and tidb.ssl-client-key-store-password must be configured together"
+        "postgres.ssl-client-key-store-path and postgres.ssl-client-key-store-password must be configured together"
       ),
       Option.when(
-        config.sslMode != "DISABLED" &&
+        config.sslMode != "disable" &&
           !Set("JKS", "PKCS12").contains(config.sslClientKeyStoreType.trim.toUpperCase(java.util.Locale.ROOT))
       )(
-        "tidb.ssl-client-key-store-type must be JKS or PKCS12"
+        "postgres.ssl-client-key-store-type must be JKS or PKCS12"
       ),
       Option.when(config.warnOnly)(
-        "tidb.warn-only must be false when TiDB readiness is enabled"
+        "postgres.warn-only must be false when PostgreSQL readiness is enabled"
       ),
       Option.when(config.localDevAllowPublicKeyRetrieval && !isDevelopment)(
-        "tidb.local-dev-allow-public-key-retrieval requires OCTOPUS_ENVIRONMENT=development"
+        "postgres.local-dev-allow-public-key-retrieval requires OCTOPUS_ENVIRONMENT=development"
       ),
       Option.when(!Sha256Hex.matches(config.manifestSha256))(
-        "tidb.manifest-sha-256 must be 64 lowercase hexadecimal characters"
+        "postgres.manifest-sha-256 must be 64 lowercase hexadecimal characters"
       )
     ).flatten
 
@@ -476,8 +479,8 @@ object AppConfig:
     val missingLockedConsumers =
       lockedConsumerProcessorIds -- enabledLockedConsumers.toSet
     List(
-      Option.when(!config.tidb.enabled)(
-        "an enabled runtime requires tidb.enabled=true"
+      Option.when(!config.postgres.enabled)(
+        "an enabled runtime requires postgres.enabled=true"
       ),
       Option.when(enabledLockedConsumers.nonEmpty && !config.runtime.consumersEnabled)(
         s"locked-consumer processors ${enabledLockedConsumers.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"

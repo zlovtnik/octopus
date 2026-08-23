@@ -4,7 +4,7 @@ import cats.effect.IO
 import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, WirelessStore}
-import com.sslproxy.coordinator.tidb.{TidbErrorClass}
+import com.sslproxy.coordinator.postgres.{PostgresErrorClass}
 import com.sslproxy.coordinator.util.{ErrorSanitizer,Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
@@ -420,7 +420,7 @@ object WirelessConsumerService:
           case _: DatabaseError.Permanent => true
           case _: DatabaseError.Retryable => false
       case sqlError: SQLException =>
-        TidbErrorClass.classify(sqlError) == TidbErrorClass.Permanent
+        PostgresErrorClass.classify(sqlError) == PostgresErrorClass.Permanent
       case _ => false
 
   private def configuredReplyTopics(cfg: WirelessConfig): Set[String] =

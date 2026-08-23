@@ -1,8 +1,8 @@
 # Octopus
 
 Octopus is the Scala 3, Cats Effect, FS2, Doobie, and fs2-kafka coordinator for
-durable ingestion into TiDB. It owns ingestion evidence, deduplication,
-monotonic cursors, job and batch state, fenced outbox publication, TiDB load
+durable ingestion into PostgreSQL. It owns ingestion evidence, deduplication,
+monotonic cursors, job and batch state, fenced outbox publication, PostgreSQL load
 results, wireless normalization inputs, and maintained projections. Embedding
 execution and vector writes belong to Atheros Search.
 
@@ -17,7 +17,7 @@ The currently wired binary provides:
 - at-least-once ingestion evidence keyed by consumer group, topic, partition,
   and offset;
 - durable scan ingestion from `sync.scan.request`;
-- TiDB load work on `sync.oracle.load` and outcomes on
+- PostgreSQL load work on `sync.oracle.load` and outcomes on
   `sync.oracle.result`;
 - durable jobs, batches, cursors, outbox leases, retry state, and DLQ handling;
 - payload-audit ingestion;
@@ -39,12 +39,12 @@ The currently wired binary provides:
   wireless projection reconciliation with durable findings;
 - pure, deterministic behavior-window, timing percentile/jitter, 13-token
   sequence, baseline, vector-similarity, clustering, DNS-threat, and AP-risk
-  transformations with TiDB projection writers;
+  transformations with PostgreSQL projection writers;
 - approved-merge identity membership and infrastructure graph projection;
 - `/live`, `/ready`, `/metrics`, `/health`, `/actuator/health`, and
   `/actuator/prometheus` HTTP routes;
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
-  and every TiDB durable operation, with error recording and bounded SDK shutdown.
+  and every PostgreSQL durable operation, with error recording and bounded SDK shutdown.
 
 All 26 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
@@ -55,8 +55,8 @@ remain disabled by default.
 |---|---|
 | `config` | PureConfig model, environment overrides, and fail-closed validation |
 | `kafka` | Locked consumers, committed-offset restart, DLQ conversion, and wireless handlers |
-| `tidb` | Repository implementations, transaction retry, transforms, checksums, schema preflight, and typed batch sinks |
-| `tidb.sql` | Named JDBC SQL constants and total parameterized query builders |
+| `postgres` | Repository implementations, transaction retry, transforms, checksums, schema preflight, and typed batch sinks |
+| `postgres.sql` | Named JDBC SQL constants and total parameterized query builders |
 | `persistence` | Effect-polymorphic store algebras, `DbResultT`, and `BatchStatement` |
 | `processor` | Stable IDs, ownership contracts, retry policy, leases, runners, and supervision model |
 | `archive` | Hash-verified, idempotent MinIO payload storage acquired as a `Resource` |
@@ -67,13 +67,13 @@ remain disabled by default.
 
 The generic metadata-driven sink, metadata cache, `SinkPipe`, and
 `SystemRegistry` were removed. Runtime DDL is forbidden: the provisioning
-schema executor applies the ordered manifests under `sql/tidb/`, while Octopus
+schema executor applies the ordered manifests under `sql/postgres/`, while Octopus
 verifies them and fails closed.
 
 ## Processor ownership
 
 The machine-readable source of truth is
-[`sql/tidb/contracts/processors.json`](../../sql/tidb/contracts/processors.json).
+[`sql/postgres/contracts/processors.json`](../../sql/postgres/contracts/processors.json).
 Every entry declares its owner, family, mode, inputs, outputs, dependencies,
 dedupe key, lease scope, terminal behavior, reconciliation policy, and default
 state. All 28 entries default to disabled.
@@ -95,8 +95,8 @@ These names and meanings are locked:
 | Topic | Direction | Meaning |
 |---|---|---|
 | `sync.scan.request` | producers to Octopus | work discovery and durable scan ingestion |
-| `sync.oracle.load` | Octopus outbox to Octopus load consumer | TiDB load work; `oracle` is a legacy name |
-| `sync.oracle.result` | Octopus load consumer to result consumer | TiDB load outcomes; `oracle` is a legacy name |
+| `sync.oracle.load` | Octopus outbox to Octopus load consumer | PostgreSQL load work; `oracle` is a legacy name |
+| `sync.oracle.result` | Octopus load consumer to result consumer | PostgreSQL load outcomes; `oracle` is a legacy name |
 | `wireless.audit` | Atheros Sensor to Redpanda/Octopus | versioned wireless evidence |
 
 Additional currently consumed topics are `proxy.payload_audit`,
@@ -111,7 +111,7 @@ publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 - Delivery is at least once from each consumer group's committed Kafka offset;
   a group without committed offsets starts at the earliest retained record.
 - Ingestion evidence is unique by group/topic/partition/offset.
-- Consumer offsets advance monotonically in the same TiDB transaction as
+- Consumer offsets advance monotonically in the same PostgreSQL transaction as
   durable processing evidence.
 - Stream cursors advance monotonically and handle numeric wireless cursors
   without lexicographic regression.
@@ -139,7 +139,7 @@ the reference and exercises the fail-closed bounds and conditional gates.
 
 | Configuration block | Environment families | Startup requirement |
 |---|---|---|
-| `tidb` | `TIDB_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
+| `postgres` | `POSTGRES_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
 | `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition/replication bounds, versioned consumer groups, earliest retained startup for new groups, manual commit after durable processing, and one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
@@ -155,8 +155,8 @@ Important gates:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TIDB_ENABLED` | `false` | Enables TiDB after TLS, least-privilege, and schema validation |
-| `TIDB_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
+| `POSTGRES_ENABLED` | `false` | Enables PostgreSQL after TLS, least-privilege, and schema validation |
+| `POSTGRES_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
 | `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables Kafka consumers using durable committed offsets |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane |
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs |
@@ -176,11 +176,11 @@ Important gates:
 | `SYNC_EVENT_ROW_RETENTION_DAYS` | `30` | Age before an archived terminal event becomes deletion-eligible |
 | `SEARCH_RETENTION_DAYS` | `30` | Age before a terminal superseded search document becomes deletion-eligible |
 | `SYNC_EVENT_TOMBSTONE_RETENTION_DAYS` | `45` | Replay-protection period after event deletion |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and TiDB boundary spans |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and PostgreSQL boundary spans |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
 
-TiDB uses `TIDB_HOST`, `TIDB_PORT`, `TIDB_DATABASE`, `TIDB_USER`,
-`TIDB_PASSWORD`, `TIDB_POOL_SIZE`, and explicit `TIDB_SSL_MODE`. Canonical
+PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
 Kustomize sets `DISABLED`; CA and server-name inputs remain optional for
 verified-TLS deployments. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and invalid consumer-group contracts.
@@ -195,7 +195,7 @@ must preserve consumer offsets, schemas, and ingestion evidence.
 | Route | Meaning |
 |---|---|
 | `/live` | process is serving HTTP |
-| `/ready` | TiDB is reachable and every enabled processor is ready or intentionally disabled |
+| `/ready` | PostgreSQL is reachable and every enabled processor is ready or intentionally disabled |
 | `/metrics` | Prometheus text exposition of Micrometer measurements |
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
@@ -223,9 +223,9 @@ sbt assembly
 Repository-level checks include:
 
 ```bash
-python3 scripts/check-tidb-schema-contract.py
+python3 scripts/check-postgres-schema-contract.py
 make dependency-boundaries
 ```
 
-Docker-backed TiDB/Redpanda/MinIO tests skip when no Docker daemon is
+Docker-backed PostgreSQL/Redpanda/MinIO tests skip when no Docker daemon is
 available; report those skips explicitly rather than treating them as coverage.

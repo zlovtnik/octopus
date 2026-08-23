@@ -144,29 +144,11 @@ object IntelligenceSql:
     sql"""SELECT
              EXISTS (
                SELECT 1
-               FROM INFORMATION_SCHEMA.TIFLASH_REPLICA replica
-               WHERE replica.TABLE_SCHEMA = 'atheros_search'
-                 AND replica.TABLE_NAME = ${kind.table}
-                 AND replica.AVAILABLE = 1
-             )
-             AND EXISTS (
-               SELECT 1
-               FROM INFORMATION_SCHEMA.TIFLASH_INDEXES index_state
-               WHERE index_state.POSTGRES_DATABASE = 'atheros_search'
-                 AND index_state.POSTGRES_TABLE = ${kind.table}
-                 AND index_state.INDEX_NAME = ${kind.index}
-             )
-             AND NOT EXISTS (
-               SELECT 1
-               FROM INFORMATION_SCHEMA.TIFLASH_INDEXES index_state
-               WHERE index_state.POSTGRES_DATABASE = 'atheros_search'
-                 AND index_state.POSTGRES_TABLE = ${kind.table}
-                 AND index_state.INDEX_NAME = ${kind.index}
-                 AND (
-                   COALESCE(index_state.ERROR_MESSAGE, '') <> ''
-                   OR COALESCE(index_state.ROWS_STABLE_NOT_INDEXED, 0) > 0
-                   OR COALESCE(index_state.ROWS_DELTA_NOT_INDEXED, 0) > 0
-                 )
+               FROM pg_catalog.pg_indexes index_state
+               WHERE index_state.schemaname = 'atheros_search'
+                 AND index_state.tablename = ${kind.table}
+                 AND index_state.indexname = ${kind.index}
+                 AND index_state.indexdef ILIKE '%USING hnsw%'
              )""".query[Boolean]
 
   def similarityAnchors(
@@ -175,7 +157,7 @@ object IntelligenceSql:
   ): Query0[(Long, String, String, String)] =
     val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
     val batchLimit = limit.max(1)
-    (fr"""SELECT vector_id, document_id, embedding_model, VEC_AS_TEXT(embedding)
+    (fr"""SELECT vector_id, document_id, embedding_model, embedding::text
            FROM""" ++ vectorTable ++ fr"""
            ORDER BY vector_id DESC
            LIMIT $batchLimit""").query[(Long, String, String, String)]
@@ -204,15 +186,11 @@ object IntelligenceSql:
            FROM (
              SELECT candidate.vector_id, candidate.document_id,
                     candidate.embedding_model,
-                    VEC_COSINE_DISTANCE(
-                      candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
-                    ) AS cosine_distance
+                    candidate.embedding <=> CAST($anchorEmbedding AS vector) AS cosine_distance
            FROM""" ++ vectorTable ++ fr"""candidate
              WHERE candidate.document_id <> $anchorDocumentId
                AND candidate.embedding_model = $anchorEmbeddingModel
-             ORDER BY VEC_COSINE_DISTANCE(
-               candidate.embedding, VEC_FROM_TEXT($anchorEmbedding)
-             ) ASC
+             ORDER BY candidate.embedding <=> CAST($anchorEmbedding AS vector) ASC
              LIMIT $topK
            ) right_vector
            JOIN atheros_search.search_documents left_document

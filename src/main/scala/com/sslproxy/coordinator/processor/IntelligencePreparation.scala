@@ -267,7 +267,7 @@ object IntelligencePreparation:
         candidate,
         (1.0d - candidate.cosineDistance).max(-1.0d).min(1.0d),
         Json.obj(
-          "distance_function" -> Json.fromString("VEC_COSINE_DISTANCE"),
+          "distance_function" -> Json.fromString("pgvector_cosine_<=>"),
           "content_pair" -> ordered.asJson
         ).noSpaces,
         ProjectionFunctions.stableId("similarity-run", Vector(pairId))

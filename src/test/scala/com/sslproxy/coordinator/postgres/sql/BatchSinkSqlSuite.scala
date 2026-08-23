@@ -63,7 +63,7 @@ class BatchSinkSqlSuite extends FunSuite:
     val statement = BatchSinkSql.InsertProxyPayloadAudit
 
     assert(statement.contains("correlation_id, host, direction, captured_at, byte_offset"))
-    assert(statement.contains("ON CONFLICT DO UPDATE SET"))
+    assert(statement.contains("ON CONFLICT (correlation_id, direction, byte_offset) DO UPDATE SET"))
 
   test("wireless client inventory preserves monotonic observation bounds"):
     val statement = BatchSinkSql.UpsertWirelessClientInventory

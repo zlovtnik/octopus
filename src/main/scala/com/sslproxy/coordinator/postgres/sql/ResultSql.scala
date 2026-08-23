@@ -29,17 +29,17 @@ object ResultSql:
              $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.result',
              'sync.oracle.result', $messageKey, ${result.asJson.noSpaces}, 'pending',
              0, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (destination_topic, message_key) DO UPDATE SET
              payload = EXCLUDED.payload,
-             attempt_count = IF(status IN ('published', 'failed', 'cancelled'), 0, attempt_count),
+             attempt_count = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN 0 ELSE outbox_events.attempt_count END,
              max_attempts = EXCLUDED.max_attempts,
-             next_attempt_at = IF(status IN ('published', 'failed', 'cancelled'), CURRENT_TIMESTAMP, next_attempt_at),
-             owner_id = IF(status IN ('published', 'failed', 'cancelled'), NULL, owner_id),
-             lease_token = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_token),
-             lease_expires_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, lease_expires_at),
-             published_at = IF(status IN ('published', 'failed', 'cancelled'), NULL, published_at),
-             last_error = IF(status IN ('published', 'failed', 'cancelled'), NULL, last_error),
-             status = IF(status IN ('published', 'failed', 'cancelled'), 'pending', status),
+             next_attempt_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN CURRENT_TIMESTAMP ELSE outbox_events.next_attempt_at END,
+             owner_id = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.owner_id END,
+             lease_token = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.lease_token END,
+             lease_expires_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.lease_expires_at END,
+             published_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.published_at END,
+             last_error = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.last_error END,
+             status = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN 'pending' ELSE outbox_events.status END,
              updated_at = CURRENT_TIMESTAMP""".update.run.void
 
   def batchForUpdate(batchId: String): Query0[BatchState] =

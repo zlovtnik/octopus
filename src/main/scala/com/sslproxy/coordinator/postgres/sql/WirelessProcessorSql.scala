@@ -30,7 +30,7 @@ object WirelessProcessorSql:
                AND frame.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET updated_at = EXCLUDED.updated_at""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET updated_at = EXCLUDED.updated_at""".update.run
 
     def radio: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_radio (
@@ -47,7 +47,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     def qos: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_qos (
@@ -62,7 +62,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     def network: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_network (
@@ -79,7 +79,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     def appSignals: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_app_signals (
@@ -94,7 +94,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     def identity: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_identity (
@@ -112,7 +112,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     def security: ConnectionIO[Int] =
       sql"""INSERT INTO wireless_frame_security (
@@ -128,7 +128,7 @@ object WirelessProcessorSql:
              WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
 
     for
       frameCount <- frames
@@ -163,7 +163,7 @@ object WirelessProcessorSql:
              LEFT JOIN wireless_frame_app_signals app_row ON app_row.dedupe_key = frame.dedupe_key
              WHERE frame.source_mac IS NOT NULL
              GROUP BY frame.source_mac
-             ON CONFLICT DO UPDATE SET
+             ON CONFLICT (mac_id) DO UPDATE SET
                entity_version = devices.entity_version + 1,
                display_name = COALESCE(EXCLUDED.display_name, devices.display_name),
                username = COALESCE(EXCLUDED.username, devices.username),
@@ -186,7 +186,7 @@ object WirelessProcessorSql:
                ON candidate.dedupe_key = frame.dedupe_key
              WHERE frame.source_mac IS NOT NULL AND frame.ssid IS NOT NULL
              GROUP BY frame.ssid, frame.source_mac
-             ON CONFLICT DO UPDATE SET
+             ON CONFLICT (ssid, client_mac) DO UPDATE SET
                known_bssid = COALESCE(EXCLUDED.known_bssid, wireless_clients.known_bssid),
                first_seen = LEAST(wireless_clients.first_seen, EXCLUDED.first_seen),
                last_seen = GREATEST(wireless_clients.last_seen, EXCLUDED.last_seen),
@@ -198,7 +198,7 @@ object WirelessProcessorSql:
       (fr"""INSERT INTO wireless_inventory_projection_inputs (dedupe_key, projected_at)
              SELECT candidate.dedupe_key, CURRENT_TIMESTAMP
              FROM (""" ++ candidates ++ fr""") candidate
-             ON CONFLICT DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""").update.run
+             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""").update.run
 
     for
       deviceCount <- devices

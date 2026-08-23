@@ -32,7 +32,7 @@ object ThreatRiskSql:
              ${s"blocked DNS/host activity exceeded the characterized seven-day score for ${value.sourceKey}"},
              CAST(${value.evidenceJson} AS JSON), ${value.detectedAt}, ${value.projectionRunId},
              CURRENT_TIMESTAMP
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (source_key) DO UPDATE SET
              risk_score = EXCLUDED.risk_score,
              score = EXCLUDED.score,
              severity = EXCLUDED.severity,
@@ -124,7 +124,7 @@ object ThreatRiskSql:
              ${value.identityRisk}, ${value.behaviorRisk},
              CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId},
              CURRENT_TIMESTAMP
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (bssid) DO UPDATE SET
              composite_risk = EXCLUDED.composite_risk,
              signal_risk = EXCLUDED.signal_risk,
              identity_risk = EXCLUDED.identity_risk,

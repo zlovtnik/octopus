@@ -250,7 +250,7 @@ object IntelligenceSql:
              ${value.signalMin}, ${value.signalMax}, ${value.signalAverage}, ${value.retryCount},
              ${value.protectedCount}, ${value.unprotectedCount}, ${value.uniqueBssidCount},
              CAST(${value.rotationIndicatorsJson} AS JSON), ${value.projectionRunId}
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (snapshot_key) DO UPDATE SET
              location_id = EXCLUDED.location_id,
              sensor_id = EXCLUDED.sensor_id,
              window_start = EXCLUDED.window_start,
@@ -281,7 +281,7 @@ object IntelligenceSql:
              ${value.locationId}, ${value.windowStart}, ${value.windowEnd}, NULL,
              ${value.tsftP50}, ${value.tsftP95}, ${value.tsftJitter},
              ${value.wallP50}, ${value.wallJitter}, ${value.sourceEventCount}, ${value.projectionRunId}
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (profile_key) DO UPDATE SET
              sensor_id = EXCLUDED.sensor_id,
              location_id = EXCLUDED.location_id,
              window_start = EXCLUDED.window_start,
@@ -311,7 +311,7 @@ object IntelligenceSql:
                           ${value.sessionKey}, ${value.sourceMac}, ${value.locationId}, ${value.sensorId},
                           ${value.windowStart}, ${value.windowEnd}, $tokenText, $tokenText,
                           ${value.tokens.size.toLong}, ${value.projectionRunId}
-                        ) ON CONFLICT DO UPDATE SET
+                        ) ON CONFLICT (session_key) DO UPDATE SET
                           source_mac = EXCLUDED.source_mac,
                           location_id = EXCLUDED.location_id,
                           sensor_id = EXCLUDED.sensor_id,
@@ -385,7 +385,7 @@ object IntelligenceSql:
            ) VALUES (
              ${value.baselineId}, ${value.bssid}, ${value.metric}, ${value.p5},
              ${value.p50}, ${value.p95}, ${value.sampleCount}, ${value.projectionRunId}
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (bssid, metric) DO UPDATE SET
              p5 = EXCLUDED.p5,
              p50 = EXCLUDED.p50,
              p95 = EXCLUDED.p95,
@@ -413,7 +413,7 @@ object IntelligenceSql:
              ${candidate.rightSensorId}, ${candidate.rightLocationId}, ${candidate.rightObservedAt},
              ${candidate.cosineDistance}, ${value.cosineSimilarity}, 1,
              CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId}
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (pair_kind, embedding_model, left_document_id, right_document_id) DO UPDATE SET
              cosine_distance = EXCLUDED.cosine_distance,
              cosine_similarity = EXCLUDED.cosine_similarity,
              evidence = EXCLUDED.evidence,

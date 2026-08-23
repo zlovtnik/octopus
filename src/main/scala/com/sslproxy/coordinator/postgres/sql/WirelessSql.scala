@@ -66,7 +66,7 @@ object WirelessSql:
                )
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId
-          )           ON CONFLICT DO UPDATE SET
+          ) ON CONFLICT (ssid, client_mac) DO UPDATE SET
             first_seen = LEAST(COALESCE(wireless_clients.first_seen, EXCLUDED.first_seen), COALESCE(EXCLUDED.first_seen, wireless_clients.first_seen)),
             last_seen = GREATEST(COALESCE(wireless_clients.last_seen, EXCLUDED.last_seen), COALESCE(EXCLUDED.last_seen, wireless_clients.last_seen)),
             probe_count = CASE
@@ -91,7 +91,7 @@ object WirelessSql:
           ) VALUES (
             $dedupeKey, $streamName, ${payload.noSpaces}, $failureStage, 'pending',
             0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-          ) ON CONFLICT DO UPDATE SET
+          ) ON CONFLICT (dedupe_key, stream_name) DO UPDATE SET
             payload = EXCLUDED.payload,
             failure_stage = EXCLUDED.failure_stage,
             status = CASE WHEN sync_backlog.status = 'synced' THEN 'synced' ELSE 'pending' END,
@@ -130,6 +130,10 @@ object WirelessSql:
 
   def pruneSynced(cutoff: Timestamp, limit: Int): Fragment =
     sql"""DELETE FROM sync_backlog
-          WHERE status = 'synced' AND updated_at < $cutoff
-          ORDER BY updated_at, stream_name, dedupe_key
-          LIMIT ${limit.max(1)}"""
+          WHERE (dedupe_key, stream_name) IN (
+            SELECT dedupe_key, stream_name
+            FROM sync_backlog
+            WHERE status = 'synced' AND updated_at < $cutoff
+            ORDER BY updated_at, stream_name, dedupe_key
+            LIMIT ${limit.max(1)}
+          )"""

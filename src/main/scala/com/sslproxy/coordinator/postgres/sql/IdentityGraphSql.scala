@@ -38,8 +38,8 @@ object IdentityGraphSql:
              CURRENT_TIMESTAMP, 'pending',
              jsonb_build_object('source', 'similarity_pairs'),
              (CURRENT_TIMESTAMP + (30) * INTERVAL '1 day'), $runId
-           ) ON CONFLICT DO UPDATE SET
-             confidence = GREATEST(confidence, EXCLUDED.confidence),
+           ) ON CONFLICT (mac_a, mac_b) DO UPDATE SET
+             confidence = GREATEST(merge_candidates.confidence, EXCLUDED.confidence),
              computed_at = EXCLUDED.computed_at,
              expires_at = EXCLUDED.expires_at,
              projection_run_id = EXCLUDED.projection_run_id,
@@ -65,7 +65,7 @@ object IdentityGraphSql:
                             ${value.clusterId}, ${Some(s"identity-${value.clusterId.take(8)}")},
                             ${value.members.size}, $min, $max,
                             'active', ${value.projectionRunId}
-                          ) ON CONFLICT DO UPDATE SET
+                          ) ON CONFLICT (cluster_id) DO UPDATE SET
                             cluster_size = EXCLUDED.cluster_size,
                             first_seen = LEAST(first_seen, EXCLUDED.first_seen),
                             last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
@@ -81,7 +81,7 @@ object IdentityGraphSql:
                         device.first_seen, device.last_seen
                  FROM devices device
                  WHERE device.mac_id = $mac
-                 ON CONFLICT DO UPDATE SET
+                 ON CONFLICT (mac) DO UPDATE SET
                    cluster_id = EXCLUDED.cluster_id,
                    confidence = EXCLUDED.confidence,
                    evidence = EXCLUDED.evidence,
@@ -96,11 +96,11 @@ object IdentityGraphSql:
                    dedup_confidence, known_macs, projection_run_id
                  )
                  SELECT device.mac_id, device.display_name, NULL, device.first_seen, device.last_seen,
-                        1, 0, jsonb_build_array(), ${value.clusterId}, ${value.confidence},
-                        CAST(${value.members.asJson.noSpaces} AS JSON), ${value.projectionRunId}
+                        TRUE, FALSE, jsonb_build_array(), ${value.clusterId}, ${value.confidence},
+                        CAST(${value.members.asJson.noSpaces} AS JSONB), ${value.projectionRunId}
                  FROM devices device
                  WHERE device.mac_id = $mac
-                 ON CONFLICT DO UPDATE SET
+                 ON CONFLICT (mac) DO UPDATE SET
                    display_name = COALESCE(EXCLUDED.display_name, display_name),
                    last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
                    similarity_cluster_id = EXCLUDED.similarity_cluster_id,
@@ -127,13 +127,13 @@ object IdentityGraphSql:
                             normalized_mac, is_threat, observed_at, projection_run_id
                           )
                           SELECT CONCAT('device:', device.mac_id), 'device', device.display_name,
-                                 jsonb_build_object('mac', device.mac_id), NULL, device.mac_id, 0,
+                                 jsonb_build_object('mac', device.mac_id), NULL, device.mac_id, FALSE,
                                  device.last_seen,
                                  $projectionRunId
                           FROM devices device
                           ORDER BY device.last_seen DESC, device.mac_id
                           LIMIT $batchLimit
-                    ON CONFLICT DO UPDATE SET
+                    ON CONFLICT (node_id) DO UPDATE SET
                       label = EXCLUDED.label,
                       node_payload = EXCLUDED.node_payload,
                       observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
@@ -144,13 +144,13 @@ object IdentityGraphSql:
                       )
                       SELECT CONCAT('ap:', frame.bssid), 'access_point', MAX(frame.ssid),
                              jsonb_build_object('bssid', frame.bssid), MAX(frame.location_id), MAX(frame.sensor_id),
-                             frame.bssid, MAX(frame.ssid), 0, MAX(frame.observed_at), $projectionRunId
+                             frame.bssid, MAX(frame.ssid), FALSE, MAX(frame.observed_at), $projectionRunId
                       FROM wireless_frames frame
                       WHERE frame.bssid IS NOT NULL
                       GROUP BY frame.bssid
                       ORDER BY MAX(frame.observed_at) DESC, frame.bssid
                       LIMIT $batchLimit
-                      ON CONFLICT DO UPDATE SET
+                      ON CONFLICT (node_id) DO UPDATE SET
                         label = COALESCE(EXCLUDED.label, label),
                         node_payload = EXCLUDED.node_payload,
                         location_id = COALESCE(EXCLUDED.location_id, location_id),
@@ -164,12 +164,12 @@ object IdentityGraphSql:
                            SELECT CONCAT('identity:', cluster.cluster_id), 'identity_cluster',
                                   cluster.cluster_name,
                                   jsonb_build_object('cluster_size', cluster.cluster_size),
-                                  0, cluster.last_seen, $projectionRunId
+                                  FALSE, cluster.last_seen, $projectionRunId
                            FROM atheros_search.identity_clusters cluster
                            WHERE cluster.status = 'active'
                            ORDER BY cluster.last_seen DESC, cluster.cluster_id
                            LIMIT $batchLimit
-                    ON CONFLICT DO UPDATE SET
+                    ON CONFLICT (node_id) DO UPDATE SET
                       label = EXCLUDED.label,
                       node_payload = EXCLUDED.node_payload,
                       observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
@@ -187,7 +187,7 @@ object IdentityGraphSql:
                     GROUP BY frame.source_mac, frame.bssid
                     ORDER BY MAX(frame.observed_at) DESC, frame.source_mac, frame.bssid
                     LIMIT $batchLimit
-                    ON CONFLICT DO UPDATE SET
+                    ON CONFLICT (edge_id) DO UPDATE SET
                       weight = EXCLUDED.weight,
                       evidence = EXCLUDED.evidence,
                       observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
@@ -203,7 +203,7 @@ object IdentityGraphSql:
                             FROM atheros_search.identity_cluster_members member
                             ORDER BY member.last_seen DESC, member.cluster_id, member.mac
                             LIMIT $batchLimit
-                            ON CONFLICT DO UPDATE SET
+                            ON CONFLICT (edge_id) DO UPDATE SET
                               weight = EXCLUDED.weight,
                               evidence = EXCLUDED.evidence,
                               observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),

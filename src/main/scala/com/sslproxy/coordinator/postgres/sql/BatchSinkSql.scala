@@ -10,7 +10,7 @@ object BatchSinkSql:
       |  bytes_up, bytes_down, status_code, blocked, obfuscation_profile,
       |  correlation_id, parent_event_id, event_sequence, duration_ms, reason, raw_json
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
+      |ON CONFLICT (batch_id, row_sequence) DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
 
   val UpsertBlockedHostRollups: String =
     """INSERT INTO proxy_blocked_host_rollups (
@@ -18,22 +18,22 @@ object BatchSinkSql:
       |  risk_score, tarpit_held_ms, iat_ms, consecutive_blocks, last_verdict,
       |  tls_ver, alpn, ja3_lite, resolved_ip, asn_org, updated_at, first_seen
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET
+      |ON CONFLICT (host) DO UPDATE SET
       |  blocked_attempts = blocked_attempts + 1,
       |  blocked_bytes = blocked_bytes + EXCLUDED.blocked_bytes,
-      |  frequency_hz = IFNULL(EXCLUDED.frequency_hz, frequency_hz),
-      |  verdict = IFNULL(EXCLUDED.verdict, verdict),
-      |  category = IFNULL(EXCLUDED.category, category),
-      |  risk_score = IFNULL(EXCLUDED.risk_score, risk_score),
-      |  tarpit_held_ms = tarpit_held_ms + IFNULL(EXCLUDED.tarpit_held_ms, 0),
-      |  iat_ms = IFNULL(EXCLUDED.iat_ms, iat_ms),
-      |  consecutive_blocks = IFNULL(EXCLUDED.consecutive_blocks, consecutive_blocks + 1),
-      |  last_verdict = IFNULL(EXCLUDED.last_verdict, IFNULL(EXCLUDED.verdict, last_verdict)),
-      |  tls_ver = IFNULL(EXCLUDED.tls_ver, tls_ver),
-      |  alpn = IFNULL(EXCLUDED.alpn, alpn),
-      |  ja3_lite = IFNULL(EXCLUDED.ja3_lite, ja3_lite),
-      |  resolved_ip = IFNULL(EXCLUDED.resolved_ip, resolved_ip),
-      |  asn_org = IFNULL(EXCLUDED.asn_org, asn_org),
+      |  frequency_hz = COALESCE(EXCLUDED.frequency_hz, proxy_blocked_host_rollups.frequency_hz),
+      |  verdict = COALESCE(EXCLUDED.verdict, proxy_blocked_host_rollups.verdict),
+      |  category = COALESCE(EXCLUDED.category, proxy_blocked_host_rollups.category),
+      |  risk_score = COALESCE(EXCLUDED.risk_score, proxy_blocked_host_rollups.risk_score),
+      |  tarpit_held_ms = proxy_blocked_host_rollups.tarpit_held_ms + COALESCE(EXCLUDED.tarpit_held_ms, 0),
+      |  iat_ms = COALESCE(EXCLUDED.iat_ms, proxy_blocked_host_rollups.iat_ms),
+      |  consecutive_blocks = COALESCE(EXCLUDED.consecutive_blocks, proxy_blocked_host_rollups.consecutive_blocks + 1),
+      |  last_verdict = COALESCE(EXCLUDED.last_verdict, EXCLUDED.verdict, proxy_blocked_host_rollups.last_verdict),
+      |  tls_ver = COALESCE(EXCLUDED.tls_ver, proxy_blocked_host_rollups.tls_ver),
+      |  alpn = COALESCE(EXCLUDED.alpn, proxy_blocked_host_rollups.alpn),
+      |  ja3_lite = COALESCE(EXCLUDED.ja3_lite, proxy_blocked_host_rollups.ja3_lite),
+      |  resolved_ip = COALESCE(EXCLUDED.resolved_ip, proxy_blocked_host_rollups.resolved_ip),
+      |  asn_org = COALESCE(EXCLUDED.asn_org, proxy_blocked_host_rollups.asn_org),
       |  updated_at = CURRENT_TIMESTAMP""".stripMargin
 
   val InsertProxyPayloadAudit: String =
@@ -42,7 +42,7 @@ object BatchSinkSql:
       |  payload_object_key, content_type, http_method, http_status, http_path,
       |  is_encrypted, truncated, peer_ip, notes
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET correlation_id = EXCLUDED.correlation_id""".stripMargin
+      |ON CONFLICT (correlation_id, direction, byte_offset) DO UPDATE SET correlation_id = EXCLUDED.correlation_id""".stripMargin
 
   val InsertWirelessAuditFrames: String =
     """INSERT INTO wireless_audit_frames (
@@ -53,13 +53,13 @@ object BatchSinkSql:
       |  is_protected, is_to_ds, is_from_ds, is_handshake, security_flags,
       |  device_id, username, identity_source, tags, anomaly_reasons, raw_json
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
+      |ON CONFLICT (batch_id, row_sequence) DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
 
   val UpsertWirelessSensors: String =
     """INSERT INTO wireless_sensors (
       |  sensor_id, location_id, interface, reg_domain, first_seen_at, last_seen_at
       |) VALUES (?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET
+      |ON CONFLICT (sensor_id) DO UPDATE SET
       |  location_id = EXCLUDED.location_id,
       |  interface = EXCLUDED.interface,
       |  reg_domain = EXCLUDED.reg_domain,
@@ -74,7 +74,7 @@ object BatchSinkSql:
       |  hist_1000_1500, inter_arrival_p50_ms, external_bssid, threshold_exceeded,
       |  wall_clock_delta_ms, window_is_partial, published_at
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
+      |ON CONFLICT (batch_id, row_sequence) DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
 
   val UpsertBandwidthAlerts: String =
     """INSERT INTO wireless_alerts (
@@ -82,7 +82,7 @@ object BatchSinkSql:
       |  location_id, primary_mac, secondary_mac, ssid, signal_dbm, details_json, raw_json,
       |  created_at, updated_at, bytes
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET
+      |ON CONFLICT (alert_type, batch_id, row_sequence) DO UPDATE SET
       |  batch_id = EXCLUDED.batch_id,
       |  row_sequence = EXCLUDED.row_sequence,
       |  detected_at = EXCLUDED.detected_at,
@@ -98,7 +98,7 @@ object BatchSinkSql:
       |  interface, channel, primary_mac, secondary_mac, ssid, signal_dbm,
       |  details_json, raw_json, created_at, updated_at
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET
+      |ON CONFLICT (alert_type, batch_id, row_sequence) DO UPDATE SET
       |  detected_at = EXCLUDED.detected_at,
       |  sensor_id = EXCLUDED.sensor_id,
       |  location_id = EXCLUDED.location_id,
@@ -118,7 +118,7 @@ object BatchSinkSql:
       |  device_id, username, identity_source, last_seen, first_seen,
       |  signal_dbm, is_authorized, created_at
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET
+      |ON CONFLICT (sensor_id, snapshot_at, client_mac, bssid) DO UPDATE SET
       |  location_id = EXCLUDED.location_id,
       |  bssid = EXCLUDED.bssid,
       |  ssid = EXCLUDED.ssid,
@@ -135,7 +135,7 @@ object BatchSinkSql:
       |  batch_id, row_sequence, client_mac, ssid, known_bssid,
       |  first_seen, last_seen, probe_count, created_at
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
+      |ON CONFLICT (batch_id, row_sequence) DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
 
 object SchemaChecksSql:
   val SchemaReadinessQuery: String =

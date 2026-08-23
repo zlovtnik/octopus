@@ -171,7 +171,7 @@ object SearchPreparationSql:
                    ${document.handshakeCaptured}, ${document.title}, ${document.normalizedText},
                    ${document.normalizedSha256}, 'und', 'active', $metadata,
                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                 ) ON CONFLICT DO UPDATE SET
+                 ) ON CONFLICT (document_id) DO UPDATE SET
                    status = 'active',
                    source_key = EXCLUDED.source_key,
                    source_table = EXCLUDED.source_table,
@@ -239,7 +239,7 @@ object SearchPreparationSql:
              $jobId, $documentId, $embeddingKind, $embeddingModel,
              $contentSha256, 'pending', 100, 0, 5,
              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-           ) ON CONFLICT DO UPDATE SET job_id = embedding_jobs.job_id""".update.run.void
+           ) ON CONFLICT (document_id, embedding_kind, embedding_model, content_sha256) DO UPDATE SET job_id = embedding_jobs.job_id""".update.run.void
 
   val TokenInsert: Update[(String, String, Double, Int)] =
     Update[(String, String, Double, Int)](

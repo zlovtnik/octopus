@@ -42,7 +42,7 @@ object ProcessorStateSql:
              ${id.value}, 'default', $databaseStatus,
              $startedAt, $succeededAt, $failedAt,
              $failures, ${status.lastError}, $timestamp
-           ) ON CONFLICT DO UPDATE SET
+           ) ON CONFLICT (processor_name, shard_id) DO UPDATE SET
              status = EXCLUDED.status,
              last_started_at = COALESCE(EXCLUDED.last_started_at, last_started_at),
              last_succeeded_at = COALESCE(EXCLUDED.last_succeeded_at, last_succeeded_at),

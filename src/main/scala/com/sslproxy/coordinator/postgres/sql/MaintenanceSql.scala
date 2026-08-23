@@ -34,7 +34,7 @@ object MaintenanceSql:
                    ${candidate.dedupeKey}, ${candidate.streamName}, ${candidate.observedAt},
                    ${receipt.payloadSha256}, ${receipt.uri}, ${receipt.payloadBytes},
                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                 ) ON CONFLICT DO UPDATE SET
+                 ) ON CONFLICT (dedupe_key, stream_name) DO UPDATE SET
                    archive_uri = EXCLUDED.archive_uri,
                    payload_bytes = EXCLUDED.payload_bytes,
                    updated_at = CURRENT_TIMESTAMP""".update.run
@@ -66,7 +66,7 @@ object MaintenanceSql:
     for
       _ <- sql"""INSERT INTO work_leases (resource_type, resource_id)
                  VALUES ($resourceType, $resourceId)
-                 ON CONFLICT DO UPDATE SET resource_id = EXCLUDED.resource_id""".update.run
+                 ON CONFLICT (resource_type, resource_id) DO UPDATE SET resource_id = EXCLUDED.resource_id""".update.run
       claimed <- sql"""UPDATE work_leases
                           SET owner_id = $ownerId,
                               lease_token = $token,
@@ -219,7 +219,7 @@ object MaintenanceSql:
                  ) VALUES (
                    $dedupeKey, $streamName, $payloadSha256, $observedAt,
                    (CURRENT_TIMESTAMP + (${tombstoneDays.max(1)}) * INTERVAL '1 day')
-                 ) ON CONFLICT DO UPDATE SET
+                 ) ON CONFLICT (dedupe_key, stream_name) DO UPDATE SET
                    expires_at = GREATEST(expires_at, EXCLUDED.expires_at),
                    updated_at = CURRENT_TIMESTAMP""".update.run
       _ <- sql"""DELETE FROM wireless_frame_security WHERE dedupe_key = $dedupeKey""".update.run
@@ -265,9 +265,13 @@ object MaintenanceSql:
 
   def pruneTombstones(limit: Int): Update0 =
     sql"""DELETE FROM sync_event_tombstones
-           WHERE expires_at < CURRENT_TIMESTAMP
-           ORDER BY expires_at, stream_name, dedupe_key
-           LIMIT ${limit.max(1)}""".update
+           WHERE (dedupe_key, stream_name) IN (
+             SELECT dedupe_key, stream_name
+             FROM sync_event_tombstones
+             WHERE expires_at < CURRENT_TIMESTAMP
+             ORDER BY expires_at, stream_name, dedupe_key
+             LIMIT ${limit.max(1)}
+           )""".update
 
   def searchRetentionCandidates(retentionDays: Int, limit: Int): Query0[String] =
     sql"""SELECT document.document_id
@@ -338,10 +342,14 @@ object MaintenanceSql:
                            ELSE 'worker lease expired; returned to pending'
                          END,
                          updated_at = CURRENT_TIMESTAMP
-                     WHERE status IN ('leased', 'running')
-                       AND lease_expires_at <= CURRENT_TIMESTAMP
-                     ORDER BY lease_expires_at, job_id
-                     LIMIT $batchLimit""".update.run
+                     WHERE job_id IN (
+                       SELECT job_id FROM sync_jobs
+                       WHERE status IN ('leased', 'running')
+                         AND lease_expires_at <= CURRENT_TIMESTAMP
+                       ORDER BY lease_expires_at, job_id
+                       LIMIT $batchLimit
+                       FOR UPDATE SKIP LOCKED
+                     )""".update.run
       batches <- sql"""UPDATE sync_batches
                         SET status = CASE WHEN attempt_count >= max_attempts THEN 'failed' ELSE 'pending' END,
                             owner_id = NULL,
@@ -353,10 +361,14 @@ object MaintenanceSql:
                               ELSE 'worker lease expired; returned to pending'
                             END,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE status IN ('leased', 'processing')
-                          AND lease_expires_at <= CURRENT_TIMESTAMP
-                        ORDER BY lease_expires_at, batch_id
-                        LIMIT $batchLimit""".update.run
+                        WHERE batch_id IN (
+                          SELECT batch_id FROM sync_batches
+                          WHERE status IN ('leased', 'processing')
+                            AND lease_expires_at <= CURRENT_TIMESTAMP
+                          ORDER BY lease_expires_at, batch_id
+                          LIMIT $batchLimit
+                          FOR UPDATE SKIP LOCKED
+                        )""".update.run
       workLeases <- sql"""UPDATE work_leases
                            SET owner_id = NULL,
                                lease_token = NULL,
@@ -364,9 +376,13 @@ object MaintenanceSql:
                                next_attempt_at = CURRENT_TIMESTAMP,
                                last_error = 'worker lease expired; released by cleanup',
                                updated_at = CURRENT_TIMESTAMP
-                           WHERE lease_expires_at <= CURRENT_TIMESTAMP
-                           ORDER BY lease_expires_at, resource_type, resource_id
-                           LIMIT $batchLimit""".update.run
+                           WHERE (resource_type, resource_id) IN (
+                             SELECT resource_type, resource_id FROM work_leases
+                             WHERE lease_expires_at <= CURRENT_TIMESTAMP
+                             ORDER BY lease_expires_at, resource_type, resource_id
+                             LIMIT $batchLimit
+                             FOR UPDATE SKIP LOCKED
+                           )""".update.run
     yield jobs + batches + workLeases
 
   def reconcileMissingWirelessChildren(limit: Int): ConnectionIO[Int] =
@@ -401,16 +417,16 @@ object MaintenanceSql:
                   OR security_row.dedupe_key IS NULL)
            ORDER BY frame.observed_at DESC, frame.dedupe_key
            LIMIT $batchLimit
-           ON CONFLICT DO UPDATE SET
+           ON CONFLICT (processor_name, entity_type, entity_key, projection_version, finding_type) DO UPDATE SET
              details = EXCLUDED.details,
              last_seen_at = CURRENT_TIMESTAMP,
-             status = IF(status = 'resolved', 'open', status)""".update.run
+             status = CASE WHEN reconciliation_findings.status = 'resolved' THEN 'open' ELSE reconciliation_findings.status END""".update.run
 
   val ResolveWirelessFindings: Update0 =
     sql"""UPDATE reconciliation_findings finding
-           SET finding.status = 'resolved',
-               finding.resolved_at = CURRENT_TIMESTAMP,
-               finding.last_seen_at = CURRENT_TIMESTAMP
+           SET status = 'resolved',
+               resolved_at = CURRENT_TIMESTAMP,
+               last_seen_at = CURRENT_TIMESTAMP
            WHERE finding.processor_name = 'wireless-frame-normalizer'
              AND finding.finding_type = 'missing_child_projection'
              AND finding.status IN ('open', 'repairing')

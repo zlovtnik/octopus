@@ -283,7 +283,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    TIMESTAMP '2026-07-27 12:03:00',
                    CURRENT_TIMESTAMP + INTERVAL '1 day'
                  )""".update.run.transact(xa)
-      rawBefore <- sql"""SELECT CAST(payload AS CHAR), payload_sha256, payload_ref
+      rawBefore <- sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
                           FROM sync_events
                           WHERE dedupe_key = $payloadHash
                             AND stream_name = 'wireless.audit'"""
@@ -430,12 +430,12 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                      FROM outbox_events o
                      WHERE o.outbox_id = ${claimed.outboxId}
                      """
-        .query[(String, Int, String, String, String, Long)]
+        .query[(String, Boolean, String, String, String, Long)]
         .unique
         .transact(xa)
     yield
       assertEquals(state._1, "failed")
-      assertEquals(state._2, 1)
+      assertEquals(state._2, true)
       assert(state._3.contains("load outbox batch_id must be a UUID"))
       assertEquals(state._4, "pending")
       assertEquals(state._5, "pending")
@@ -473,7 +473,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[(String, Long)]
         .unique
         .transact(xa)
-      storedPayload <- sql"""SELECT CAST(payload AS CHAR)
+      storedPayload <- sql"""SELECT CAST(payload AS TEXT)
                              FROM sync_events
                              WHERE dedupe_key = ${decision.dedupeKey}
                                AND stream_name = 'proxy.payload_audit'"""

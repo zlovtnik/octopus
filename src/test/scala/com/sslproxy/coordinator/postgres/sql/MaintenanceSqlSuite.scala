@@ -6,7 +6,7 @@ class MaintenanceSqlSuite extends FunSuite:
   test("retention candidates require archived terminal events and terminal dependent work"):
     val statement = MaintenanceSql.retentionCandidates(30, 100).sql
 
-    assert(statement.contains("payload_archived = 1"), statement)
+    assert(statement.contains("payload_archived = true"), statement)
     assert(statement.contains("sync_event_payload_archives"), statement)
     assert(statement.contains("job.status NOT IN"), statement)
     assert(statement.contains("batch.status NOT IN"), statement)

@@ -44,9 +44,9 @@ object ProcessorStateSql:
              $failures, ${status.lastError}, $timestamp
            ) ON CONFLICT (processor_name, shard_id) DO UPDATE SET
              status = EXCLUDED.status,
-             last_started_at = COALESCE(EXCLUDED.last_started_at, last_started_at),
-             last_succeeded_at = COALESCE(EXCLUDED.last_succeeded_at, last_succeeded_at),
-             last_failed_at = COALESCE(EXCLUDED.last_failed_at, last_failed_at),
+             last_started_at = COALESCE(EXCLUDED.last_started_at, processor_state.last_started_at),
+             last_succeeded_at = COALESCE(EXCLUDED.last_succeeded_at, processor_state.last_succeeded_at),
+             last_failed_at = COALESCE(EXCLUDED.last_failed_at, processor_state.last_failed_at),
              consecutive_failures = EXCLUDED.consecutive_failures,
              last_error = EXCLUDED.last_error,
              updated_at = EXCLUDED.updated_at""".update

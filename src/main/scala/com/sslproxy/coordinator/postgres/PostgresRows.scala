@@ -70,7 +70,7 @@ final case class ProxyEventInsert(
     bytesUp: Long,
     bytesDown: Long,
     statusCode: Option[Long],
-    blocked: Long,
+    blocked: Boolean,
     obfuscationProfile: Option[String],
     correlationId: Option[String],
     parentEventId: Option[String],
@@ -110,8 +110,8 @@ final case class ProxyPayloadAuditInsert(
     httpMethod: Option[String],
     httpStatus: Option[Long],
     httpPath: Option[String],
-    isEncrypted: Long,
-    truncated: Long,
+    isEncrypted: Boolean,
+    truncated: Boolean,
     peerIp: Option[String],
     notes: Option[String]
 )
@@ -136,13 +136,13 @@ final case class WirelessAuditFrameInsert(
     signalDbm: Option[Long],
     sequenceNumber: Option[Long],
     rawLen: Long,
-    isRetry: Long,
-    isMoreData: Long,
-    isPowerSave: Long,
-    isProtected: Long,
-    isToDs: Long,
-    isFromDs: Long,
-    isHandshake: Long,
+    isRetry: Boolean,
+    isMoreData: Boolean,
+    isPowerSave: Boolean,
+    isProtected: Boolean,
+    isToDs: Boolean,
+    isFromDs: Boolean,
+    isHandshake: Boolean,
     securityFlags: Long,
     deviceId: Option[String],
     username: Option[String],
@@ -176,10 +176,10 @@ final case class WirelessBandwidthInsert(
     hist5001000: Long,
     hist10001500: Long,
     interArrivalP50Ms: Option[Long],
-    externalBssid: Long,
-    thresholdExceeded: Long,
+    externalBssid: Boolean,
+    thresholdExceeded: Boolean,
     wallClockDeltaMs: Option[Long],
-    windowIsPartial: Long,
+    windowIsPartial: Boolean,
     publishedAt: Option[OffsetDateTime]
 )
 
@@ -255,7 +255,7 @@ final case class WirelessClientInventoryInsert(
     lastSeen: OffsetDateTime,
     firstSeen: OffsetDateTime,
     signalDbm: Option[Long],
-    isAuthorized: Long
+    isAuthorized: Boolean
 )
 
 final case class WirelessProbeRequestInsert(

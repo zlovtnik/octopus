@@ -285,7 +285,7 @@ final class PostgresTransactor private (
     }
 
   private def mergeBandwidthAlerts(conn: Connection, batchId: String, rows: List[WirelessBandwidthInsert]): Long =
-    val exceeded = rows.filter(_.thresholdExceeded != 0L)
+    val exceeded = rows.filter(_.thresholdExceeded)
     if exceeded.isEmpty then return 0L
 
     val grouped = exceeded.groupBy { r =>

@@ -59,7 +59,7 @@ object PostgresTransformService:
       bytesUp = optionalLong(row, "bytes_up").getOrElse(0L),
       bytesDown = optionalLong(row, "bytes_down").getOrElse(0L),
       statusCode = optionalLong(row, "status_code"),
-      blocked = boolFlag(row, "blocked"),
+      blocked = boolValue(row, "blocked"),
       obfuscationProfile = optionalString(row, "obfuscation_profile"),
       correlationId = optionalString(row, "correlation_id"),
       parentEventId = optionalString(row, "parent_event_id"),
@@ -83,8 +83,8 @@ object PostgresTransformService:
         httpMethod = optionalString(row, "method"),
         httpStatus = optionalLong(row, "http_status").orElse(optionalLong(row, "status_code")),
         httpPath = optionalString(row, "path"),
-        isEncrypted = boolFlag(row, "is_encrypted"),
-        truncated = boolFlag(row, "truncated"),
+        isEncrypted = boolValue(row, "is_encrypted"),
+        truncated = boolValue(row, "truncated"),
         peerIp = optionalString(row, "peer_ip"),
         notes = optionalString(row, "notes")
       )
@@ -150,13 +150,13 @@ object PostgresTransformService:
         signalDbm = optionalLong(row, "signal_dbm"),
         sequenceNumber = optionalLong(row, "sequence_number"),
         rawLen = requiredLong(row, "raw_len", "wireless.audit"),
-        isRetry = boolFlag(row, "retry"),
-        isMoreData = boolFlag(row, "more_data"),
-        isPowerSave = boolFlag(row, "power_save"),
-        isProtected = boolFlag(row, "protected"),
-        isToDs = boolFlag(row, "to_ds"),
-        isFromDs = boolFlag(row, "from_ds"),
-        isHandshake = boolFlag(row, "handshake_captured"),
+        isRetry = boolValue(row, "retry"),
+        isMoreData = boolValue(row, "more_data"),
+        isPowerSave = boolValue(row, "power_save"),
+        isProtected = boolValue(row, "protected"),
+        isToDs = boolValue(row, "to_ds"),
+        isFromDs = boolValue(row, "from_ds"),
+        isHandshake = boolValue(row, "handshake_captured"),
         securityFlags = optionalLong(row, "security_flags").getOrElse(0L),
         deviceId = optionalString(row, "device_id"),
         username = optionalString(row, "username"),
@@ -193,10 +193,10 @@ object PostgresTransformService:
         hist5001000 = nestedLong(row, "frame_size_histogram", "range_500_1000").getOrElse(0L),
         hist10001500 = nestedLong(row, "frame_size_histogram", "range_1000_1500").getOrElse(0L),
         interArrivalP50Ms = optionalLong(row, "inter_arrival_p50_ms"),
-        externalBssid = boolFlag(row, "external_bssid"),
-        thresholdExceeded = boolFlag(row, "threshold_exceeded"),
+        externalBssid = boolValue(row, "external_bssid"),
+        thresholdExceeded = boolValue(row, "threshold_exceeded"),
         wallClockDeltaMs = optionalLong(row, "wall_clock_delta_ms"),
-        windowIsPartial = boolFlag(row, "window_is_partial"),
+        windowIsPartial = boolValue(row, "window_is_partial"),
         publishedAt = optionalTimestamp(row, "published_at")
       )
     }
@@ -289,7 +289,7 @@ object PostgresTransformService:
         lastSeen = requiredTimestamp(row, "last_seen", "wireless.client.inventory"),
         firstSeen = requiredTimestamp(row, "first_seen", "wireless.client.inventory"),
         signalDbm = optionalLong(row, "signal_dbm").orElse(optionalLong(row, "last_signal_dbm")),
-        isAuthorized = boolFlag(row, "is_authorized")
+        isAuthorized = boolValue(row, "is_authorized")
       )
     }
 

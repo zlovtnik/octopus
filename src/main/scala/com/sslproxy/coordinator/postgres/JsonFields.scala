@@ -109,6 +109,9 @@ object JsonFields:
           case Some(v) if v != 0 => 1L
           case _                 => 0L
 
+  def boolValue(row: Json, field: String): Boolean =
+    boolFlag(row, field) != 0L
+
   def nestedLong(row: Json, parent: String, field: String): Option[Long] =
     for
       parentObj <- row.hcursor.downField(parent).focus

@@ -35,6 +35,44 @@ class WirelessSqlSuite extends FunSuite:
     assert(lookup.contains("WHERE mac_id = ?"), lookup)
     assert(!lookup.contains("LOWER(mac_id)"), lookup)
     assert(!probe.contains("LOWER(authorized.bssid)"), probe)
-    assert(probe.contains("CAST(? AS TEXT) IS NOT NULL"), probe)
-    assert(probe.contains("authorized.bssid = CAST(? AS TEXT)"), probe)
-    assert(probe.contains("authorized.location_id = CAST(? AS TEXT)"), probe)
+    assert(!probe.contains("CAST("), probe)
+    assert(probe.contains("authorized.bssid = ?"), probe)
+    assert(probe.contains("authorized.bssid IS NULL"), probe)
+    assert(probe.contains("authorized.location_id IS NULL"), probe)
+
+  test("upsert with optional bssid and location_id omits null parameters"):
+    val probeWithBssid = WirelessSql
+      .upsertClientProbe(
+        "network",
+        "aa:bb:cc:dd:ee:ff",
+        Some("11:22:33:44:55:66"),
+        None,
+        None,
+        1L,
+        Some("loc-1"),
+        "batch"
+      )
+      .update
+      .sql
+
+    assert(probeWithBssid.contains("authorized.bssid = ?"), probeWithBssid)
+    assert(probeWithBssid.contains("authorized.location_id = ?"), probeWithBssid)
+    assert(!probeWithBssid.contains("CAST("), probeWithBssid)
+
+    val probeNoOptionals = WirelessSql
+      .upsertClientProbe(
+        "network",
+        "aa:bb:cc:dd:ee:ff",
+        None,
+        None,
+        None,
+        1L,
+        None,
+        "batch"
+      )
+      .update
+      .sql
+
+    assert(probeNoOptionals.contains("authorized.bssid IS NULL"), probeNoOptionals)
+    assert(probeNoOptionals.contains("authorized.location_id IS NULL"), probeNoOptionals)
+    assert(!probeNoOptionals.contains("CAST("), probeNoOptionals)

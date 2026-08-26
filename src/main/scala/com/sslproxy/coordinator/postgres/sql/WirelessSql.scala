@@ -48,6 +48,19 @@ object WirelessSql:
     val normalizedSsid = ssid.trim
     val normalizedBssid = observedBssid.map(_.trim.toLowerCase(java.util.Locale.ROOT))
     val normalizedMac = clientMac.trim.toLowerCase(java.util.Locale.ROOT)
+
+    val bssidFilter = normalizedBssid match
+      case Some(b) =>
+        fr"AND (authorized.bssid IS NULL OR authorized.bssid = $b)"
+      case None =>
+        fr"AND authorized.bssid IS NULL"
+
+    val locationFilter = locationId match
+      case Some(l) =>
+        fr"AND (authorized.location_id IS NULL OR authorized.location_id = $l)"
+      case None =>
+        fr"AND authorized.location_id IS NULL"
+
     sql"""INSERT INTO wireless_clients (
             ssid, client_mac, known_bssid, first_seen, last_seen,
             probe_count, location_id, last_probe_batch_id
@@ -56,20 +69,8 @@ object WirelessSql:
             (SELECT MAX(authorized.bssid) FROM wireless_authorized_networks authorized
              WHERE authorized.enabled = TRUE
                AND (authorized.ssid IS NULL OR authorized.ssid = $normalizedSsid)
-               AND (
-                 authorized.bssid IS NULL
-                 OR (
-                   CAST($normalizedBssid AS TEXT) IS NOT NULL
-                   AND authorized.bssid = CAST($normalizedBssid AS TEXT)
-                 )
-               )
-               AND (
-                 authorized.location_id IS NULL
-                 OR (
-                   CAST($locationId AS TEXT) IS NOT NULL
-                   AND authorized.location_id = CAST($locationId AS TEXT)
-                 )
-               )
+             $bssidFilter
+             $locationFilter
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId
           ) ON CONFLICT (ssid, client_mac) DO UPDATE SET

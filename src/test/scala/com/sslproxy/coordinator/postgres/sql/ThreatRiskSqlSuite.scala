@@ -13,3 +13,11 @@ class ThreatRiskSqlSuite extends FunSuite:
     assert(statement.contains("UNION ALL"))
     assert(statement.contains("JOIN bssids ON bssids.bssid = attributed.bssid"))
     assert(!statement.contains("GROUP BY COALESCE(left_document.bssid, right_document.bssid)"))
+
+  test("risk persistence matches PostgreSQL boolean and table columns"):
+    val implementation = java.nio.file.Files.readString(
+      java.nio.file.Paths.get("src/main/scala/com/sslproxy/coordinator/postgres/sql/ThreatRiskSql.scala")
+    )
+    val apRisk = implementation.substring(implementation.indexOf("def persistApRisk"))
+    assert(implementation.contains("${value.sourceKey}, FALSE, FALSE"))
+    assert(!apRisk.contains("updated_at"))

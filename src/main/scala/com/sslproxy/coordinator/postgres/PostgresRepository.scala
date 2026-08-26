@@ -159,6 +159,17 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
           )
     }
 
+  def quarantineSyncEventHydration(
+      candidate: SyncEventHydrationCandidate,
+      error: String
+  ): IO[Either[DatabaseError, Unit]] =
+    runDb("postgres.quarantine_sync_event_hydration") {
+      IngestionSql
+        .quarantineHydration(candidate.streamName, candidate.dedupeKey, error)
+        .run
+        .void
+    }
+
   private def ingestScanRequest(
     record: ResolvedScanRequestRecord,
     metadata: Option[BrokerRecordMetadata]

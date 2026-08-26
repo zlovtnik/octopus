@@ -35,3 +35,6 @@ class WirelessSqlSuite extends FunSuite:
     assert(lookup.contains("WHERE mac_id = ?"), lookup)
     assert(!lookup.contains("LOWER(mac_id)"), lookup)
     assert(!probe.contains("LOWER(authorized.bssid)"), probe)
+    assert(probe.contains("CAST(? AS TEXT) IS NOT NULL"), probe)
+    assert(probe.contains("authorized.bssid = CAST(? AS TEXT)"), probe)
+    assert(probe.contains("authorized.location_id = CAST(? AS TEXT)"), probe)

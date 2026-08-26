@@ -11,6 +11,7 @@ import com.sslproxy.coordinator.postgres.{
   PostgresPayloadReadException,
   PostgresPayloadResolver
 }
+import com.sslproxy.coordinator.util.ErrorSanitizer
 import fs2.Stream
 
 import scala.concurrent.duration.*
@@ -143,7 +144,7 @@ final class SyncEventHydrationService(
       case Some(payload) => IO.pure(payload)
       case None          => resolveWithRetry(candidate.payloadRef, attempt = 1)
 
-    (for
+    val hydrate = for
       payload <- payloadIO
       result <-
         store.hydrateExistingEvent(candidate, payload).value
@@ -154,7 +155,15 @@ final class SyncEventHydrationService(
         )),
         IO.pure
       )
-    yield hydrated).attempt.flatTap {
+    yield hydrated
+
+    hydrate.attempt.flatMap {
+      case Left(error: PostgresPayloadReadException) =>
+        quarantine(candidate, error).attempt
+      case Left(error: IllegalArgumentException) if candidate.payloadJson.isEmpty =>
+        quarantine(candidate, error).attempt
+      case result => IO.pure(result)
+    }.flatTap {
       case Right(_) => IO.unit
       case Left(error) =>
         IO(log.warn(
@@ -164,6 +173,30 @@ final class SyncEventHydrationService(
           "error_type" -> error.getClass.getSimpleName
         ))
     }
+
+  private def quarantine(
+      candidate: SyncEventHydrationCandidate,
+      error: Throwable
+  ): IO[Boolean] =
+    store
+      .quarantineHydrationCandidate(candidate, ErrorSanitizer.message(error))
+      .value
+      .flatMap(
+        _.fold(
+          databaseError => IO.raiseError(
+            RuntimeException(
+              s"${databaseError.operation}: ${databaseError.message}",
+              databaseError.cause
+            )
+          ),
+          _ => IO(log.warn(
+            "sync_event_hydration_backfill",
+            "status" -> "record_quarantined",
+            "stream_name" -> candidate.streamName,
+            "error_type" -> error.getClass.getSimpleName
+          )).as(false)
+        )
+      )
 
   private def resolveWithRetry(payloadRef: String, attempt: Int): IO[String] =
     dbSemaphore.permit.use { _ =>

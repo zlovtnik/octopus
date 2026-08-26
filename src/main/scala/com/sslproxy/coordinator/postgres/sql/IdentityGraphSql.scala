@@ -136,7 +136,10 @@ object IdentityGraphSql:
                     ON CONFLICT (node_id) DO UPDATE SET
                       label = EXCLUDED.label,
                       node_payload = EXCLUDED.node_payload,
-                      observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
+                      observed_at = GREATEST(
+                        COALESCE(graph_nodes.observed_at, EXCLUDED.observed_at),
+                        COALESCE(EXCLUDED.observed_at, graph_nodes.observed_at)
+                      ),
                       updated_at = CURRENT_TIMESTAMP""".update.run
       apNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                         node_id, node_kind, label, node_payload, location_id, sensor_id,
@@ -151,11 +154,14 @@ object IdentityGraphSql:
                       ORDER BY MAX(frame.observed_at) DESC, frame.bssid
                       LIMIT $batchLimit
                       ON CONFLICT (node_id) DO UPDATE SET
-                        label = COALESCE(EXCLUDED.label, label),
+                        label = COALESCE(EXCLUDED.label, graph_nodes.label),
                         node_payload = EXCLUDED.node_payload,
-                        location_id = COALESCE(EXCLUDED.location_id, location_id),
-                        sensor_id = COALESCE(EXCLUDED.sensor_id, sensor_id),
-                        observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
+                        location_id = COALESCE(EXCLUDED.location_id, graph_nodes.location_id),
+                        sensor_id = COALESCE(EXCLUDED.sensor_id, graph_nodes.sensor_id),
+                        observed_at = GREATEST(
+                          COALESCE(graph_nodes.observed_at, EXCLUDED.observed_at),
+                          COALESCE(EXCLUDED.observed_at, graph_nodes.observed_at)
+                        ),
                         updated_at = CURRENT_TIMESTAMP""".update.run
       clusterNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                              node_id, node_kind, label, node_payload,
@@ -172,7 +178,10 @@ object IdentityGraphSql:
                     ON CONFLICT (node_id) DO UPDATE SET
                       label = EXCLUDED.label,
                       node_payload = EXCLUDED.node_payload,
-                      observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
+                      observed_at = GREATEST(
+                        COALESCE(graph_nodes.observed_at, EXCLUDED.observed_at),
+                        COALESCE(EXCLUDED.observed_at, graph_nodes.observed_at)
+                      ),
                       updated_at = CURRENT_TIMESTAMP""".update.run
       edges <- sql"""INSERT INTO atheros_search.graph_edges (
                       edge_id, source_node_id, target_node_id, edge_kind,
@@ -190,7 +199,10 @@ object IdentityGraphSql:
                     ON CONFLICT (edge_id) DO UPDATE SET
                       weight = EXCLUDED.weight,
                       evidence = EXCLUDED.evidence,
-                      observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
+                      observed_at = GREATEST(
+                        COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                        COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                      ),
                       updated_at = CURRENT_TIMESTAMP""".update.run
       identityEdges <- sql"""INSERT INTO atheros_search.graph_edges (
                               edge_id, source_node_id, target_node_id, edge_kind,
@@ -206,6 +218,9 @@ object IdentityGraphSql:
                             ON CONFLICT (edge_id) DO UPDATE SET
                               weight = EXCLUDED.weight,
                               evidence = EXCLUDED.evidence,
-                              observed_at = GREATEST(COALESCE(observed_at, EXCLUDED.observed_at), COALESCE(EXCLUDED.observed_at, observed_at)),
+                              observed_at = GREATEST(
+                                COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                                COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                              ),
                               updated_at = CURRENT_TIMESTAMP""".update.run
     yield deviceNodes + apNodes + clusterNodes + edges + identityEdges

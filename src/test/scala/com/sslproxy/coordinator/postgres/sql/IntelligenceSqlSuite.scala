@@ -13,6 +13,15 @@ class IntelligenceSqlSuite extends FunSuite:
     assert(timing.contains("profile.source_event_count <> source.source_event_count"))
     assert(sequence.contains("sequence_row.frame_count <> source.source_event_count"))
     assert(baseline.contains("baseline.sample_count <> source.source_event_count"))
+    assert(behavior.contains("EXTRACT(EPOCH FROM frame.observed_at)"))
+    assert(timing.contains("EXTRACT(EPOCH FROM frame.observed_at)"))
+    assert(behavior.contains("COALESCE(qos.retry, false)"))
+    assert(sequence.contains("COALESCE(qos.protected, false)"))
+    assert(baseline.contains("CAST(radio.signal_dbm AS DOUBLE PRECISION)"))
+    List(behavior, timing, sequence, baseline).foreach { statement =>
+      assert(!statement.contains("UNIX_TIMESTAMP"), statement)
+      assert(!statement.contains(" AS DOUBLE)"), statement)
+    }
     List(behavior, timing, sequence, baseline).foreach { statement =>
       assert(statement.contains("LIMIT ?"), statement)
       assert(!statement.trim.endsWith("LIMIT ?"), s"outer LIMIT should be removed: $statement")

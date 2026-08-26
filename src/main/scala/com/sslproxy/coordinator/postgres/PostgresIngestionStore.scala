@@ -52,3 +52,9 @@ final class PostgresIngestionStore(repository: PostgresRepository) extends Inges
     payloadJson: String
   ): DbResultT[IO, Boolean] =
     EitherT(repository.hydrateExistingSyncEvent(candidate, payloadJson))
+
+  def quarantineHydrationCandidate(
+    candidate: SyncEventHydrationCandidate,
+    error: String
+  ): DbResultT[IO, Unit] =
+    EitherT(repository.quarantineSyncEventHydration(candidate, error))

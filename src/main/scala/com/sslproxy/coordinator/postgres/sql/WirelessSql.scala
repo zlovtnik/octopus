@@ -58,11 +58,17 @@ object WirelessSql:
                AND (authorized.ssid IS NULL OR authorized.ssid = $normalizedSsid)
                AND (
                  authorized.bssid IS NULL
-                 OR ($normalizedBssid IS NOT NULL AND authorized.bssid = $normalizedBssid)
+                 OR (
+                   CAST($normalizedBssid AS TEXT) IS NOT NULL
+                   AND authorized.bssid = CAST($normalizedBssid AS TEXT)
+                 )
                )
                AND (
                  authorized.location_id IS NULL
-                 OR ($locationId IS NOT NULL AND authorized.location_id = $locationId)
+                 OR (
+                   CAST($locationId AS TEXT) IS NOT NULL
+                   AND authorized.location_id = CAST($locationId AS TEXT)
+                 )
                )
              HAVING COUNT(*) = 1),
             $firstSeen, $lastSeen, $probeCount, $locationId, $batchId

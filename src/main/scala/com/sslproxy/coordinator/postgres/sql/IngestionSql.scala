@@ -31,6 +31,7 @@ object IngestionSql:
                   CAST(e.payload AS TEXT), e.payload_sha256
            FROM sync_events e
            WHERE e.payload_archived = false
+             AND e.status <> 'failed'
              AND NOT EXISTS (
                SELECT 1
                FROM sync_event_tombstones tombstone
@@ -177,6 +178,21 @@ object IngestionSql:
                  AND tombstone.stream_name = sync_events.stream_name
                  AND tombstone.expires_at > CURRENT_TIMESTAMP
              )""".update
+
+  def quarantineHydration(
+      streamName: String,
+      dedupeKey: String,
+      error: String
+  ): Update0 =
+    sql"""UPDATE sync_events
+           SET status = 'failed',
+               attempt_count = attempt_count + 1,
+               last_error = $error,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE dedupe_key = $dedupeKey
+             AND stream_name = $streamName
+             AND payload_archived = false
+             AND status <> 'failed'""".update
 
   def advanceConsumerOffset(metadata: BrokerRecordMetadata): Update0 =
     val nextOffset = metadata.offset + 1L

@@ -16,8 +16,8 @@ object IntelligenceSql:
 
   private val FrameColumnsFragment: Fragment = Fragment.const(
     "frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id, frame.observed_at, " +
-      "frame.frame_type, frame.frame_subtype, radio.signal_dbm, COALESCE(qos.retry, 0), " +
-      "COALESCE(qos.protected, 0), frame.bssid, " +
+      "frame.frame_type, frame.frame_subtype, radio.signal_dbm, COALESCE(qos.retry, false), " +
+      "COALESCE(qos.protected, false), frame.bssid, " +
       "network_row.app_protocol, security_row.adjacent_mac_hint, radio.tsft_delta_us, " +
       "radio.wall_clock_delta_ms, identity_row.session_key"
   )
@@ -26,7 +26,7 @@ object IntelligenceSql:
     val batchLimit = limit.max(1)
     (fr"""WITH source_windows AS (
              SELECT frame.source_mac,
-                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket,
+                    FLOOR(EXTRACT(EPOCH FROM frame.observed_at) / 3600) AS window_bucket,
                     COUNT(*) AS source_event_count
              FROM wireless_frames frame
              WHERE frame.source_mac IS NOT NULL
@@ -47,7 +47,7 @@ object IntelligenceSql:
            FROM wireless_frames frame
            JOIN candidate_windows candidate
              ON candidate.source_mac = frame.source_mac
-            AND candidate.window_bucket = FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600)
+            AND candidate.window_bucket = FLOOR(EXTRACT(EPOCH FROM frame.observed_at) / 3600)
            LEFT JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_qos qos ON qos.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
@@ -59,7 +59,7 @@ object IntelligenceSql:
     val batchLimit = limit.max(1)
     (fr"""WITH source_windows AS (
              SELECT frame.source_mac,
-                    FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600) AS window_bucket,
+                    FLOOR(EXTRACT(EPOCH FROM frame.observed_at) / 3600) AS window_bucket,
                     COUNT(*) AS source_event_count
              FROM wireless_frames frame
              WHERE frame.source_mac IS NOT NULL
@@ -80,7 +80,7 @@ object IntelligenceSql:
            FROM wireless_frames frame
            JOIN candidate_windows candidate
              ON candidate.source_mac = frame.source_mac
-            AND candidate.window_bucket = FLOOR(UNIX_TIMESTAMP(frame.observed_at) / 3600)
+            AND candidate.window_bucket = FLOOR(EXTRACT(EPOCH FROM frame.observed_at) / 3600)
            LEFT JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_qos qos ON qos.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
@@ -133,7 +133,7 @@ object IntelligenceSql:
              ORDER BY source.bssid
              LIMIT $batchLimit
            )
-           SELECT frame.bssid, CAST(radio.signal_dbm AS DOUBLE)
+           SELECT frame.bssid, CAST(radio.signal_dbm AS DOUBLE PRECISION)
            FROM wireless_frames frame
            JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            JOIN candidate_bssids candidate ON candidate.bssid = frame.bssid

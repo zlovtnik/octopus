@@ -26,7 +26,7 @@ object ThreatRiskSql:
              score, severity, explanation_text, evidence, detected_at,
              projection_run_id, updated_at
            ) VALUES (
-             ${value.sourceKey}, 0, 0, ${value.score}, 0, 1,
+             ${value.sourceKey}, FALSE, FALSE, ${value.score}, 0, 1,
              ${value.signalId}, 'dns_blocked_host', ${value.signalId},
              ${value.score}, ${value.severity},
              ${s"blocked DNS/host activity exceeded the characterized seven-day score for ${value.sourceKey}"},
@@ -118,12 +118,11 @@ object ThreatRiskSql:
   def persistApRisk(value: ApRiskProjection): ConnectionIO[Int] =
     sql"""INSERT INTO atheros_search.ap_risk_scores (
              bssid, composite_risk, signal_risk, identity_risk, behaviour_risk,
-             evidence, measured_at, projection_run_id, updated_at
+             evidence, measured_at, projection_run_id
            ) VALUES (
              ${value.bssid}, ${value.composite}, ${value.signalRisk},
              ${value.identityRisk}, ${value.behaviorRisk},
-             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId},
-             CURRENT_TIMESTAMP
+             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId}
            ) ON CONFLICT (bssid) DO UPDATE SET
              composite_risk = EXCLUDED.composite_risk,
              signal_risk = EXCLUDED.signal_risk,
@@ -131,5 +130,4 @@ object ThreatRiskSql:
              behaviour_risk = EXCLUDED.behaviour_risk,
              evidence = EXCLUDED.evidence,
              measured_at = EXCLUDED.measured_at,
-             projection_run_id = EXCLUDED.projection_run_id,
-             updated_at = CURRENT_TIMESTAMP""".update.run
+             projection_run_id = EXCLUDED.projection_run_id""".update.run

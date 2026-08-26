@@ -43,6 +43,10 @@ trait IngestionStore[F[_]]:
     candidate: SyncEventHydrationCandidate,
     payloadJson: String
   ): DbResultT[F, Boolean]
+  def quarantineHydrationCandidate(
+    candidate: SyncEventHydrationCandidate,
+    error: String
+  ): DbResultT[F, Unit]
 
 trait OutboxStore[F[_]]:
   def claim(ownerId: String, destinations: List[String], leaseSeconds: Int): DbResultT[F, Option[OutboxRecord]]

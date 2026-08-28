@@ -56,7 +56,7 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
       result <- archive.archive(validCandidate("bad-hash", "{}").copy(payloadSha256 = "00" * 32)).attempt
       puts <- store.putCount
     yield
-      assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
+      assert(result.left.exists(_.isInstanceOf[InvalidArchiveCandidate]))
       assertEquals(puts, 0)
 
   test("post-upload metadata failure fails closed"):

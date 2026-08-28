@@ -16,6 +16,8 @@ import scala.jdk.CollectionConverters.*
 
 final case class ArchiveReceipt(uri: String, payloadBytes: Long, payloadSha256: String)
 
+final class InvalidArchiveCandidate(message: String) extends IllegalArgumentException(message)
+
 trait PayloadArchive[F[_]]:
   def archive(candidate: ArchiveCandidate): F[ArchiveReceipt]
 
@@ -37,13 +39,13 @@ private[archive] final class HashVerifiedPayloadArchive[F[_]: Async](
     val actualSha256 = Sha256Utils.sha256Hex(bytes)
     if !MinioPayloadArchive.isLowercaseSha256(candidate.dedupeKey) then
       Async[F].raiseError(
-        IllegalArgumentException(
+        InvalidArchiveCandidate(
           "archive dedupe key must be a lowercase SHA-256 value"
         )
       )
     else if actualSha256 != candidate.payloadSha256 then
       Async[F].raiseError(
-        IllegalArgumentException(
+        InvalidArchiveCandidate(
           s"archive payload hash mismatch for ${candidate.streamName}/${candidate.dedupeKey}"
         )
       )

@@ -125,6 +125,9 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
     def recordArchive(candidate: ArchiveCandidate, receipt: ArchiveReceipt): DbResultT[IO, Unit] =
       right(())
 
+    def quarantineArchiveCandidate(candidate: ArchiveCandidate, error: String): DbResultT[IO, Unit] =
+      right(())
+
     def claimLease(
         resourceType: String,
         resourceId: String,

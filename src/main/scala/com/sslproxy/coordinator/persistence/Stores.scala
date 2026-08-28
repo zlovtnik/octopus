@@ -110,6 +110,7 @@ trait ProjectionStore[F[_]]:
 trait MaintenanceStore[F[_]]:
   def findArchiveCandidates(hotDays: Int, limit: Int): DbResultT[F, List[ArchiveCandidate]]
   def recordArchive(candidate: ArchiveCandidate, receipt: ArchiveReceipt): DbResultT[F, Unit]
+  def quarantineArchiveCandidate(candidate: ArchiveCandidate, error: String): DbResultT[F, Unit]
   def claimLease(
     resourceType: String,
     resourceId: String,

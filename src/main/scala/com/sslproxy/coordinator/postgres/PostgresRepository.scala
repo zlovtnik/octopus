@@ -829,6 +829,14 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       MaintenanceSql.recordArchive(candidate, receipt)
     }
 
+  def quarantineArchiveCandidate(
+      candidate: ArchiveCandidate,
+      error: String
+  ): IO[Either[DatabaseError, Unit]] =
+    runDb("postgres.quarantine_archive_candidate") {
+      MaintenanceSql.quarantineArchiveCandidate(candidate, error).run.void
+    }
+
   def claimMaintenanceLease(
     resourceType: String,
     resourceId: String,

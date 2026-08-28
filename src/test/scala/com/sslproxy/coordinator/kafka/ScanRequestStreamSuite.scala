@@ -1,6 +1,9 @@
 package com.sslproxy.coordinator.kafka
 
+import com.sslproxy.coordinator.postgres.PostgresPayloadReadException
 import munit.FunSuite
+
+import java.nio.file.{AccessDeniedException, NoSuchFileException}
 
 class ScanRequestStreamSuite extends FunSuite:
   private val configured = Set(
@@ -25,3 +28,15 @@ class ScanRequestStreamSuite extends FunSuite:
       ),
       Set("proxy.events", "wireless.audit")
     )
+
+  test("missing or malformed payload references are non-retriable poison records"):
+    assert(ScanRequestStream.isNonRetriableResolutionError(IllegalArgumentException("bad payload")))
+    assert(ScanRequestStream.isNonRetriableResolutionError(
+      PostgresPayloadReadException(NoSuchFileException("missing.json"))
+    ))
+
+  test("transient payload I/O failures remain retriable"):
+    assert(!ScanRequestStream.isNonRetriableResolutionError(
+      PostgresPayloadReadException(AccessDeniedException("event.json"))
+    ))
+    assert(!ScanRequestStream.isNonRetriableResolutionError(RuntimeException("temporary failure")))

@@ -6,10 +6,16 @@ import com.sslproxy.coordinator.config.{IngestConfig, KafkaCfg}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresPayloadResolver}
+import com.sslproxy.coordinator.postgres.{
+  PostgresErrorClass,
+  PostgresPayloadReadException,
+  PostgresPayloadResolver
+}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger
+
+import java.nio.file.NoSuchFileException
 
 object ScanRequestStream:
   private val log = StructuredLogger(getClass)
@@ -46,9 +52,22 @@ object ScanRequestStream:
           )
         }
         resolved <- configured.traverse { locked =>
-          IO.blocking(payloadResolver.resolve(locked.decoded)).map((locked, locked.decoded, _))
+          IO.blocking(payloadResolver.resolve(locked.decoded)).attempt.flatMap {
+            case Right(record) => IO.pure(Some((locked, locked.decoded, record)))
+            case Left(error) if isNonRetriableResolutionError(error) =>
+              LockedTopicConsumer
+                .parkNonRetriable(
+                  producer,
+                  cfg.scanTopic + cfg.dlqSuffix,
+                  cfg.scanConsumer,
+                  locked.record,
+                  error
+                )
+                .as(None)
+            case Left(error) => IO.raiseError(error)
+          }
         }
-        handled <- resolved.traverse { case (locked, request, record) =>
+        handled <- resolved.flatten.traverse { case (locked, request, record) =>
           store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))
             case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
@@ -95,3 +114,10 @@ object ScanRequestStream:
 
   private[kafka] def configuredStreamNames(streamNames: List[String]): Set[String] =
     streamNames.map(_.trim).filter(_.nonEmpty).toSet
+
+  private[kafka] def isNonRetriableResolutionError(error: Throwable): Boolean =
+    error match
+      case _: IllegalArgumentException => true
+      case payloadError: PostgresPayloadReadException =>
+        Option(payloadError.getCause).exists(_.isInstanceOf[NoSuchFileException])
+      case _ => false

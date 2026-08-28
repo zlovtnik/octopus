@@ -13,6 +13,9 @@ final class PostgresMaintenanceStore(repository: PostgresRepository) extends Mai
   def recordArchive(candidate: ArchiveCandidate, receipt: ArchiveReceipt): DbResultT[IO, Unit] =
     EitherT(repository.recordArchive(candidate, receipt))
 
+  def quarantineArchiveCandidate(candidate: ArchiveCandidate, error: String): DbResultT[IO, Unit] =
+    EitherT(repository.quarantineArchiveCandidate(candidate, error))
+
   def claimLease(
       resourceType: String,
       resourceId: String,

@@ -17,6 +17,7 @@ object MaintenanceSql:
            FROM sync_events
            WHERE stream_name = 'wireless.audit'
              AND payload_archived = false
+             AND status <> 'failed'
              AND payload IS NOT NULL
              AND payload_sha256 IS NOT NULL
              AND observed_at < (CURRENT_TIMESTAMP + (-${hotDays.max(1)}) * INTERVAL '1 day')
@@ -24,6 +25,17 @@ object MaintenanceSql:
            LIMIT ${limit.max(1)}"""
       .query[(String, String, java.sql.Timestamp, String, String)]
       .map(ArchiveCandidate.apply.tupled)
+
+  def quarantineArchiveCandidate(candidate: ArchiveCandidate, error: String): Update0 =
+    sql"""UPDATE sync_events
+           SET status = 'failed',
+               attempt_count = attempt_count + 1,
+               last_error = $error,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE dedupe_key = ${candidate.dedupeKey}
+             AND stream_name = ${candidate.streamName}
+             AND payload_archived = false
+             AND status <> 'failed'""".update
 
   def recordArchive(candidate: ArchiveCandidate, receipt: ArchiveReceipt): ConnectionIO[Unit] =
     for

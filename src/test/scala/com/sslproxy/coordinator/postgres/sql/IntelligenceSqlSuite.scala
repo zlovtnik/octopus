@@ -18,6 +18,7 @@ class IntelligenceSqlSuite extends FunSuite:
     assert(behavior.contains("COALESCE(qos.retry, false)"))
     assert(sequence.contains("COALESCE(qos.protected, false)"))
     assert(baseline.contains("CAST(radio.signal_dbm AS DOUBLE PRECISION)"))
+    assertEquals(baseline.split("radio.signal_dbm IS NOT NULL", -1).length - 1, 2)
     List(behavior, timing, sequence, baseline).foreach { statement =>
       assert(!statement.contains("UNIX_TIMESTAMP"), statement)
       assert(!statement.contains(" AS DOUBLE)"), statement)

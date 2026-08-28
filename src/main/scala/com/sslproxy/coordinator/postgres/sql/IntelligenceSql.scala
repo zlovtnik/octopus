@@ -137,6 +137,7 @@ object IntelligenceSql:
            FROM wireless_frames frame
            JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
            JOIN candidate_bssids candidate ON candidate.bssid = frame.bssid
+           WHERE radio.signal_dbm IS NOT NULL
            ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key""".query[(String, Double)]
 
   def annReady(

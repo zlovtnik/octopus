@@ -590,7 +590,7 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
   def ensureCursor(streamName: String): IO[Either[DatabaseError, String]] =
     runDb("postgres.ensure_cursor") {
       for
-        _ <- IngestionSql.ensureCursor(streamName).run
+        _ <- IngestionSql.ensureCursor(streamName, IngestionSql.defaultCursorFor(streamName)).run
         cursor <- IngestionSql.cursor(streamName).unique
       yield cursor
     }
@@ -603,7 +603,7 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
         streamNames
           .parTraverseN(parallelism) { name =>
             runDb(s"postgres.ensure_cursor_$name") {
-              IngestionSql.ensureCursor(name).run
+              IngestionSql.ensureCursor(name, IngestionSql.defaultCursorFor(name)).run
             }
           }
           .map { results =>

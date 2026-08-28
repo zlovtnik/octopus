@@ -246,10 +246,13 @@ object IngestionSql:
   private def isNumericCursor(value: String): Boolean =
     value.nonEmpty && value.forall(character => character >= '0' && character <= '9')
 
-  def ensureCursor(streamName: String): Update0 =
+  def ensureCursor(streamName: String, defaultCursor: String = "0"): Update0 =
     sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-           VALUES ($streamName, '0', CURRENT_TIMESTAMP)
+           VALUES ($streamName, $defaultCursor, CURRENT_TIMESTAMP)
            ON CONFLICT (stream_name) DO UPDATE SET updated_at = CURRENT_TIMESTAMP""".update
+
+  def defaultCursorFor(streamName: String): String =
+    if streamName == "wireless.audit" then "0" else ""
 
   def cursor(streamName: String): Query0[String] =
     sql"SELECT cursor_value FROM sync_cursors WHERE stream_name = $streamName".query[String]

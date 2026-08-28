@@ -181,8 +181,9 @@ Important gates:
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD`, `POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
-Kustomize sets `DISABLED`; CA and server-name inputs remain optional for
-verified-TLS deployments. Enabled runtime rejects loopback, root accounts,
+Kustomize sets `verify-full` with the PgBouncer listener CA and
+`POSTGRES_SSL_SERVER_NAME=postgres-pgbouncer`; the listener private key is never
+mounted in Octopus. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and invalid consumer-group contracts.
 
 The checked-in Kubernetes deployment enables both runtime lanes, archival, and

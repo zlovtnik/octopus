@@ -4,7 +4,7 @@ import cats.data.EitherT
 import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.persistence.ProcessorStateStore
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import fs2.Stream
 import munit.CatsEffectSuite
@@ -109,6 +109,44 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     }
   }
 
+  test("runtime-enabled consumers do not require their producer workloads") {
+    val config = ProcessorConfig(Nil, 1L, 10L)
+    val runtimeEnabled = Set(
+      ProcessorId.SyncScanIngestion,
+      ProcessorId.SyncLoadConsumer,
+      ProcessorId.SyncResultConsumer,
+      ProcessorId.PayloadAuditIngestion
+    )
+
+    ProcessorSupervisor
+      .create(config, RecordingProcessorStateStore.volatile, None, runtimeEnabled)
+      .flatMap(_.readiness.statuses)
+      .map { statuses =>
+        runtimeEnabled.foreach { id =>
+          assertEquals(statuses(id).lifecycle, ProcessorLifecycle.Starting)
+        }
+      }
+  }
+
+  test("retryable database operation failures enter backoff") {
+    val id = ProcessorId.SyncScanIngestion
+    val config = ProcessorConfig(List(id.value), 100L, 100L)
+    val failure = DatabaseOperationException(DatabaseError.Retryable(
+      "payload_audit.record_scan_requests",
+      new java.sql.SQLTransientException("connection unavailable"),
+      "connection unavailable"
+    ))
+
+    ProcessorSupervisor.create(config).flatMap { supervisor =>
+      val workload = ProcessorWorkload(id, Stream.raiseError[IO](failure))
+      supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.BackingOff).map { statuses =>
+          assertEquals(statuses(id).lifecycle, ProcessorLifecycle.BackingOff)
+        }.guarantee(fiber.cancel)
+      }
+    }
+  }
+
   test("processor runs and terminal state are persisted") {
     val id = ProcessorId.SyncScanIngestion
     val config = ProcessorConfig(List(id.value), 1L, 10L)
@@ -187,6 +225,21 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         errorText: Option[String],
         finishedAt: java.time.Instant
     ) = EitherT.liftF(events.update(_ :+ s"finish:$runId:${status.value}"))
+
+  private object RecordingProcessorStateStore:
+    val volatile: ProcessorStateStore[IO] = new ProcessorStateStore[IO]:
+      def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
+      def persist(id: ProcessorId, status: ProcessorStatus, observedAt: java.time.Instant) =
+        EitherT.rightT[IO, DatabaseError](())
+      def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
+        EitherT.rightT[IO, DatabaseError](())
+      def finishRun(
+          runId: String,
+          status: ProcessorRunStatus,
+          errorClass: Option[String],
+          errorText: Option[String],
+          finishedAt: java.time.Instant
+      ) = EitherT.rightT[IO, DatabaseError](())
 
   private final class StartRunOnceFailingStore(attempts: Ref[IO, Int])
       extends ProcessorStateStore[IO]:

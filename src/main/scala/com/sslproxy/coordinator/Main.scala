@@ -70,6 +70,7 @@ object Main extends IOApp.Simple:
 
             Resource.eval(preflight.validate()).flatMap { _ =>
               val enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
+              val runtimeConsumerProcessorIds = Main.runtimeConsumerProcessorIds(cfg.runtime)
               Resource
                 .eval(
                   Semaphore[IO](
@@ -177,7 +178,8 @@ object Main extends IOApp.Simple:
                             ProcessorSupervisor.create(
                               cfg.processors,
                               processorStateStore,
-                              Some(metrics)
+                              Some(metrics),
+                              runtimeConsumerProcessorIds
                             )
                           )
                           .flatMap { supervisor =>
@@ -222,16 +224,85 @@ object Main extends IOApp.Simple:
                                 kafka.producer
                               )
 
-                              val lockedConsumerWorkloads =
-                                if cfg.runtime.consumersEnabled then
-                                  List(
-                                    ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
-                                    ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
-                                    ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream)
+                              val consumerWorkloads = List(
+                                ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
+                                ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
+                                ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessBacklogSave,
+                                  WirelessConsumerService.backlogSaveStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
                                   )
-                                else Nil
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessBacklogList,
+                                  WirelessConsumerService.backlogListStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessBacklogSynced,
+                                  WirelessConsumerService.backlogSyncedStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessBacklogPrune,
+                                  WirelessConsumerService.backlogPruneStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessMacLookup,
+                                  WirelessConsumerService.macLookupStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessNetworksAuthorized,
+                                  WirelessConsumerService.networksAuthorizedStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessProbeFlush,
+                                  WirelessConsumerService.probeFlushStream(
+                                    cfg.wireless,
+                                    cfg.kafka,
+                                    wirelessStore,
+                                    kafka.producer
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.PayloadAuditIngestion,
+                                  PayloadAuditConsumer.stream(
+                                    cfg.kafka,
+                                    ingestionStore,
+                                    metrics,
+                                    kafka.producer
+                                  )
+                                )
+                              )
 
-                              val workloads = lockedConsumerWorkloads ++ List(
+                              val workloads = consumerWorkloads ++ List(
                                 ProcessorWorkload(
                                   ProcessorId.SyncJobPlanner,
                                   cronScheduler.jobPlanningStream
@@ -385,57 +456,13 @@ object Main extends IOApp.Simple:
                                       )
                                     )
                                   })
-                              val processorStreams =
-                                if cfg.processors.enabled.isEmpty then Stream.empty
-                                else
-                                  cronScheduler.supportStream
-                                    .merge(supervisor.run(workloads))
-
-                              val consumerWorkloads =
-                                if cfg.runtime.consumersEnabled then
-                                  List(
-                                    ProcessorWorkload(ProcessorId.WirelessBacklogSave,
-                                      WirelessConsumerService.backlogSaveStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessBacklogList,
-                                      WirelessConsumerService.backlogListStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessBacklogSynced,
-                                      WirelessConsumerService.backlogSyncedStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessBacklogPrune,
-                                      WirelessConsumerService.backlogPruneStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessMacLookup,
-                                      WirelessConsumerService.macLookupStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessNetworksAuthorized,
-                                      WirelessConsumerService.networksAuthorizedStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.WirelessProbeFlush,
-                                      WirelessConsumerService.probeFlushStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
-                                    ProcessorWorkload(ProcessorId.PayloadAuditIngestion,
-                                      PayloadAuditConsumer.stream(cfg.kafka, ingestionStore, metrics, kafka.producer))
-                                  )
-                                else Nil
-
-                              val consumerSupervisorEnabled: Set[ProcessorId] =
-                                if cfg.runtime.consumersEnabled then
-                                  Set(
-                                    ProcessorId.WirelessBacklogSave,
-                                    ProcessorId.WirelessBacklogList,
-                                    ProcessorId.WirelessBacklogSynced,
-                                    ProcessorId.WirelessBacklogPrune,
-                                    ProcessorId.WirelessMacLookup,
-                                    ProcessorId.WirelessNetworksAuthorized,
-                                    ProcessorId.WirelessProbeFlush,
-                                    ProcessorId.PayloadAuditIngestion
-                                  )
-                                else Set.empty
-
-                              val consumerStreams =
-                                if consumerSupervisorEnabled.isEmpty then Stream.empty
-                                else
-                                  Stream.eval(
-                                    ProcessorSupervisor.create(
-                                      cfg.processors.copy(enabled = consumerSupervisorEnabled.map(_.value).toList),
-                                      processorStateStore
-                                    )
-                                  ).flatMap(_.run(consumerWorkloads))
+                              val supervisedStreams =
+                                if enabledProcessorIds.isEmpty && runtimeConsumerProcessorIds.isEmpty then
+                                  Stream.empty
+                                else supervisor.run(workloads)
+                              val processorSupportStreams =
+                                if enabledProcessorIds.isEmpty then Stream.empty
+                                else cronScheduler.supportStream
 
                               log.info(
                                 "startup",
@@ -452,8 +479,8 @@ object Main extends IOApp.Simple:
 
                               val streams = enabledRuntimeStreams(
                                 cfg.runtime,
-                                processorStreams,
-                                consumerStreams,
+                                supervisedStreams,
+                                processorSupportStreams,
                                 requiredRuntimeStreams
                               )
 
@@ -488,12 +515,17 @@ object Main extends IOApp.Simple:
 
   private[coordinator] def enabledRuntimeStreams[A](
     runtime: RuntimeConfig,
-    processorStreams: Stream[IO, A],
-    consumerStreams: Stream[IO, A],
+    supervisedStreams: Stream[IO, A],
+    processorSupportStreams: Stream[IO, A],
     requiredRuntimeStreams: Stream[IO, A]
   ): Stream[IO, A] =
-    (runtime.processorsEnabled, runtime.consumersEnabled) match
-      case (true, true) => processorStreams.merge(consumerStreams).merge(requiredRuntimeStreams)
-      case (true, false) => processorStreams.merge(requiredRuntimeStreams) ++ Stream.never[IO]
-      case (false, true) => consumerStreams.merge(requiredRuntimeStreams) ++ Stream.never[IO]
-      case (false, false) => Stream.never[IO]
+    if !runtime.anyEnabled then Stream.never[IO]
+    else
+      val processorSupport =
+        if runtime.processorsEnabled then processorSupportStreams
+        else Stream.empty
+      supervisedStreams.merge(processorSupport).merge(requiredRuntimeStreams) ++ Stream.never[IO]
+
+  private[coordinator] def runtimeConsumerProcessorIds(runtime: RuntimeConfig): Set[ProcessorId] =
+    if runtime.consumersEnabled then ProcessorId.kafkaConsumers
+    else Set.empty

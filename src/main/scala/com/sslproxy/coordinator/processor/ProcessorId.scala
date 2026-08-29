@@ -66,6 +66,19 @@ object ProcessorId:
 
   val all: List[ProcessorId] = ProcessorId.values.toList
   val octopusOwned: List[ProcessorId] = all.filter(_.owner == ProcessorOwner.Octopus)
+  val kafkaConsumers: Set[ProcessorId] = Set(
+    ProcessorId.SyncScanIngestion,
+    ProcessorId.SyncLoadConsumer,
+    ProcessorId.SyncResultConsumer,
+    ProcessorId.PayloadAuditIngestion,
+    ProcessorId.WirelessBacklogSave,
+    ProcessorId.WirelessBacklogList,
+    ProcessorId.WirelessBacklogSynced,
+    ProcessorId.WirelessBacklogPrune,
+    ProcessorId.WirelessMacLookup,
+    ProcessorId.WirelessNetworksAuthorized,
+    ProcessorId.WirelessProbeFlush
+  )
 
 final case class ProcessorContract(
     id: ProcessorId,
@@ -92,7 +105,7 @@ object ProcessorCatalog:
     continuous(ProcessorId.SyncLoadConsumer, List("sync.oracle.load"), List("domain tables", "sync.oracle.result"), List(ProcessorId.SyncOutboxPublisher), "batch_id/attempt", "kafka partition", "sync result failure", "batch checksum"),
     continuous(ProcessorId.SyncResultConsumer, List("sync.oracle.result"), List("sync_jobs", "sync_batches", "sync_cursors"), List(ProcessorId.SyncLoadConsumer), "batch_id/attempt", "kafka partition", "terminal job failure", "batch/cursor scan"),
     continuous(ProcessorId.SyncOutboxPublisher, List("outbox_events"), List("Redpanda"), List(ProcessorId.SyncLoadDispatch), "destination_topic/message_key", "outbox row", "park exhausted publication", "publish-attempt audit"),
-    continuous(ProcessorId.PayloadAuditIngestion, List("payload.audit.ingest"), List("ingestion scan_requests"), List(ProcessorId.SyncScanIngestion), "group/topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.PayloadAuditIngestion, List("proxy.payload_audit"), List("ingestion scan_requests"), Nil, "stream_name/payload_sha256", "kafka partition", "DLQ invalid records", "bounded offset audit"),
     continuous(ProcessorId.WirelessFrameNormalizer, List("wireless.audit"), List("wireless normalized tables"), List(ProcessorId.SyncLoadConsumer), "event_id", "wireless event", "park invalid frame", "source/frame checksum"),
     periodic(ProcessorId.WirelessInventoryProjector, List("wireless normalized tables"), List("device/client/sensor inventory"), List(ProcessorId.WirelessFrameNormalizer), "device/window", "inventory key", "record reconciliation finding", "inventory rebuild"),
     periodic(ProcessorId.WirelessIdentityProjector, List("inventory", "similarity evidence"), List("identity projections"), List(ProcessorId.WirelessInventoryProjector, ProcessorId.SimilarityProjector), "identity/source", "identity key", "record reconciliation finding", "identity rebuild"),

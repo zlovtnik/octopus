@@ -42,6 +42,14 @@ class ProcessorCatalogSuite extends FunSuite:
     }
   }
 
+  test("payload audit contract matches the content-addressed consumer") {
+    val contract = ProcessorCatalog.byId(ProcessorId.PayloadAuditIngestion)
+
+    assertEquals(contract.inputs, List("proxy.payload_audit"))
+    assertEquals(contract.dependencies, Nil)
+    assertEquals(contract.dedupeKey, "stream_name/payload_sha256")
+  }
+
   test("shared manifest exactly matches runtime processor contracts") {
     val manifest = findRepositoryRoot(Path.of(sys.props("user.dir")))
       .resolve("sql/postgres/contracts/processors.json")

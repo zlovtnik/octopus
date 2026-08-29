@@ -11,7 +11,7 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.persistence.IngestionStore
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, IngestionStore}
 import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
@@ -161,32 +161,11 @@ object PayloadAuditConsumer:
       cfg: KafkaCfg,
       metrics: CoordinatorMetrics,
       validRecords: List[ResolvedScanRequestRecord],
-      validWithRaw: List[(String, ResolvedScanRequestRecord)],
-      remaining: Int = MaxRetries
+      validWithRaw: List[(String, ResolvedScanRequestRecord)]
   ): IO[Unit] =
-    store.recordScanRequests(validRecords).value.flatMap {
+    retryDatabaseWrite(store.recordScanRequests(validRecords).value).flatMap {
       case Right(count) =>
         IO(metrics.recordPayloadAuditIngested(count))
-      case Left(dbErr) if remaining > 1 && isRetryableDbError(dbErr) =>
-        IO(
-          log.warn(
-            "payload_audit_ingest",
-            "status" -> "retry",
-            "attempts_remaining" -> (remaining - 1).toString,
-            "operation" -> dbErr.operation,
-            "error" -> ErrorSanitizer.sanitize(dbErr.message)
-          )
-        ) *>
-          IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
-          retryBatchWrite(
-            store,
-            dlqProducer,
-            cfg,
-            metrics,
-            validRecords,
-            validWithRaw,
-            remaining - 1
-          )
       case Left(dbErr) =>
         val sanitized = ErrorSanitizer.sanitize(dbErr.message)
         IO(
@@ -220,10 +199,43 @@ object PayloadAuditConsumer:
             }
     }
 
-  private def isRetryableDbError(error: DatabaseError): Boolean =
-    error match
-      case _: DatabaseError.Retryable => true
-      case _: DatabaseError.Permanent => false
+  private[ingest] def retryDatabaseWrite(
+      write: IO[Either[DatabaseError, Int]],
+      maxAttempts: Int = MaxRetries,
+      initialDelay: FiniteDuration = RetryDelay
+  ): IO[Either[DatabaseError.Permanent, Int]] =
+    cats.Monad[IO].tailRecM[(Int, FiniteDuration), Either[DatabaseError.Permanent, Int]](
+      (maxAttempts.max(1), initialDelay)
+    ) { case (remaining, delay) =>
+      write.flatMap {
+        case Right(count) =>
+          IO.pure(Right(Right(count)))
+        case Left(dbErr: DatabaseError.Permanent) =>
+          IO.pure(Right(Left(dbErr)))
+        case Left(dbErr: DatabaseError.Retryable) if remaining > 1 =>
+          IO(
+            log.warn(
+              "payload_audit_ingest",
+              "status" -> "retry",
+              "attempts_remaining" -> (remaining - 1).toString,
+              "operation" -> dbErr.operation,
+              "error" -> ErrorSanitizer.sanitize(dbErr.message)
+            )
+          ) *>
+            IO.sleep(delay) *>
+            IO.pure(Left((remaining - 1, delay * 2L)))
+        case Left(dbErr: DatabaseError.Retryable) =>
+          IO(
+            log.error(
+              "payload_audit_ingest",
+              "status" -> "retry_exhausted",
+              "operation" -> dbErr.operation,
+              "error" -> ErrorSanitizer.sanitize(dbErr.message)
+            )
+          ) *>
+            IO.raiseError(DatabaseOperationException(dbErr))
+      }
+    }
 
   private def publishRecordDlq(
       dlqProducer: KafkaProducer[IO, String, String],

@@ -57,6 +57,16 @@ class AppConfigSuite extends FunSuite:
 
     assert(validationMessages(invalid).exists(_.contains("require runtime.consumers-enabled=true")))
 
+  test("auxiliary consumer processors require the consumer lane"):
+    val baseline = defaults
+    val invalid = baseline.copy(
+      postgres = enabledPostgres(baseline.postgres),
+      runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
+      processors = baseline.processors.copy(enabled = List("payload-audit-ingestion"))
+    )
+
+    assert(validationMessages(invalid).exists(_.contains("require runtime.consumers-enabled=true")))
+
   test("an explicit processor catalog includes every enabled locked consumer"):
     val baseline = defaults
     val invalid = baseline.copy(

@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.persistence.ProcessorStateStore
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import fs2.Stream
 import com.sslproxy.coordinator.observability.StructuredLogger
@@ -120,6 +120,13 @@ final class ProcessorSupervisor private (
         case Left(error: ProcessorPersistenceException) =>
           bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
             IO.pure(error)
+        case Left(error: DatabaseOperationException) =>
+          error.error match
+            case _: DatabaseError.Retryable =>
+              bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
+                IO.pure(error)
+            case _: DatabaseError.Permanent =>
+              failTerminal(workload, runId, restartCount, error)
         case Left(error) if PostgresErrorClass.classify(error) == PostgresErrorClass.Permanent =>
           failTerminal(workload, runId, restartCount, error)
         case Left(error) =>
@@ -244,11 +251,20 @@ object ProcessorSupervisor:
       stateStore: ProcessorStateStore[IO],
       metrics: Option[CoordinatorMetrics]
   ): IO[ProcessorSupervisor] =
+    create(config, stateStore, metrics, Set.empty)
+
+  def create(
+      config: ProcessorConfig,
+      stateStore: ProcessorStateStore[IO],
+      metrics: Option[CoordinatorMetrics],
+      runtimeEnabled: Set[ProcessorId]
+  ): IO[ProcessorSupervisor] =
     for
-      enabled <- IO.fromEither(
+      configured <- IO.fromEither(
         config.enabled.traverse(ProcessorId.fromString).map(_.toSet).left.map(IllegalArgumentException(_))
       )
-      _ <- IO.fromEither(validateDependencies(enabled))
+      enabled = configured ++ runtimeEnabled
+      _ <- IO.fromEither(validateDependencies(configured, enabled))
       persisted <- liftPersistence(stateStore.load)
       initial = (ProcessorId.octopusOwned.toSet ++ enabled).iterator.map { id =>
         val lifecycle = if enabled.contains(id) then ProcessorLifecycle.Starting else ProcessorLifecycle.Disabled
@@ -274,8 +290,11 @@ object ProcessorSupervisor:
       case Left(error) => IO.raiseError(ProcessorPersistenceException(error))
     }
 
-  private def validateDependencies(enabled: Set[ProcessorId]): Either[IllegalArgumentException, Unit] =
-    val missing = enabled.toList.flatMap { id =>
+  private def validateDependencies(
+      configured: Set[ProcessorId],
+      enabled: Set[ProcessorId]
+  ): Either[IllegalArgumentException, Unit] =
+    val missing = configured.toList.flatMap { id =>
       ProcessorCatalog.byId(id).dependencies.filter { dependency =>
         dependency.owner == ProcessorOwner.Octopus && !enabled.contains(dependency)
       }.map(dependency => s"${id.value}->${dependency.value}")

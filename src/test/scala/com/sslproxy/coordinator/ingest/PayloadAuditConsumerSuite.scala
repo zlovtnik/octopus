@@ -2,7 +2,6 @@ package com.sslproxy.coordinator.ingest
 
 import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.domain.{DatabaseError, PayloadAudit}
-import com.sslproxy.coordinator.persistence.DatabaseOperationException
 import com.sslproxy.coordinator.util.Sha256Utils
 import munit.CatsEffectSuite
 
@@ -122,26 +121,22 @@ class PayloadAuditConsumerSuite extends CatsEffectSuite:
       assertEquals(result, Right(4))
       assertEquals(count, 3)
 
-  test("exhausted retryable database writes fail without becoming DLQ records"):
+  test("exhausted retryable database writes are returned for DLQ handling"):
     val retryable = DatabaseError.Retryable(
       "payload_audit.record_scan_requests",
       new java.sql.SQLTransientException("connection unavailable"),
       "connection unavailable"
     )
 
-    PayloadAuditConsumer
-      .retryDatabaseWrite(
-        IO.pure(Left(retryable)),
-        maxAttempts = 3,
-        initialDelay = Duration.Zero
-      )
-      .attempt
-      .map {
-        case Left(failure: DatabaseOperationException) =>
-          assertEquals(failure.error, retryable)
-        case other =>
-          fail(s"expected retryable DatabaseOperationException, got $other")
-      }
+    for
+      result <- PayloadAuditConsumer
+        .retryDatabaseWrite(
+          IO.pure(Left(retryable)),
+          maxAttempts = 3,
+          initialDelay = Duration.Zero
+        )
+    yield
+      assertEquals(result, Left(retryable))
 
   test("permanent database writes are returned for DLQ handling without retry"):
     val permanent = DatabaseError.Permanent(

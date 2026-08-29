@@ -11,7 +11,7 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.persistence.{DatabaseOperationException, IngestionStore}
+import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
@@ -203,8 +203,8 @@ object PayloadAuditConsumer:
       write: IO[Either[DatabaseError, Int]],
       maxAttempts: Int = MaxRetries,
       initialDelay: FiniteDuration = RetryDelay
-  ): IO[Either[DatabaseError.Permanent, Int]] =
-    cats.Monad[IO].tailRecM[(Int, FiniteDuration), Either[DatabaseError.Permanent, Int]](
+  ): IO[Either[DatabaseError, Int]] =
+    cats.Monad[IO].tailRecM[(Int, FiniteDuration), Either[DatabaseError, Int]](
       (maxAttempts.max(1), initialDelay)
     ) { case (remaining, delay) =>
       write.flatMap {
@@ -233,7 +233,7 @@ object PayloadAuditConsumer:
               "error" -> ErrorSanitizer.sanitize(dbErr.message)
             )
           ) *>
-            IO.raiseError(DatabaseOperationException(dbErr))
+            IO.pure(Right(Left(dbErr)))
       }
     }
 

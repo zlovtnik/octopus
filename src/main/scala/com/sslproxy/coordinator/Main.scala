@@ -201,19 +201,6 @@ object Main extends IOApp.Simple:
                               .build
 
                             serverResource.flatMap { _ =>
-                              val payloadAuditStream = PayloadAuditConsumer.stream(
-                                cfg.kafka,
-                                ingestionStore,
-                                metrics,
-                                kafka.producer
-                              )
-                              val wirelessStreams = WirelessConsumerService.allStreams(
-                                cfg.wireless,
-                                cfg.kafka,
-                                wirelessStore,
-                                kafka.producer
-                              )
-
                               val scanStream = ScanRequestStream.run(
                                 cfg.kafka,
                                 cfg.ingest,
@@ -404,6 +391,52 @@ object Main extends IOApp.Simple:
                                   cronScheduler.supportStream
                                     .merge(supervisor.run(workloads))
 
+                              val consumerWorkloads =
+                                if cfg.runtime.consumersEnabled then
+                                  List(
+                                    ProcessorWorkload(ProcessorId.WirelessBacklogSave,
+                                      WirelessConsumerService.backlogSaveStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessBacklogList,
+                                      WirelessConsumerService.backlogListStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessBacklogSynced,
+                                      WirelessConsumerService.backlogSyncedStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessBacklogPrune,
+                                      WirelessConsumerService.backlogPruneStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessMacLookup,
+                                      WirelessConsumerService.macLookupStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessNetworksAuthorized,
+                                      WirelessConsumerService.networksAuthorizedStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.WirelessProbeFlush,
+                                      WirelessConsumerService.probeFlushStream(cfg.wireless, cfg.kafka, wirelessStore, kafka.producer)),
+                                    ProcessorWorkload(ProcessorId.PayloadAuditIngestion,
+                                      PayloadAuditConsumer.stream(cfg.kafka, ingestionStore, metrics, kafka.producer))
+                                  )
+                                else Nil
+
+                              val consumerSupervisorEnabled: Set[ProcessorId] =
+                                if cfg.runtime.consumersEnabled then
+                                  Set(
+                                    ProcessorId.WirelessBacklogSave,
+                                    ProcessorId.WirelessBacklogList,
+                                    ProcessorId.WirelessBacklogSynced,
+                                    ProcessorId.WirelessBacklogPrune,
+                                    ProcessorId.WirelessMacLookup,
+                                    ProcessorId.WirelessNetworksAuthorized,
+                                    ProcessorId.WirelessProbeFlush,
+                                    ProcessorId.PayloadAuditIngestion
+                                  )
+                                else Set.empty
+
+                              val consumerStreams =
+                                if consumerSupervisorEnabled.isEmpty then Stream.empty
+                                else
+                                  Stream.eval(
+                                    ProcessorSupervisor.create(
+                                      cfg.processors.copy(enabled = consumerSupervisorEnabled.map(_.value).toList),
+                                      processorStateStore
+                                    )
+                                  ).flatMap(_.run(consumerWorkloads))
+
                               log.info(
                                 "startup",
                                 "status" -> (if cfg.runtime.consumersEnabled then "consumers_enabled"
@@ -416,15 +449,6 @@ object Main extends IOApp.Simple:
                                 "result_topic" -> cfg.kafka.resultTopic,
                                 "result_group" -> cfg.kafka.resultConsumer
                               )
-
-                              val auxiliaryConsumers =
-                                if cfg.runtime.consumersEnabled then payloadAuditStream.merge(wirelessStreams)
-                                else Stream.empty
-                              val legacyLockedConsumers =
-                                if cfg.runtime.consumersEnabled && cfg.processors.enabled.isEmpty then
-                                  scanStream.merge(loadStream).merge(resultStream)
-                                else Stream.empty
-                              val consumerStreams = auxiliaryConsumers.merge(legacyLockedConsumers)
 
                               val streams = enabledRuntimeStreams(
                                 cfg.runtime,

@@ -92,6 +92,7 @@ object KafkaComponents:
 
   /** Ensure the topic exists on the broker, then block until it is ready for
     * consuming.  Uses a temporary consumer to probe `partitionsFor` with retry.
+    * A single consumer is reused across retries to avoid ephemeral group churn.
     */
   def waitForTopic(
       cfg: KafkaCfg,
@@ -101,23 +102,23 @@ object KafkaComponents:
   ): IO[Unit] =
     val settings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
-      .withGroupId(s"preflight-${topic}-${System.currentTimeMillis()}")
+      .withGroupId(s"preflight-${topic}-${java.util.UUID.randomUUID()}")
       .withProperties("allow.auto.create.topics" -> "false")
 
-    def probe: IO[Either[Throwable, List[org.apache.kafka.common.PartitionInfo]]] =
-      KafkaConsumer.resource(settings).use(_.partitionsFor(topic).attempt)
+    def probe(consumer: KafkaConsumer[IO, String, String]): IO[Either[Throwable, List[org.apache.kafka.common.PartitionInfo]]] =
+      consumer.partitionsFor(topic).attempt
 
-    def loop(deadline: FiniteDuration): IO[Unit] =
-      probe.flatMap {
+    def loop(consumer: KafkaConsumer[IO, String, String], deadline: FiniteDuration): IO[Unit] =
+      probe(consumer).flatMap {
         case Right(partitions) if partitions.isEmpty =>
           IO(log.warn("topic_preflight", "status" -> "empty", "topic" -> topic)) *>
-            retryOrTimeout(deadline) *> loop(deadline)
+            retryOrTimeout(deadline) *> loop(consumer, deadline)
         case Right(_) =>
           IO(log.info("topic_preflight", "status" -> "ready", "topic" -> topic))
         case Left(ex: RetriableException) =>
           IO(log.warn("topic_preflight", "status" -> "waiting",
             "topic" -> topic, "error" -> ex.getMessage)) *>
-            retryOrTimeout(deadline) *> loop(deadline)
+            retryOrTimeout(deadline) *> loop(consumer, deadline)
         case Left(ex) =>
           IO.raiseError(ex)
       }
@@ -133,7 +134,7 @@ object KafkaComponents:
 
     IO.monotonic.flatMap { start =>
       ensureTopicExists(cfg, topic, timeout).timeout(timeout) *>
-        loop(start + timeout)
+        KafkaConsumer.resource(settings).use(consumer => loop(consumer, start + timeout))
     }
 
   /** Every processor gets its own KafkaConsumer resource. There is deliberately

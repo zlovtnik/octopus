@@ -3,7 +3,12 @@ package com.sslproxy.coordinator.ingest
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.domain.{PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
+import com.sslproxy.coordinator.domain.{
+  DatabaseError,
+  PayloadAudit,
+  ResolvedScanRequestRecord,
+  ScanRequestRecord
+}
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
@@ -20,6 +25,8 @@ import scala.concurrent.duration.*
 object PayloadAuditConsumer:
   private val log = StructuredLogger(getClass)
   private val StreamName = "proxy.payload_audit"
+  private val MaxRetries = 3
+  private val RetryDelay = 500.millis
 
   def stream(
       cfg: KafkaCfg,
@@ -41,15 +48,20 @@ object PayloadAuditConsumer:
     Stream
       .eval(
         KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic) *>
-          KafkaComponents.waitForTopic(cfg, cfg.payloadAuditTopic + cfg.dlqSuffix)
+          KafkaComponents
+            .waitForTopic(cfg, cfg.payloadAuditTopic + cfg.dlqSuffix)
       )
-      .flatMap(_ =>
-        Stream.resource(KafkaConsumer.resource(consumerSettings))
-      )
+      .flatMap(_ => Stream.resource(KafkaConsumer.resource(consumerSettings)))
       .flatMap { consumer =>
         Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
           consumer.stream
-            .map(committable => (translateRecord(committable.record), committable.offset))
+            .map(committable =>
+              (
+                committable.record.value,
+                translateRecord(committable.record),
+                committable.offset
+              )
+            )
             .through(batchWrite(store, dlqProducer, cfg, metrics))
             .through(commitBatch)
       }
@@ -71,15 +83,20 @@ object PayloadAuditConsumer:
           val payloadRef = s"sha256://$payloadSha256"
 
           import io.circe.Json
-          val requestJson = Json.obj(
-            "stream_name" -> Json.fromString(StreamName),
-            "dedupe_key" -> Json.fromString(dedupeKey),
-            "payload_ref" -> Json.fromString(payloadRef),
-            "observed_at" -> Json.fromString(audit.observedAt)
-          ).noSpaces
+          val requestJson = Json
+            .obj(
+              "stream_name" -> Json.fromString(StreamName),
+              "dedupe_key" -> Json.fromString(dedupeKey),
+              "payload_ref" -> Json.fromString(payloadRef),
+              "observed_at" -> Json.fromString(audit.observedAt)
+            )
+            .noSpaces
 
-          log.trace("payload_audit_ingest", "status" -> "received",
-            "payload_bytes" -> payloadBytes.length.toString)
+          log.trace(
+            "payload_audit_ingest",
+            "status" -> "received",
+            "payload_bytes" -> payloadBytes.length.toString
+          )
 
           val source = ScanRequestRecord(
             requestJson = requestJson,
@@ -89,48 +106,153 @@ object PayloadAuditConsumer:
             observedAt = audit.observedAt,
             payloadRef = payloadRef
           )
-          ResolvedScanRequestRecord.from(source, rawJson)
-            .leftMap(error => PayloadAuditError.InvalidPayload(rawJson, errorMessage(error)))
+          ResolvedScanRequestRecord
+            .from(source, rawJson)
+            .leftMap(error =>
+              PayloadAuditError.InvalidPayload(rawJson, errorMessage(error))
+            )
 
   private def batchWrite(
       store: IngestionStore[IO],
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
       metrics: CoordinatorMetrics
-  ): fs2.Pipe[IO, (Either[PayloadAuditError, ResolvedScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
+  ): fs2.Pipe[
+    IO,
+    (
+        String,
+        Either[PayloadAuditError, ResolvedScanRequestRecord],
+        CommittableOffset[IO]
+    ),
+    CommittableOffset[IO]
+  ] =
     _.groupWithin(cfg.maxPollRecords, 1.second)
       .evalTap { chunk =>
-        val validRecords = chunk.collect { case (Right(r), _) => r }.toList
-        val invalidBatch = chunk.collect { case (Left(e), _) => e }.toList
+        val validRecords = chunk.collect { case (_, Right(r), _) => r }.toList
+        val invalidBatch = chunk.collect { case (_, Left(e), _) => e }.toList
+        val validWithRaw = chunk.collect { case (raw, Right(r), _) =>
+          (raw, r)
+        }.toList
 
         val dlqAction = invalidBatch.traverse_ { err =>
           publishDlq(dlqProducer, cfg, err)
         }
 
-        val writeAction = if validRecords.nonEmpty then store.recordScanRequests(validRecords).value.flatMap {
-            case Right(count) =>
-              IO(metrics.recordPayloadAuditIngested(count))
-            case Left(dbErr) =>
-              val sanitized = ErrorSanitizer.sanitize(dbErr.message)
-              IO(log.error("payload_audit_ingest", "status" -> "failed",
-                "operation" -> dbErr.operation, "error" -> sanitized)) *>
-                IO.raiseError(new RuntimeException(
-                  s"${dbErr.operation}: ${dbErr.message}", dbErr.cause))
-          }
+        val writeAction = if validRecords.nonEmpty then
+          retryBatchWrite(
+            store,
+            dlqProducer,
+            cfg,
+            metrics,
+            validRecords,
+            validWithRaw
+          )
         else IO.unit
 
         dlqAction *> writeAction
       }
       .flatMap { chunk =>
-        Stream.emits(chunk.map(_._2).toList)
+        Stream.emits(chunk.map(_._3).toList)
       }
+
+  private def retryBatchWrite(
+      store: IngestionStore[IO],
+      dlqProducer: KafkaProducer[IO, String, String],
+      cfg: KafkaCfg,
+      metrics: CoordinatorMetrics,
+      validRecords: List[ResolvedScanRequestRecord],
+      validWithRaw: List[(String, ResolvedScanRequestRecord)],
+      remaining: Int = MaxRetries
+  ): IO[Unit] =
+    store.recordScanRequests(validRecords).value.flatMap {
+      case Right(count) =>
+        IO(metrics.recordPayloadAuditIngested(count))
+      case Left(dbErr) if remaining > 1 && isRetryableDbError(dbErr) =>
+        IO(
+          log.warn(
+            "payload_audit_ingest",
+            "status" -> "retry",
+            "attempts_remaining" -> (remaining - 1).toString,
+            "operation" -> dbErr.operation,
+            "error" -> ErrorSanitizer.sanitize(dbErr.message)
+          )
+        ) *>
+          IO.sleep(RetryDelay * (1L << (MaxRetries - remaining))) *>
+          retryBatchWrite(
+            store,
+            dlqProducer,
+            cfg,
+            metrics,
+            validRecords,
+            validWithRaw,
+            remaining - 1
+          )
+      case Left(dbErr) =>
+        val sanitized = ErrorSanitizer.sanitize(dbErr.message)
+        IO(
+          log.error(
+            "payload_audit_ingest",
+            "status" -> "dlq",
+            "operation" -> dbErr.operation,
+            "error" -> sanitized
+          )
+        ) *>
+          validWithRaw
+            .traverse_ { (raw, _) =>
+              publishRecordDlq(
+                dlqProducer,
+                cfg,
+                raw,
+                dbErr.operation,
+                sanitized
+              )
+            }
+            .handleErrorWith { publishError =>
+              IO(
+                log.error(
+                  "payload_audit_ingest",
+                  "status" -> "dlq_publish_failed",
+                  "error" -> ErrorSanitizer
+                    .sanitize(ErrorSanitizer.message(publishError))
+                )
+              ) *>
+                IO.raiseError(publishError)
+            }
+    }
+
+  private def isRetryableDbError(error: DatabaseError): Boolean =
+    error match
+      case _: DatabaseError.Retryable => true
+      case _: DatabaseError.Permanent => false
+
+  private def publishRecordDlq(
+      dlqProducer: KafkaProducer[IO, String, String],
+      cfg: KafkaCfg,
+      rawJson: String,
+      operation: String,
+      errorMsg: String
+  ): IO[Unit] =
+    val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
+    val original =
+      circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
+    val dlqValue = Json
+      .obj(
+        "original" -> original,
+        "error" -> Json.fromString(s"db_error[$operation]: $errorMsg"),
+        "operation" -> Json.fromString(operation)
+      )
+      .noSpaces
+    val record = ProducerRecord(dlqTopic, null: String, dlqValue)
+    dlqProducer.produce(ProducerRecords.one(record)).flatten.void
 
   private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =
     _.groupWithin(500, 15.seconds)
       .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
 
   private def errorMessage(error: Throwable): String =
-    Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
+    Option(error.getMessage)
+      .filter(_.nonEmpty)
+      .getOrElse(error.getClass.getSimpleName)
 
   private def publishDlq(
       dlqProducer: KafkaProducer[IO, String, String],
@@ -138,18 +260,24 @@ object PayloadAuditConsumer:
       err: PayloadAuditError
   ): IO[Unit] =
     err match
-      case PayloadAuditError.EmptyMessage => IO.unit
+      case PayloadAuditError.EmptyMessage                      => IO.unit
       case PayloadAuditError.InvalidPayload(rawJson, errorMsg) =>
         val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
-        val original = circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
-        val dlqValue = Json.obj(
-          "original" -> original,
-          "error" -> Json.fromString(errorMsg.replace('\n', ' ').replace('\r', ' '))
-        ).noSpaces
+        val original =
+          circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
+        val dlqValue = Json
+          .obj(
+            "original" -> original,
+            "error" -> Json.fromString(
+              errorMsg.replace('\n', ' ').replace('\r', ' ')
+            )
+          )
+          .noSpaces
         val record = ProducerRecord(dlqTopic, null, dlqValue)
         dlqProducer.produce(ProducerRecords.one(record)).flatten.void
 
 sealed trait PayloadAuditError
 object PayloadAuditError:
   case object EmptyMessage extends PayloadAuditError
-  final case class InvalidPayload(rawJson: String, error: String) extends PayloadAuditError
+  final case class InvalidPayload(rawJson: String, error: String)
+      extends PayloadAuditError

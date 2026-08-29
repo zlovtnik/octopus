@@ -46,7 +46,7 @@ The currently wired binary provides:
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
   and every PostgreSQL durable operation, with error recording and bounded SDK shutdown.
 
-All 26 Octopus-owned processor IDs have exactly one workload declaration and
+All 34 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
 
 ## Components
@@ -76,11 +76,11 @@ The machine-readable source of truth is
 [`sql/postgres/contracts/processors.json`](../../sql/postgres/contracts/processors.json).
 Every entry declares its owner, family, mode, inputs, outputs, dependencies,
 dedupe key, lease scope, terminal behavior, reconciliation policy, and default
-state. All 28 entries default to disabled.
+state. All 36 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 26 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `embedding-preparer`, `embedding-text-builder`, `behavior-projector`, `timing-projector`, `baseline-projector`, `sequence-projector`, `graph-projector`, `similarity-projector`, `clustering-projector`, `dns-alert-projector`, `rf-alert-projector`, `risk-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 34 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `payload-audit-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-backlog-save`, `wireless-backlog-list`, `wireless-backlog-synced`, `wireless-backlog-prune`, `wireless-mac-lookup`, `wireless-networks-authorized`, `wireless-probe-flush`, `embedding-preparer`, `embedding-text-builder`, `behavior-projector`, `timing-projector`, `baseline-projector`, `sequence-projector`, `graph-projector`, `similarity-projector`, `clustering-projector`, `dns-alert-projector`, `rf-alert-projector`, `risk-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
 There is no Rails/console processor family. The `integration_console` database
@@ -187,7 +187,7 @@ mounted in Octopus. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and invalid consumer-group contracts.
 
 The checked-in Kubernetes deployment enables both runtime lanes, archival, and
-all 26 Octopus-owned processors. A new consumer group replays every retained
+all 34 Octopus-owned processors. A new consumer group replays every retained
 record; an existing group resumes from its committed Kafka offsets. Rollback
 must preserve consumer offsets, schemas, and ingestion evidence.
 

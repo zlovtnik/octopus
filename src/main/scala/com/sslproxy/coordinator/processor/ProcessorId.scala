@@ -27,9 +27,17 @@ enum ProcessorId(
   case SyncLoadConsumer extends ProcessorId("sync-load-consumer", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case SyncResultConsumer extends ProcessorId("sync-result-consumer", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case SyncOutboxPublisher extends ProcessorId("sync-outbox-publisher", ProcessorOwner.Octopus, ProcessorFamily.Sync)
+  case PayloadAuditIngestion extends ProcessorId("payload-audit-ingestion", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case WirelessFrameNormalizer extends ProcessorId("wireless-frame-normalizer", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessInventoryProjector extends ProcessorId("wireless-inventory-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessIdentityProjector extends ProcessorId("wireless-identity-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBacklogSave extends ProcessorId("wireless-backlog-save", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBacklogList extends ProcessorId("wireless-backlog-list", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBacklogSynced extends ProcessorId("wireless-backlog-synced", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBacklogPrune extends ProcessorId("wireless-backlog-prune", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessMacLookup extends ProcessorId("wireless-mac-lookup", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessNetworksAuthorized extends ProcessorId("wireless-networks-authorized", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessProbeFlush extends ProcessorId("wireless-probe-flush", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case EmbeddingPreparer extends ProcessorId("embedding-preparer", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
   case EmbeddingCompleter extends ProcessorId("embedding-completer", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
   case EmbeddingLeaseRecovery extends ProcessorId("embedding-lease-recovery", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
@@ -84,9 +92,17 @@ object ProcessorCatalog:
     continuous(ProcessorId.SyncLoadConsumer, List("sync.oracle.load"), List("domain tables", "sync.oracle.result"), List(ProcessorId.SyncOutboxPublisher), "batch_id/attempt", "kafka partition", "sync result failure", "batch checksum"),
     continuous(ProcessorId.SyncResultConsumer, List("sync.oracle.result"), List("sync_jobs", "sync_batches", "sync_cursors"), List(ProcessorId.SyncLoadConsumer), "batch_id/attempt", "kafka partition", "terminal job failure", "batch/cursor scan"),
     continuous(ProcessorId.SyncOutboxPublisher, List("outbox_events"), List("Redpanda"), List(ProcessorId.SyncLoadDispatch), "destination_topic/message_key", "outbox row", "park exhausted publication", "publish-attempt audit"),
+    continuous(ProcessorId.PayloadAuditIngestion, List("payload.audit.ingest"), List("ingestion scan_requests"), List(ProcessorId.SyncScanIngestion), "group/topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
     continuous(ProcessorId.WirelessFrameNormalizer, List("wireless.audit"), List("wireless normalized tables"), List(ProcessorId.SyncLoadConsumer), "event_id", "wireless event", "park invalid frame", "source/frame checksum"),
     periodic(ProcessorId.WirelessInventoryProjector, List("wireless normalized tables"), List("device/client/sensor inventory"), List(ProcessorId.WirelessFrameNormalizer), "device/window", "inventory key", "record reconciliation finding", "inventory rebuild"),
     periodic(ProcessorId.WirelessIdentityProjector, List("inventory", "similarity evidence"), List("identity projections"), List(ProcessorId.WirelessInventoryProjector, ProcessorId.SimilarityProjector), "identity/source", "identity key", "record reconciliation finding", "identity rebuild"),
+    continuous(ProcessorId.WirelessBacklogSave, List("wireless.backlog.save"), List("wireless backlog table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessBacklogList, List("wireless.backlog.list"), List("wireless backlog table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessBacklogSynced, List("wireless.backlog.synced"), List("wireless backlog table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessBacklogPrune, List("wireless.backlog.prune"), List("wireless backlog table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessMacLookup, List("wireless.mac.lookup"), List("wireless device table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessNetworksAuthorized, List("wireless.networks.authorized"), List("wireless networks table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
+    continuous(ProcessorId.WirelessProbeFlush, List("wireless.probe.flush"), List("wireless probe table"), Nil, "topic/partition/offset", "kafka partition", "DLQ invalid records", "bounded offset audit"),
     periodic(ProcessorId.EmbeddingPreparer, List("search documents"), List("embedding_jobs"), List(ProcessorId.EmbeddingTextBuilder), "document/model/kind/checksum", "embedding job", "park invalid source", "missing-job scan"),
     continuous(ProcessorId.EmbeddingCompleter, List("embedding_jobs"), List("search_vectors"), List(ProcessorId.EmbeddingPreparer), "job_id/model/fence", "embedding job", "bounded retry/DLQ", "source/vector checksum"),
     continuous(ProcessorId.EmbeddingLeaseRecovery, List("expired embedding leases"), List("embedding_jobs"), List(ProcessorId.EmbeddingCompleter), "job_id/attempt/fence", "embedding job", "fail exhausted job", "lease expiry scan"),

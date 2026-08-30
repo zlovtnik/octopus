@@ -6,8 +6,8 @@ monotonic cursors, job and batch state, fenced outbox publication, PostgreSQL lo
 results, wireless normalization inputs, and maintained projections. Embedding
 execution and vector writes belong to Atheros Search.
 
-All runtime lanes are disabled by default. PostgreSQL and MongoDB are not
-runtime fallbacks.
+All runtime lanes are disabled by default. PostgreSQL is the only stack
+runtime database; MongoDB is not a fallback.
 
 ## Current runtime
 
@@ -20,7 +20,8 @@ The currently wired binary provides:
 - PostgreSQL load work on `sync.oracle.load` and outcomes on
   `sync.oracle.result`;
 - durable jobs, batches, cursors, outbox leases, retry state, and DLQ handling;
-- payload-audit ingestion;
+- `proxy.payload_audit` ingestion into scan requests, with invalid payloads and
+  exhausted database writes parked on `proxy.payload_audit.dlq`;
 - all seven wireless operations: backlog save, oldest-100 pending list,
   idempotent mark-synced, seven-day prune, MAC lookup, authorized-network
   lookup, and probe flush;
@@ -54,6 +55,8 @@ remain disabled by default.
 | Package | Responsibility |
 |---|---|
 | `config` | PureConfig model, environment overrides, and fail-closed validation |
+| `ingest` | Scan-request hydration and `proxy.payload_audit` consumption |
+| `domain` | Scan request, load, payload-audit, and broker metadata types |
 | `kafka` | Locked consumers, committed-offset restart, DLQ conversion, and wireless handlers |
 | `postgres` | Repository implementations, transaction retry, transforms, checksums, schema preflight, and typed batch sinks |
 | `postgres.sql` | Named JDBC SQL constants and total parameterized query builders |
@@ -106,6 +109,18 @@ Additional currently consumed topics are `proxy.payload_audit`,
 Request/reply destinations are validated before
 publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 
+`payload-audit-ingestion` translates each `proxy.payload_audit` record into a
+scan request keyed by `stream_name/payload_sha256`. Empty messages are skipped.
+Invalid JSON is published to `proxy.payload_audit.dlq`. Retryable PostgreSQL
+writes retry up to three times with exponential backoff; a permanent error or
+exhausted retry parks the original record on the same DLQ. The consumer then
+commits the offset so poison does not redeliver forever.
+
+Hydration and load planning use the configured ingest stream names (defaults
+include `proxy.events`, `wireless.audit`, wireless alerts, and
+`proxy.payload_audit`). Override with `SYNC_STREAM_NAMES` /
+`COORDINATOR_STREAM_NAMES` and `COORDINATOR_LOAD_STREAM_NAMES`.
+
 ## Persistence and delivery guarantees
 
 - Delivery is at least once from each consumer group's committed Kafka offset;
@@ -157,9 +172,9 @@ Important gates:
 |---|---|---|
 | `POSTGRES_ENABLED` | `false` | Enables PostgreSQL after TLS, least-privilege, and schema validation |
 | `POSTGRES_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
-| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables Kafka consumers using durable committed offsets |
-| `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane |
-| `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs |
+| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `payload-audit-ingestion` and the seven wireless request/reply consumers. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
+| `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane (cron, projections, retention, and support streams) |
+| `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs for the processor catalog. If this list is non-empty while consumers are enabled, it must include the three locked consumers. |
 | `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Initial retry delay |
 | `OCTOPUS_PROCESSOR_RESTART_MAX_DELAY_MS` | `30000` | Maximum retry delay |
 | `OCTOPUS_PROCESSOR_BATCH_SIZE` | `250` | Bound for normalized projection and search-preparation passes |
@@ -186,10 +201,16 @@ Kustomize sets `verify-full` with the PgBouncer listener CA and
 mounted in Octopus. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and invalid consumer-group contracts.
 
-The checked-in Kubernetes deployment enables both runtime lanes, archival, and
-all 34 Octopus-owned processors. A new consumer group replays every retained
-record; an existing group resumes from its committed Kafka offsets. Rollback
-must preserve consumer offsets, schemas, and ingestion evidence.
+The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
+`OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
+processor catalog lists the 26 periodic/locked-load processors; the remaining
+eight Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
+is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
+is all 34 Octopus-owned processors.
+
+A new consumer group replays every retained record; an existing group resumes
+from its committed Kafka offsets. Rollback must preserve consumer offsets,
+schemas, and ingestion evidence.
 
 ## Health and diagnosis
 

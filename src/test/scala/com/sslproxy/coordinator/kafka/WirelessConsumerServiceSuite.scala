@@ -12,9 +12,13 @@ class WirelessConsumerServiceSuite extends FunSuite:
 
   test("wireless backlog identity requires non-empty dedupe and stream keys") {
     assert(WirelessConsumerService.parseBacklogIdentity("{}").isLeft)
-    assert(WirelessConsumerService.parseBacklogIdentity(
-      """{"dedupe_key":"","stream_name":"wireless.audit"}"""
-    ).isLeft)
+    assert(
+      WirelessConsumerService
+        .parseBacklogIdentity(
+          """{"dedupe_key":"","stream_name":"wireless.audit"}"""
+        )
+        .isLeft
+    )
     val parsed = WirelessConsumerService.parseBacklogIdentity(
       """{"dedupe_key":"frame-1","stream_name":"wireless.audit","payload":{"x":1}}"""
     )

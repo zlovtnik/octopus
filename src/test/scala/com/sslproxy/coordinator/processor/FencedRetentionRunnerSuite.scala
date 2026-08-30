@@ -106,10 +106,10 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       assertEquals(releases, 1)
 
   private final class TestMaintenanceStore(
-      val finishes: Ref[IO, List[(String, RetentionCounts)]],
-      val releases: Ref[IO, Int],
-      val renewals: Ref[IO, Int],
-      renewedRows: Int
+    val finishes: Ref[IO, List[(String, RetentionCounts)]],
+    val releases: Ref[IO, Int],
+    val renewals: Ref[IO, Int],
+    renewedRows: Int
   ) extends MaintenanceStore[IO]:
     private val lease = Lease(
       "maintenance/event-retention",
@@ -129,60 +129,60 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       right(())
 
     def claimLease(
-        resourceType: String,
-        resourceId: String,
-        ownerId: String,
-        token: String,
-        ttlSeconds: Int
+      resourceType: String,
+      resourceId: String,
+      ownerId: String,
+      token: String,
+      ttlSeconds: Int
     ): DbResultT[IO, Option[Lease]] = right(Some(lease.copy(ownerId = ownerId, token = token)))
 
     def releaseLease(resourceType: String, resourceId: String, lease: Lease): DbResultT[IO, Int] =
       EitherT.liftF(releases.update(_ + 1).as(1))
 
     def renewLease(
-        resourceType: String,
-        resourceId: String,
-        lease: Lease,
-        ttlSeconds: Int
+      resourceType: String,
+      resourceId: String,
+      lease: Lease,
+      ttlSeconds: Int
     ): DbResultT[IO, Int] = EitherT.liftF(renewals.update(_ + 1).as(renewedRows))
 
     def startRetentionRun(
-        runId: String,
-        policyName: String,
-        targetTable: String,
-        cutoff: Instant,
-        lease: Lease
+      runId: String,
+      policyName: String,
+      targetTable: String,
+      cutoff: Instant,
+      lease: Lease
     ): DbResultT[IO, Int] = right(1)
 
     def finishRetentionRun(
-        runId: String,
-        status: String,
-        rowsSelected: Long,
-        rowsArchived: Long,
-        rowsDeleted: Long,
-        error: Option[String]
+      runId: String,
+      status: String,
+      rowsSelected: Long,
+      rowsArchived: Long,
+      rowsDeleted: Long,
+      error: Option[String]
     ): DbResultT[IO, Int] =
       EitherT.liftF(
         finishes.update(_ :+ (status -> RetentionCounts(rowsSelected, rowsArchived, rowsDeleted))).as(1)
       )
 
     def retainArchivedEvents(
-        retentionDays: Int,
-        tombstoneDays: Int,
-        limit: Int,
-        resourceType: String,
-        resourceId: String,
-        lease: Lease
+      retentionDays: Int,
+      tombstoneDays: Int,
+      limit: Int,
+      resourceType: String,
+      resourceId: String,
+      lease: Lease
     ): DbResultT[IO, (Long, Long)] = right(0L -> 0L)
 
     def pruneExpiredTombstones(limit: Int): DbResultT[IO, Int] = right(0)
 
     def retainSearchDocuments(
-        retentionDays: Int,
-        limit: Int,
-        resourceType: String,
-        resourceId: String,
-        lease: Lease
+      retentionDays: Int,
+      limit: Int,
+      resourceType: String,
+      resourceId: String,
+      lease: Lease
     ): DbResultT[IO, (Long, Long)] = right(0L -> 0L)
 
     def cleanupStaleWorkers(limit: Int): DbResultT[IO, Int] = right(0)

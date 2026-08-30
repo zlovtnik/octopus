@@ -1,19 +1,19 @@
 package com.sslproxy.coordinator.postgres
 
 final case class LeaseIdentity(
-    ownerId: String,
-    token: String,
-    fence: Long
+  ownerId: String,
+  token: String,
+  fence: Long
 )
 
 final case class OutboxRecord(
-    outboxId: String,
-    destinationTopic: String,
-    messageKey: String,
-    payload: String,
-    attemptCount: Int,
-    maxAttempts: Int,
-    lease: LeaseIdentity
+  outboxId: String,
+  destinationTopic: String,
+  messageKey: String,
+  payload: String,
+  attemptCount: Int,
+  maxAttempts: Int,
+  lease: LeaseIdentity
 )
 
 enum OutboxFailureDisposition:

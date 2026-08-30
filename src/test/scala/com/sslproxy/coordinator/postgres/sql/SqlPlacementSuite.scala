@@ -28,12 +28,14 @@ class SqlPlacementSuite extends FunSuite:
     else if !Files.isDirectory(path) then Nil
     else
       val stream = Files.walk(path)
-      try stream.iterator.asScala.filter(value => Files.isRegularFile(value) && value.toString.endsWith(".scala")).toList
+      try
+        stream.iterator.asScala.filter(value => Files.isRegularFile(value) && value.toString.endsWith(".scala")).toList
       finally stream.close()
 
   private def serviceRoot: Path =
     val current = Paths.get("").toAbsolutePath.normalize
-    Iterator.iterate(current)(_.getParent)
+    Iterator
+      .iterate(current)(_.getParent)
       .takeWhile(_ != null)
       .find(path => Files.isRegularFile(path.resolve("build.sbt")))
       .getOrElse(fail(s"could not locate Octopus service root from $current"))

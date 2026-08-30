@@ -472,9 +472,13 @@ object AppConfig:
       ProcessorId.SyncLoadConsumer,
       ProcessorId.SyncResultConsumer
     )
-    val enabledLockedConsumers =
+    val enabledProcessorIds =
       config.processors.enabled
         .flatMap(ProcessorId.fromString(_).toOption)
+    val enabledConsumerProcessors =
+      enabledProcessorIds.filter(ProcessorId.kafkaConsumers.contains)
+    val enabledLockedConsumers =
+      enabledProcessorIds
         .filter(lockedConsumerProcessorIds.contains)
     val missingLockedConsumers =
       lockedConsumerProcessorIds -- enabledLockedConsumers.toSet
@@ -482,8 +486,8 @@ object AppConfig:
       Option.when(!config.postgres.enabled)(
         "an enabled runtime requires postgres.enabled=true"
       ),
-      Option.when(enabledLockedConsumers.nonEmpty && !config.runtime.consumersEnabled)(
-        s"locked-consumer processors ${enabledLockedConsumers.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"
+      Option.when(enabledConsumerProcessors.nonEmpty && !config.runtime.consumersEnabled)(
+        s"consumer processors ${enabledConsumerProcessors.map(_.value).mkString(", ")} require runtime.consumers-enabled=true"
       ),
       Option.when(
         config.runtime.consumersEnabled &&

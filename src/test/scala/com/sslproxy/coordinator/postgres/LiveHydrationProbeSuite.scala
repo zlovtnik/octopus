@@ -15,22 +15,22 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
   test("reproduce production hydration candidates in an isolated scratch database"):
     if !sys.env.get("OCTOPUS_LIVE_HYDRATION_PROBE").contains("true") then
       IO(assume(false, "set OCTOPUS_LIVE_HYDRATION_PROBE=true to enable the live probe"))
-    else resources.use { case (dataSource, executor, sourceDatabase, scratchDatabase, cleanupAuthorized) =>
-      val xa = Transactor.fromDataSource[IO](
-        dataSource,
-        ExecutionContext.fromExecutorService(executor)
-      )
-      val repository = new PostgresRepository(xa)
+    else
+      resources.use { case (dataSource, executor, sourceDatabase, scratchDatabase, cleanupAuthorized) =>
+        val xa = Transactor.fromDataSource[IO](
+          dataSource,
+          ExecutionContext.fromExecutorService(executor)
+        )
+        val repository = new PostgresRepository(xa)
 
-      for
-        seeds <- IO.blocking(seedScratchTables(dataSource, sourceDatabase, scratchDatabase,
-              cleanupAuthorized))
-        results <- seeds.traverse { case (candidate, payload) =>
-          repository.hydrateExistingSyncEvent(candidate, payload)
-        }
-        failures = results.collect { case Left(error) => error.message }
-      yield assertEquals(failures, Nil)
-    }
+        for
+          seeds <- IO.blocking(seedScratchTables(dataSource, sourceDatabase, scratchDatabase, cleanupAuthorized))
+          results <- seeds.traverse { case (candidate, payload) =>
+            repository.hydrateExistingSyncEvent(candidate, payload)
+          }
+          failures = results.collect { case Left(error) => error.message }
+        yield assertEquals(failures, Nil)
+      }
 
   private def resources =
     Resource.make(IO.blocking {
@@ -57,8 +57,13 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
       config.setMaximumPoolSize(1)
       config.setMinimumIdle(1)
       config.setCatalog(scratchDatabase)
-      (new HikariDataSource(config), Executors.newSingleThreadExecutor(), database, scratchDatabase,
-        new java.util.concurrent.atomic.AtomicBoolean(false))
+      (
+        new HikariDataSource(config),
+        Executors.newSingleThreadExecutor(),
+        database,
+        scratchDatabase,
+        new java.util.concurrent.atomic.AtomicBoolean(false)
+      )
     }) { case (dataSource, executor, _, scratchDatabase, cleanupAuthorized) =>
       IO.blocking {
         try if cleanupAuthorized.get() then dropScratchTables(dataSource, scratchDatabase)
@@ -69,9 +74,9 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
     }
 
   private def seedScratchTables(
-      dataSource: HikariDataSource,
-      sourceDatabase: String,
-      scratchDatabase: String,
+    dataSource: HikariDataSource,
+    sourceDatabase: String,
+    scratchDatabase: String,
     cleanupAuthorized: java.util.concurrent.atomic.AtomicBoolean
   ): List[(SyncEventHydrationCandidate, String)] =
     val connection = dataSource.getConnection
@@ -146,8 +151,8 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
     finally connection.close()
 
   private def dropScratchTables(
-      dataSource: HikariDataSource,
-      scratchDatabase: String
+    dataSource: HikariDataSource,
+    scratchDatabase: String
   ): Unit =
     require(
       scratchDatabase.startsWith(ScratchDatabasePrefix),
@@ -185,6 +190,9 @@ class LiveHydrationProbeSuite extends CatsEffectSuite:
     finally statement.close()
 
   private def requiredEnv(name: String): String =
-    sys.env.get(name).filter(_.nonEmpty).getOrElse(
-      throw IllegalArgumentException(s"$name is required when OCTOPUS_LIVE_HYDRATION_PROBE=true")
-    )
+    sys.env
+      .get(name)
+      .filter(_.nonEmpty)
+      .getOrElse(
+        throw IllegalArgumentException(s"$name is required when OCTOPUS_LIVE_HYDRATION_PROBE=true")
+      )

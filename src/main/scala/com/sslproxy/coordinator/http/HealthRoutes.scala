@@ -13,10 +13,10 @@ import org.http4s.circe.*
 import scala.concurrent.duration.*
 
 class HealthRoutes(
-    transactor: PostgresTransactor,
-    metrics: CoordinatorMetrics,
-    processorReadiness: Option[ProcessorReadiness] = None,
-    databaseCheckTimeout: FiniteDuration = 5.seconds
+  transactor: PostgresTransactor,
+  metrics: CoordinatorMetrics,
+  processorReadiness: Option[ProcessorReadiness] = None,
+  databaseCheckTimeout: FiniteDuration = 5.seconds
 ):
 
   private def readinessResponse: IO[org.http4s.Response[IO]] =
@@ -61,7 +61,7 @@ class HealthRoutes(
 
 object HealthRoutes:
   private[http] def withTimeout(
-      healthCheck: IO[Boolean],
-      timeout: FiniteDuration
+    healthCheck: IO[Boolean],
+    timeout: FiniteDuration
   ): IO[Boolean] =
     healthCheck.timeoutTo(timeout, IO.pure(false)).handleError(_ => false)

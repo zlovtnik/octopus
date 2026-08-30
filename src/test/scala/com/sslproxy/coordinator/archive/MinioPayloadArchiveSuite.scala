@@ -30,8 +30,7 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
         validCandidate("invalid-key", "{}").copy(dedupeKey = "../escape")
       )
     )
-    assert(result.left.exists(_.isInstanceOf[IllegalArgumentException])
-    )
+    assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
 
   test("bucket provisioning ignores only a bucket already owned by this principal"):
     assert(MinioPayloadArchive.isBucketAlreadyOwnedByCaller("BucketAlreadyOwnedByYou"))
@@ -95,8 +94,7 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
 
   private def validCandidate(key: String, payload: String): ArchiveCandidate =
     ArchiveCandidate(
-      Sha256Utils.sha256Hex(
-      key.getBytes(StandardCharsets.UTF_8)),
+      Sha256Utils.sha256Hex(key.getBytes(StandardCharsets.UTF_8)),
       "wireless.audit",
       Timestamp.from(Instant.parse("2026-08-03T23:59:59Z")),
       payload,
@@ -104,22 +102,24 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
     )
 
   private final class MemoryStore(
-      state: Ref[IO, Map[String, StoredArchiveObject]],
-      puts: Ref[IO, Int],
-      corruptMetadata: Boolean
+    state: Ref[IO, Map[String, StoredArchiveObject]],
+    puts: Ref[IO, Int],
+    corruptMetadata: Boolean
   ) extends ArchiveObjectStore[IO]:
     def stat(objectKey: String): IO[Option[StoredArchiveObject]] =
       state.get.map(_.get(objectKey))
 
     def put(objectKey: String, bytes: Array[Byte], payloadSha256: String): IO[Unit] =
       puts.update(_ + 1) *>
-        state.update(_.updated(
-          objectKey,
-          StoredArchiveObject(
-            bytes.length.toLong,
-            Option.unless(corruptMetadata)(payloadSha256)
+        state.update(
+          _.updated(
+            objectKey,
+            StoredArchiveObject(
+              bytes.length.toLong,
+              Option.unless(corruptMetadata)(payloadSha256)
+            )
           )
-        ))
+        )
 
     def putCount: IO[Int] = puts.get
     def objects: IO[Map[String, StoredArchiveObject]] = state.get

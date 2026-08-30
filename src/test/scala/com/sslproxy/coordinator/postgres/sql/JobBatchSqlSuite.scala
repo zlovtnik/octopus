@@ -7,11 +7,13 @@ class JobBatchSqlSuite extends FunSuite:
     assertEquals(JobBatchSql.prepareLoadDispatch(Nil, 5, 100), None)
 
   test("load dispatch binds streams attempts and limits"):
-    val statement = JobBatchSql.prepareLoadDispatch(
-      List("proxy.events", "wireless.audit", "proxy.events", " "),
-      maxAttempts = 5,
-      limit = 100
-    ).getOrElse(fail("expected a statement"))
+    val statement = JobBatchSql
+      .prepareLoadDispatch(
+        List("proxy.events", "wireless.audit", "proxy.events", " "),
+        maxAttempts = 5,
+        limit = 100
+      )
+      .getOrElse(fail("expected a statement"))
 
     assert(statement.sql.contains("INSERT INTO outbox_events"))
     assert(statement.sql.contains("destination_topic"))

@@ -58,10 +58,10 @@ object JsonFields:
 
   /** Alias: try primary field, fall back to secondary. */
   def timestampAlias(
-      row: Json,
-      primary: String,
-      secondary: String,
-      context: String
+    row: Json,
+    primary: String,
+    secondary: String,
+    context: String
   ): OffsetDateTime =
     optionalTimestamp(row, primary)
       .orElse(optionalTimestamp(row, secondary))
@@ -73,10 +73,10 @@ object JsonFields:
 
   /** Alias: try primary field, fall back to secondary. */
   def stringAlias(
-      row: Json,
-      primary: String,
-      secondary: String,
-      context: String
+    row: Json,
+    primary: String,
+    secondary: String,
+    context: String
   ): String =
     optionalString(row, primary)
       .orElse(optionalString(row, secondary))
@@ -88,10 +88,10 @@ object JsonFields:
 
   /** Alias: try primary long, fall back to secondary. */
   def longAlias(
-      row: Json,
-      primary: String,
-      secondary: String,
-      context: String
+    row: Json,
+    primary: String,
+    secondary: String,
+    context: String
   ): Long =
     optionalLong(row, primary)
       .orElse(optionalLong(row, secondary))
@@ -107,7 +107,7 @@ object JsonFields:
       case _ =>
         row.hcursor.get[Long](field).toOption match
           case Some(v) if v != 0 => 1L
-          case _                 => 0L
+          case _ => 0L
 
   def boolValue(row: Json, field: String): Boolean =
     boolFlag(row, field) != 0L
@@ -115,13 +115,13 @@ object JsonFields:
   def nestedLong(row: Json, parent: String, field: String): Option[Long] =
     for
       parentObj <- row.hcursor.downField(parent).focus
-      value     <- parentObj.hcursor.get[Long](field).toOption
+      value <- parentObj.hcursor.get[Long](field).toOption
     yield value
 
   def nestedDouble(row: Json, parent: String, field: String): Option[Double] =
     for
       parentObj <- row.hcursor.downField(parent).focus
-      value     <- parentObj.hcursor.get[Double](field).toOption
+      value <- parentObj.hcursor.get[Double](field).toOption
     yield value
 
   def jsonArrayString(row: Json, field: String): Option[String] =

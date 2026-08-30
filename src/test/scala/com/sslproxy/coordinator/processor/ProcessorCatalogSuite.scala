@@ -13,8 +13,8 @@ class ProcessorCatalogSuite extends FunSuite:
     assertEquals(ids.distinct.size, ids.size)
   }
 
-  test("runtime ownership is exactly 26 Octopus and 2 Atheros Search processors") {
-    assertEquals(ProcessorId.octopusOwned.size, 26)
+  test("runtime ownership is exactly 34 Octopus and 2 Atheros Search processors") {
+    assertEquals(ProcessorId.octopusOwned.size, 34)
     assertEquals(ProcessorId.all.count(_.owner == ProcessorOwner.AtherosSearch), 2)
     assertEquals(
       ProcessorId.all.filter(_.owner == ProcessorOwner.AtherosSearch).map(_.value).toSet,
@@ -40,6 +40,14 @@ class ProcessorCatalogSuite extends FunSuite:
       assert(!contract.defaultEnabled, contract.id.value)
       contract.dependencies.foreach(dependency => assertNotEquals(dependency, contract.id))
     }
+  }
+
+  test("payload audit contract matches the content-addressed consumer") {
+    val contract = ProcessorCatalog.byId(ProcessorId.PayloadAuditIngestion)
+
+    assertEquals(contract.inputs, List("proxy.payload_audit"))
+    assertEquals(contract.dependencies, Nil)
+    assertEquals(contract.dedupeKey, "stream_name/payload_sha256")
   }
 
   test("shared manifest exactly matches runtime processor contracts") {
@@ -86,7 +94,8 @@ class ProcessorCatalogSuite extends FunSuite:
   }
 
   private def findRepositoryRoot(start: Path): Path =
-    Iterator.iterate(start)(_.getParent)
+    Iterator
+      .iterate(start)(_.getParent)
       .takeWhile(_ != null)
       .find(path => Files.exists(path.resolve("sql/postgres/contracts/manifest.yaml")))
       .getOrElse(fail(s"repository root not found from $start"))

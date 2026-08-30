@@ -9,16 +9,18 @@ class MaintenanceSqlSuite extends FunSuite:
     assert(statement.contains("status <> 'failed'"), statement)
 
   test("archive quarantine records a terminal event failure"):
-    val statement = MaintenanceSql.quarantineArchiveCandidate(
-      com.sslproxy.coordinator.postgres.ArchiveCandidate(
-        "00" * 32,
-        "wireless.audit",
-        java.sql.Timestamp.from(java.time.Instant.EPOCH),
-        "{}",
-        "11" * 32
-      ),
-      "hash mismatch"
-    ).sql
+    val statement = MaintenanceSql
+      .quarantineArchiveCandidate(
+        com.sslproxy.coordinator.postgres.ArchiveCandidate(
+          "00" * 32,
+          "wireless.audit",
+          java.sql.Timestamp.from(java.time.Instant.EPOCH),
+          "{}",
+          "11" * 32
+        ),
+        "hash mismatch"
+      )
+      .sql
 
     assert(statement.contains("status = 'failed'"), statement)
     assert(statement.contains("attempt_count = attempt_count + 1"), statement)

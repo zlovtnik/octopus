@@ -50,33 +50,34 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
       assertEquals(attempted, 2)
 
   test("unreadable outbox payload is quarantined without failing the backfill"):
-    IO.blocking(Files.createTempDirectory("octopus-hydration-quarantine-")).bracket { directory =>
-      for
-        quarantined <- Ref.of[IO, Vector[(String, String)]](Vector.empty)
-        semaphore <- Semaphore[IO](1)
-        candidate = SyncEventHydrationCandidate(
-          "missing-payload",
-          "proxy.events",
-          Timestamp.from(Instant.parse("2026-08-03T12:00:00Z")),
-          "outbox://missing.json",
-          None
-        )
-        store = new QuarantiningHydrationStore(candidate, quarantined)
-        service = new SyncEventHydrationService(
-          store,
-          new PostgresPayloadResolver(directory.toString),
-          new CoordinatorMetrics(SimpleMeterRegistry()),
-          pageSize = 10,
-          failureThreshold = 2,
-          semaphore
-        )
-        result <- service.runOnce.compile.drain.attempt
-        recorded <- quarantined.get
-      yield
-        assert(result.isRight)
-        assertEquals(recorded.map(_._1), Vector("missing-payload"))
-        assert(recorded.headOption.exists(_._2.contains("outbox payload read failed")))
-    }(directory => IO.blocking(Files.deleteIfExists(directory)).void)
+    IO.blocking(Files.createTempDirectory("octopus-hydration-quarantine-"))
+      .bracket { directory =>
+        for
+          quarantined <- Ref.of[IO, Vector[(String, String)]](Vector.empty)
+          semaphore <- Semaphore[IO](1)
+          candidate = SyncEventHydrationCandidate(
+            "missing-payload",
+            "proxy.events",
+            Timestamp.from(Instant.parse("2026-08-03T12:00:00Z")),
+            "outbox://missing.json",
+            None
+          )
+          store = new QuarantiningHydrationStore(candidate, quarantined)
+          service = new SyncEventHydrationService(
+            store,
+            new PostgresPayloadResolver(directory.toString),
+            new CoordinatorMetrics(SimpleMeterRegistry()),
+            pageSize = 10,
+            failureThreshold = 2,
+            semaphore
+          )
+          result <- service.runOnce.compile.drain.attempt
+          recorded <- quarantined.get
+        yield
+          assert(result.isRight)
+          assertEquals(recorded.map(_._1), Vector("missing-payload"))
+          assert(recorded.headOption.exists(_._2.contains("outbox payload read failed")))
+      }(directory => IO.blocking(Files.deleteIfExists(directory)).void)
 
   private final class FailingHydrationStore(
     candidates: List[SyncEventHydrationCandidate],
@@ -139,8 +140,8 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
     ): DbResultT[IO, Unit] = unused
 
   private final class QuarantiningHydrationStore(
-      candidate: SyncEventHydrationCandidate,
-      quarantined: Ref[IO, Vector[(String, String)]]
+    candidate: SyncEventHydrationCandidate,
+    quarantined: Ref[IO, Vector[(String, String)]]
   ) extends IngestionStore[IO]:
     private def unused[A]: DbResultT[IO, A] =
       throw UnsupportedOperationException("unused test store operation")

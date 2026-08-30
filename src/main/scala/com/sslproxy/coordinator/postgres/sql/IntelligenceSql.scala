@@ -1,18 +1,37 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-import com.sslproxy.coordinator.processor.{BaselineProjection, BehaviorSnapshotProjection, FrameToken, ProjectionFrame, SequenceProjection, SimilarityCandidate, SimilarityProjection, TimingProfileProjection}
+import com.sslproxy.coordinator.processor.{
+  BaselineProjection,
+  BehaviorSnapshotProjection,
+  FrameToken,
+  ProjectionFrame,
+  SequenceProjection,
+  SimilarityCandidate,
+  SimilarityProjection,
+  TimingProfileProjection
+}
 import doobie.{ConnectionIO, Fragment, Query0}
 import doobie.implicits.*
 
 object IntelligenceSql:
   enum VectorKind(val table: String, val index: String, val embeddingKind: String, val pairKind: String):
-    case Event extends VectorKind("search_vectors_event",
-          "search_vectors_event_embedding_hnsw_idx", "event", "event_event")
-    case Behaviour extends VectorKind("search_vectors_behaviour",
-          "search_vectors_behaviour_embedding_hnsw_idx", "behaviour", "device_device")
-    case Sequence extends VectorKind("search_vectors_sequence",
-          "search_vectors_sequence_embedding_hnsw_idx", "sequence", "sequence_sequence")
+    case Event
+        extends VectorKind("search_vectors_event", "search_vectors_event_embedding_hnsw_idx", "event", "event_event")
+    case Behaviour
+        extends VectorKind(
+          "search_vectors_behaviour",
+          "search_vectors_behaviour_embedding_hnsw_idx",
+          "behaviour",
+          "device_device"
+        )
+    case Sequence
+        extends VectorKind(
+          "search_vectors_sequence",
+          "search_vectors_sequence_embedding_hnsw_idx",
+          "sequence",
+          "sequence_sequence"
+        )
 
   private val FrameColumnsFragment: Fragment = Fragment.const(
     "frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id, frame.observed_at, " +
@@ -140,8 +159,7 @@ object IntelligenceSql:
            WHERE radio.signal_dbm IS NOT NULL
            ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key""".query[(String, Double)]
 
-  def annReady(
-      kind: VectorKind): Query0[Boolean] =
+  def annReady(kind: VectorKind): Query0[Boolean] =
     sql"""SELECT
              EXISTS (
                SELECT 1
@@ -153,7 +171,7 @@ object IntelligenceSql:
              )""".query[Boolean]
 
   def similarityAnchors(
-      kind: VectorKind,
+    kind: VectorKind,
     limit: Int
   ): Query0[(Long, String, String, String)] =
     val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
@@ -168,8 +186,8 @@ object IntelligenceSql:
     anchorDocumentId: String,
     anchorEmbeddingModel: String,
     anchorEmbedding: String,
-      maximumDistance: Double,
-      limit: Int
+    maximumDistance: Double,
+    limit: Int
   ): Query0[SimilarityCandidate] =
     val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
     val pairKind = kind.pairKind

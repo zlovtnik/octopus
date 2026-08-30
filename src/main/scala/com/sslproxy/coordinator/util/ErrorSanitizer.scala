@@ -16,7 +16,5 @@ object ErrorSanitizer:
     val withoutControls = ControlCharacters.replaceAllIn(Option(value).getOrElse(""), "")
     val withoutUserinfo = UriUserinfo.replaceAllIn(withoutControls, "://[REDACTED]@")
     val withoutBearer = BearerToken.replaceAllIn(withoutUserinfo, m => s"${m.group(1)}[REDACTED]")
-    val redacted = SecretAssignment.replaceAllIn(withoutBearer, matched =>
-      s"${matched.group(1)}=[REDACTED]"
-    )
+    val redacted = SecretAssignment.replaceAllIn(withoutBearer, matched => s"${matched.group(1)}=[REDACTED]")
     RepeatedWhitespace.replaceAllIn(redacted, " ").trim.take(MaximumLength)

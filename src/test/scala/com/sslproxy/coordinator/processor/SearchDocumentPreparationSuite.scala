@@ -29,21 +29,33 @@ class SearchDocumentPreparationSuite extends FunSuite:
     assertEquals(first, second)
     val document = first.fold(fail(_), identity)
     assertEquals(document.normalizedText, "example wifi probe_request example")
-    assertEquals(document.tokens, List(
-      ("example", 0.5d, 2),
-      ("probe_request", 0.25d, 1),
-      ("wifi", 0.25d, 1)
-    ))
+    assertEquals(
+      document.tokens,
+      List(
+        ("example", 0.5d, 2),
+        ("probe_request", 0.25d, 1),
+        ("wifi", 0.25d, 1)
+      )
+    )
     assertEquals(document.normalizedSha256.length, 64)
-    assertEquals(document.tags.map(_._1), List(
-      "bssid", "frame_subtype", "location_id", "sensor_id", "source_mac", "ssid"
-    ))
+    assertEquals(
+      document.tags.map(_._1),
+      List(
+        "bssid",
+        "frame_subtype",
+        "location_id",
+        "sensor_id",
+        "source_mac",
+        "ssid"
+      )
+    )
 
   test("blank content is rejected without side effects"):
     assert(SearchDocumentPreparation.prepare(source.copy(searchText = "  ")).isLeft)
 
   test("document identifiers are isolated by source table"):
     val event = SearchDocumentPreparation.prepare(source).fold(fail(_), identity)
-    val device = SearchDocumentPreparation.prepare(source.copy(kind = SearchDocumentKind.Device)).fold(fail(_), identity)
+    val device =
+      SearchDocumentPreparation.prepare(source.copy(kind = SearchDocumentKind.Device)).fold(fail(_), identity)
 
     assertNotEquals(event.documentId, device.documentId)

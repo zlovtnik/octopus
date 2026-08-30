@@ -9,10 +9,10 @@ import java.time.Instant
 
 final class PostgresWirelessStore(repository: PostgresRepository) extends WirelessStore[IO]:
   def saveBacklog(
-      dedupeKey: String,
-      streamName: String,
-      payload: Json,
-      failureStage: String
+    dedupeKey: String,
+    streamName: String,
+    payload: Json,
+    failureStage: String
   ): DbResultT[IO, Unit] =
     EitherT(repository.saveWirelessBacklog(dedupeKey, streamName, payload, failureStage))
 

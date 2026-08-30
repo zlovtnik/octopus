@@ -33,17 +33,19 @@ final class PostgresProjectionStore(repository: PostgresRepository) extends Proj
     EitherT(repository.projectBaselines(limit))
 
   def projectSimilarities(
-      limit: Int,
-      eventDuplicateDistance: Double,
-      behaviorSimilarityThreshold: Double,
-      sequenceDistanceThreshold: Double
+    limit: Int,
+    eventDuplicateDistance: Double,
+    behaviorSimilarityThreshold: Double,
+    sequenceDistanceThreshold: Double
   ): DbResultT[IO, Int] =
-    EitherT(repository.projectSimilarities(
-      limit,
-      eventDuplicateDistance,
-      behaviorSimilarityThreshold,
-      sequenceDistanceThreshold
-    ))
+    EitherT(
+      repository.projectSimilarities(
+        limit,
+        eventDuplicateDistance,
+        behaviorSimilarityThreshold,
+        sequenceDistanceThreshold
+      )
+    )
 
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[IO, Int] =
     EitherT(repository.projectClusterCandidates(limit, minimumSimilarity))

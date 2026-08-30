@@ -14,7 +14,8 @@ object CoordinatorTracing:
   val resource: Resource[IO, Unit] =
     Resource.make {
       IO.blocking(
-        AutoConfiguredOpenTelemetrySdk.builder()
+        AutoConfiguredOpenTelemetrySdk
+          .builder()
           .setResultAsGlobal()
           .build()
           .getOpenTelemetrySdk
@@ -27,12 +28,14 @@ object CoordinatorTracing:
     }.void
 
   def span[A](
-      name: String,
-      kind: SpanKind,
-      attributes: (String, String)*
+    name: String,
+    kind: SpanKind,
+    attributes: (String, String)*
   )(operation: IO[A]): IO[A] =
     IO {
-      val builder = GlobalOpenTelemetry.get().getTracer(InstrumentationName)
+      val builder = GlobalOpenTelemetry
+        .get()
+        .getTracer(InstrumentationName)
         .spanBuilder(name)
         .setSpanKind(kind)
       attributes.foreach { (key, value) =>
@@ -40,13 +43,15 @@ object CoordinatorTracing:
       }
       builder.startSpan()
     }.flatMap { span =>
-      operation.onError { case error =>
-        IO {
-          val _ = span.recordException(error)
-          val _ = span.setStatus(
-            StatusCode.ERROR,
-            Option(error.getMessage).getOrElse(error.getClass.getName)
-          )
+      operation
+        .onError { case error =>
+          IO {
+            val _ = span.recordException(error)
+            val _ = span.setStatus(
+              StatusCode.ERROR,
+              Option(error.getMessage).getOrElse(error.getClass.getName)
+            )
+          }
         }
-      }.guarantee(IO(span.end()))
+        .guarantee(IO(span.end()))
     }

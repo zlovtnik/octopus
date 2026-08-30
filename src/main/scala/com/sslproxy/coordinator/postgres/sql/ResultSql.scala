@@ -8,14 +8,14 @@ import io.circe.syntax.*
 
 object ResultSql:
   final case class BatchState(
-      jobId: String,
-      streamName: String,
-      payloadRef: String,
-      cursorStart: String,
-      cursorEnd: String,
-      batchNo: Int,
-      attemptCount: Int,
-      maxAttempts: Int
+    jobId: String,
+    streamName: String,
+    payloadRef: String,
+    cursorStart: String,
+    cursorEnd: String,
+    batchNo: Int,
+    attemptCount: Int,
+    maxAttempts: Int
   )
 
   def enqueue(result: PostgresResult, attempt: Int, outboxId: String): ConnectionIO[Unit] =
@@ -53,9 +53,9 @@ object ResultSql:
       .map(BatchState.apply.tupled)
 
   def completeSuccessful(
-      result: PostgresResult,
-      streamName: String,
-      cursorEnd: String
+    result: PostgresResult,
+    streamName: String,
+    cursorEnd: String
   ): ConnectionIO[Unit] =
     for
       updated <- sql"""UPDATE sync_batches
@@ -67,12 +67,16 @@ object ResultSql:
                          WHERE batch_id = ${result.batchId}
                            AND job_id = ${result.jobId}
                            AND status IN ('pending', 'dispatched', 'running')""".update.run
-      _ <- if updated == 1 then ().pure[ConnectionIO]
-            else
-              sql"""SELECT status FROM sync_batches WHERE batch_id = ${result.batchId} AND job_id = ${result.jobId}""".query[String].option.flatMap {
-                case Some("completed") => ().pure[ConnectionIO]
-                case _ => requireSingleTransition("complete", result.batchId, updated)
-              }
+      _ <-
+        if updated == 1 then ().pure[ConnectionIO]
+        else
+          sql"""SELECT status FROM sync_batches WHERE batch_id = ${result.batchId} AND job_id = ${result.jobId}"""
+            .query[String]
+            .option
+            .flatMap {
+              case Some("completed") => ().pure[ConnectionIO]
+              case _ => requireSingleTransition("complete", result.batchId, updated)
+            }
       _ <-
         sql"""UPDATE sync_jobs
                SET status = 'completed',

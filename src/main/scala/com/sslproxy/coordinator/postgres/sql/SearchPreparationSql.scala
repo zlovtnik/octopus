@@ -45,10 +45,39 @@ object SearchPreparationSql:
            WHERE document.document_id IS NULL
            ORDER BY frame.observed_at, frame.dedupe_key
            LIMIT ${limit.max(1)}"""
-      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
-        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
-      .map(row => SearchDocumentSource(SearchDocumentKind.Event, row._1, row._2, row._3, row._4,
-        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+      .query[
+        (
+          String,
+          Option[String],
+          Option[String],
+          Option[String],
+          java.sql.Timestamp,
+          Option[String],
+          Option[String],
+          Option[String],
+          Int,
+          Boolean,
+          String,
+          String
+        )
+      ]
+      .map(row =>
+        SearchDocumentSource(
+          SearchDocumentKind.Event,
+          row._1,
+          row._2,
+          row._3,
+          row._4,
+          row._5,
+          row._6,
+          row._7,
+          row._8,
+          row._9,
+          row._10,
+          row._11,
+          row._12
+        )
+      )
 
   private def deviceCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT device.mac, device.mac, device.location_id, CAST(NULL AS TEXT),
@@ -78,10 +107,39 @@ object SearchPreparationSql:
            WHERE document.document_id IS NULL OR document.updated_at < device.updated_at
            ORDER BY device.last_seen, device.mac
            LIMIT ${limit.max(1)}"""
-      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
-        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
-      .map(row => SearchDocumentSource(SearchDocumentKind.Device, row._1, row._2, row._3, row._4,
-        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+      .query[
+        (
+          String,
+          Option[String],
+          Option[String],
+          Option[String],
+          java.sql.Timestamp,
+          Option[String],
+          Option[String],
+          Option[String],
+          Int,
+          Boolean,
+          String,
+          String
+        )
+      ]
+      .map(row =>
+        SearchDocumentSource(
+          SearchDocumentKind.Device,
+          row._1,
+          row._2,
+          row._3,
+          row._4,
+          row._5,
+          row._6,
+          row._7,
+          row._8,
+          row._9,
+          row._10,
+          row._11,
+          row._12
+        )
+      )
 
   private def behaviourCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT snapshot.snapshot_key, snapshot.source_mac, snapshot.location_id, snapshot.sensor_id,
@@ -106,10 +164,39 @@ object SearchPreparationSql:
              AND COALESCE(NULLIF(snapshot.embedding_text, ''), NULLIF(snapshot.text_summary, '')) IS NOT NULL
            ORDER BY snapshot.window_end, snapshot.snapshot_key
            LIMIT ${limit.max(1)}"""
-      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
-        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
-      .map(row => SearchDocumentSource(SearchDocumentKind.Behaviour, row._1, row._2, row._3, row._4,
-        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+      .query[
+        (
+          String,
+          Option[String],
+          Option[String],
+          Option[String],
+          java.sql.Timestamp,
+          Option[String],
+          Option[String],
+          Option[String],
+          Int,
+          Boolean,
+          String,
+          String
+        )
+      ]
+      .map(row =>
+        SearchDocumentSource(
+          SearchDocumentKind.Behaviour,
+          row._1,
+          row._2,
+          row._3,
+          row._4,
+          row._5,
+          row._6,
+          row._7,
+          row._8,
+          row._9,
+          row._10,
+          row._11,
+          row._12
+        )
+      )
 
   private def sequenceCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT sequence_row.session_key, sequence_row.source_mac, sequence_row.location_id,
@@ -133,22 +220,56 @@ object SearchPreparationSql:
              AND COALESCE(NULLIF(sequence_row.semantic_tokens, ''), NULLIF(sequence_row.sequence_tokens, '')) IS NOT NULL
            ORDER BY sequence_row.window_end, sequence_row.session_key
            LIMIT ${limit.max(1)}"""
-      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp,
-        Option[String], Option[String], Option[String], Int, Boolean, String, String)]
-      .map(row => SearchDocumentSource(SearchDocumentKind.Sequence, row._1, row._2, row._3, row._4,
-        row._5, row._6, row._7, row._8, row._9, row._10, row._11, row._12))
+      .query[
+        (
+          String,
+          Option[String],
+          Option[String],
+          Option[String],
+          java.sql.Timestamp,
+          Option[String],
+          Option[String],
+          Option[String],
+          Int,
+          Boolean,
+          String,
+          String
+        )
+      ]
+      .map(row =>
+        SearchDocumentSource(
+          SearchDocumentKind.Sequence,
+          row._1,
+          row._2,
+          row._3,
+          row._4,
+          row._5,
+          row._6,
+          row._7,
+          row._8,
+          row._9,
+          row._10,
+          row._11,
+          row._12
+        )
+      )
 
   def persist(document: PreparedSearchDocument): ConnectionIO[Unit] =
     val sourceTable = document.kind.sourceTable
     val sourceKind = document.kind.sourceKind
-    val tagsJson = document.tags.map { case (kind, value) =>
-      Json.obj("type" -> kind.asJson, "value" -> value.asJson)
-    }.asJson.noSpaces
-    val metadata = Json.obj(
-      "producer" -> "octopus".asJson,
-      "embedding_kind" -> document.kind.embeddingKind.asJson,
-      "normalized_sha256" -> document.normalizedSha256.asJson
-    ).noSpaces
+    val tagsJson = document.tags
+      .map { case (kind, value) =>
+        Json.obj("type" -> kind.asJson, "value" -> value.asJson)
+      }
+      .asJson
+      .noSpaces
+    val metadata = Json
+      .obj(
+        "producer" -> "octopus".asJson,
+        "embedding_kind" -> document.kind.embeddingKind.asJson,
+        "normalized_sha256" -> document.normalizedSha256.asJson
+      )
+      .noSpaces
 
     for
       _ <- sql"""UPDATE atheros_search.search_documents
@@ -194,19 +315,23 @@ object SearchPreparationSql:
                    metadata = EXCLUDED.metadata,
                    updated_at = CURRENT_TIMESTAMP""".update.run
       _ <- sql"DELETE FROM atheros_search.search_document_tokens WHERE document_id = ${document.documentId}".update.run
-      _ <- TokenInsert.updateMany(document.tokens.map { case (token, frequency, count) =>
-        (token, document.documentId, frequency, count)
-      }).void
+      _ <- TokenInsert
+        .updateMany(document.tokens.map { case (token, frequency, count) =>
+          (token, document.documentId, frequency, count)
+        })
+        .void
       _ <- sql"DELETE FROM atheros_search.search_document_tags WHERE document_id = ${document.documentId}".update.run
-      _ <- TagInsert.updateMany(document.tags.map { case (kind, value) =>
-        (document.documentId, kind, value)
-      }).void
+      _ <- TagInsert
+        .updateMany(document.tags.map { case (kind, value) =>
+          (document.documentId, kind, value)
+        })
+        .void
     yield ()
 
   def documentsMissingEmbeddingJobs(
-      kind: SearchDocumentKind,
-      embeddingModel: String,
-      limit: Int
+    kind: SearchDocumentKind,
+    embeddingModel: String,
+    limit: Int
   ): Query0[(String, String)] =
     val embeddingKind = kind.embeddingKind
     val sourceKind = kind.sourceKind
@@ -224,11 +349,11 @@ object SearchPreparationSql:
            LIMIT ${limit.max(1)}""".query[(String, String)]
 
   def enqueueEmbeddingJob(
-      kind: SearchDocumentKind,
-      jobId: String,
-      documentId: String,
-      contentSha256: String,
-      embeddingModel: String
+    kind: SearchDocumentKind,
+    jobId: String,
+    documentId: String,
+    contentSha256: String,
+    embeddingModel: String
   ): ConnectionIO[Unit] =
     val embeddingKind = kind.embeddingKind
     sql"""INSERT INTO atheros_search.embedding_jobs (

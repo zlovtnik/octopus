@@ -17,11 +17,11 @@ final class PostgresMaintenanceStore(repository: PostgresRepository) extends Mai
     EitherT(repository.quarantineArchiveCandidate(candidate, error))
 
   def claimLease(
-      resourceType: String,
-      resourceId: String,
-      ownerId: String,
-      token: String,
-      ttlSeconds: Int
+    resourceType: String,
+    resourceId: String,
+    ownerId: String,
+    token: String,
+    ttlSeconds: Int
   ): DbResultT[IO, Option[Lease]] =
     EitherT(repository.claimMaintenanceLease(resourceType, resourceId, ownerId, token, ttlSeconds))
 
@@ -29,73 +29,79 @@ final class PostgresMaintenanceStore(repository: PostgresRepository) extends Mai
     EitherT(repository.releaseMaintenanceLease(resourceType, resourceId, lease))
 
   def renewLease(
-      resourceType: String,
-      resourceId: String,
-      lease: Lease,
-      ttlSeconds: Int
+    resourceType: String,
+    resourceId: String,
+    lease: Lease,
+    ttlSeconds: Int
   ): DbResultT[IO, Int] =
     EitherT(repository.renewMaintenanceLease(resourceType, resourceId, lease, ttlSeconds))
 
   def startRetentionRun(
-      runId: String,
-      policyName: String,
-      targetTable: String,
-      cutoff: java.time.Instant,
-      lease: Lease
+    runId: String,
+    policyName: String,
+    targetTable: String,
+    cutoff: java.time.Instant,
+    lease: Lease
   ): DbResultT[IO, Int] =
     EitherT(repository.startRetentionRun(runId, policyName, targetTable, cutoff, lease))
 
   def finishRetentionRun(
-      runId: String,
-      status: String,
-      rowsSelected: Long,
-      rowsArchived: Long,
-      rowsDeleted: Long,
-      error: Option[String]
+    runId: String,
+    status: String,
+    rowsSelected: Long,
+    rowsArchived: Long,
+    rowsDeleted: Long,
+    error: Option[String]
   ): DbResultT[IO, Int] =
-    EitherT(repository.finishRetentionRun(
-      runId,
-      status,
-      rowsSelected,
-      rowsArchived,
-      rowsDeleted,
-      error
-    ))
+    EitherT(
+      repository.finishRetentionRun(
+        runId,
+        status,
+        rowsSelected,
+        rowsArchived,
+        rowsDeleted,
+        error
+      )
+    )
 
   def retainArchivedEvents(
-      retentionDays: Int,
-      tombstoneDays: Int,
-      limit: Int,
-      resourceType: String,
-      resourceId: String,
-      lease: Lease
+    retentionDays: Int,
+    tombstoneDays: Int,
+    limit: Int,
+    resourceType: String,
+    resourceId: String,
+    lease: Lease
   ): DbResultT[IO, (Long, Long)] =
-    EitherT(repository.retainArchivedEvents(
-      retentionDays,
-      tombstoneDays,
-      limit,
-      resourceType,
-      resourceId,
-      lease
-    ))
+    EitherT(
+      repository.retainArchivedEvents(
+        retentionDays,
+        tombstoneDays,
+        limit,
+        resourceType,
+        resourceId,
+        lease
+      )
+    )
 
   def pruneExpiredTombstones(limit: Int): DbResultT[IO, Int] =
     EitherT(repository.pruneExpiredTombstones(limit))
 
   def retainSearchDocuments(
-      retentionDays: Int,
-      limit: Int,
-      resourceType: String,
-      resourceId: String,
-      lease: Lease
+    retentionDays: Int,
+    limit: Int,
+    resourceType: String,
+    resourceId: String,
+    lease: Lease
   ): DbResultT[IO, (Long, Long)] =
-    EitherT(repository.retainSearchDocuments(
-      retentionDays,
-      limit,
-      resourceType,
-      resourceId,
-      lease
-    ))
+    EitherT(
+      repository.retainSearchDocuments(
+        retentionDays,
+        limit,
+        resourceType,
+        resourceId,
+        lease
+      )
+    )
 
   def cleanupStaleWorkers(limit: Int): DbResultT[IO, Int] =
     EitherT(repository.cleanupStaleWorkers(limit))

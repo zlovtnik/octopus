@@ -1,12 +1,14 @@
 package com.sslproxy.coordinator.ingest
 
-import com.sslproxy.coordinator.domain.PayloadAudit
+import cats.effect.{IO, Ref}
+import com.sslproxy.coordinator.domain.{DatabaseError, PayloadAudit}
 import com.sslproxy.coordinator.util.Sha256Utils
-import munit.*
+import munit.CatsEffectSuite
 
 import java.nio.charset.StandardCharsets
+import scala.concurrent.duration.Duration
 
-class PayloadAuditConsumerSuite extends FunSuite:
+class PayloadAuditConsumerSuite extends CatsEffectSuite:
 
   import PayloadAuditConsumer.translateRecord
 
@@ -64,12 +66,14 @@ class PayloadAuditConsumerSuite extends FunSuite:
 
     import io.circe.parser.decode as circeDecode
     import io.circe.Json
-    val expectedRequest = Json.obj(
-      "stream_name" -> Json.fromString("proxy.payload_audit"),
-      "dedupe_key" -> Json.fromString(dedupeKey),
-      "payload_ref" -> Json.fromString(expectedPayloadRef),
-      "observed_at" -> Json.fromString("2026-06-01T12:00:00Z")
-    ).noSpaces
+    val expectedRequest = Json
+      .obj(
+        "stream_name" -> Json.fromString("proxy.payload_audit"),
+        "dedupe_key" -> Json.fromString(dedupeKey),
+        "payload_ref" -> Json.fromString(expectedPayloadRef),
+        "observed_at" -> Json.fromString("2026-06-01T12:00:00Z")
+      )
+      .noSpaces
 
     val result = translateRecord(
       fs2.kafka.ConsumerRecord[String, String]("proxy.payload_audit", 0, 0L, null, json)
@@ -95,3 +99,60 @@ class PayloadAuditConsumerSuite extends FunSuite:
     assert(result.isLeft)
     assertEquals(result.swap.toOption.get, PayloadAuditError.EmptyMessage)
 
+  test("retryable database writes succeed before the retry budget is exhausted"):
+    val retryable = DatabaseError.Retryable(
+      "payload_audit.record_scan_requests",
+      new java.sql.SQLTransientException("connection unavailable"),
+      "connection unavailable"
+    )
+
+    for
+      attempts <- Ref.of[IO, Int](0)
+      write = attempts.modify { current =>
+        val result: Either[DatabaseError, Int] =
+          if current < 2 then Left(retryable) else Right(4)
+        (current + 1, result)
+      }
+      result <- PayloadAuditConsumer.retryDatabaseWrite(
+        write,
+        maxAttempts = 3,
+        initialDelay = Duration.Zero
+      )
+      count <- attempts.get
+    yield
+      assertEquals(result, Right(4))
+      assertEquals(count, 3)
+
+  test("exhausted retryable database writes are returned for DLQ handling"):
+    val retryable = DatabaseError.Retryable(
+      "payload_audit.record_scan_requests",
+      new java.sql.SQLTransientException("connection unavailable"),
+      "connection unavailable"
+    )
+
+    for result <- PayloadAuditConsumer
+        .retryDatabaseWrite(
+          IO.pure(Left(retryable)),
+          maxAttempts = 3,
+          initialDelay = Duration.Zero
+        )
+    yield assertEquals(result, Left(retryable))
+
+  test("permanent database writes are returned for DLQ handling without retry"):
+    val permanent = DatabaseError.Permanent(
+      "payload_audit.record_scan_requests",
+      IllegalArgumentException("invalid record"),
+      "invalid record"
+    )
+
+    for
+      attempts <- Ref.of[IO, Int](0)
+      result <- PayloadAuditConsumer.retryDatabaseWrite(
+        attempts.update(_ + 1).as(Left(permanent)),
+        maxAttempts = 3,
+        initialDelay = Duration.Zero
+      )
+      count <- attempts.get
+    yield
+      assertEquals(result, Left(permanent))
+      assertEquals(count, 1)

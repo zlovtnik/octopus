@@ -152,7 +152,9 @@ object SchemaChecksSql:
     if columnCount <= 0 then Left("column count must be positive")
     else
       val predicates = List.fill(columnCount)("(TABLE_NAME = ? AND COLUMN_NAME = ?)").mkString(" OR ")
-      Right(s"SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND ($predicates)")
+      Right(
+        s"SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND ($predicates)"
+      )
 
   private def placeholders(count: Int): Either[String, String] =
     if count <= 0 then Left("placeholder count must be positive")

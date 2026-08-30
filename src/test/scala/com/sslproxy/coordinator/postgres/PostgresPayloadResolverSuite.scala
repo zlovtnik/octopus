@@ -16,12 +16,14 @@ class PostgresPayloadResolverSuite extends FunSuite:
     val payloadRef =
       "inline://json/" + Base64.getUrlEncoder.withoutPadding
         .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
-    val requestJson = Json.obj(
-      "stream_name" -> Json.fromString("wireless.audit"),
-      "dedupe_key" -> Json.fromString(Sha256Utils.sha256Hex(payload)),
-      "payload_ref" -> Json.fromString(payloadRef),
-      "observed_at" -> Json.fromString("2026-07-27T12:00:00Z")
-    ).noSpaces
+    val requestJson = Json
+      .obj(
+        "stream_name" -> Json.fromString("wireless.audit"),
+        "dedupe_key" -> Json.fromString(Sha256Utils.sha256Hex(payload)),
+        "payload_ref" -> Json.fromString(payloadRef),
+        "observed_at" -> Json.fromString("2026-07-27T12:00:00Z")
+      )
+      .noSpaces
 
     val source = ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
     val resolved = new PostgresPayloadResolver("/unused").resolve(source)

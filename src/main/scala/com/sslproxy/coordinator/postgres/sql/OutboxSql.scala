@@ -7,10 +7,10 @@ import doobie.implicits.*
 
 object OutboxSql:
   def claim(
-      ownerId: String,
-      destinationTopics: List[String],
-      leaseSeconds: Int,
-      token: String
+    ownerId: String,
+    destinationTopics: List[String],
+    leaseSeconds: Int,
+    token: String
   ): ConnectionIO[Option[OutboxRecord]] =
     val topics = destinationTopics.map(_.trim).filter(_.nonEmpty).distinct
     if ownerId.isBlank || topics.isEmpty then none[OutboxRecord].pure[ConnectionIO]
@@ -43,20 +43,23 @@ object OutboxSql:
 
       for
         updated <- claimUpdate
-        claimed <- if updated == 1 then
-          sql"""SELECT outbox_id, destination_topic, message_key, CAST(payload AS TEXT),
+        claimed <-
+          if updated == 1 then
+            sql"""SELECT outbox_id, destination_topic, message_key, CAST(payload AS TEXT),
                         attempt_count, max_attempts, owner_id, lease_token, fence
                  FROM outbox_events
                  WHERE owner_id = $ownerId
                    AND lease_token = $token
                    AND status = 'leased'
                  LIMIT 1"""
-            .query[(String, String, String, String, Int, Int, String, String, Long)]
-            .unique
-            .map { case (id, topic, key, payload, attempts, maxAttempts, owner, leaseToken, fence) =>
-              Some(OutboxRecord(id, topic, key, payload, attempts, maxAttempts, LeaseIdentity(owner, leaseToken, fence)))
-            }
-        else none[OutboxRecord].pure[ConnectionIO]
+              .query[(String, String, String, String, Int, Int, String, String, Long)]
+              .unique
+              .map { case (id, topic, key, payload, attempts, maxAttempts, owner, leaseToken, fence) =>
+                Some(
+                  OutboxRecord(id, topic, key, payload, attempts, maxAttempts, LeaseIdentity(owner, leaseToken, fence))
+                )
+              }
+          else none[OutboxRecord].pure[ConnectionIO]
       yield claimed
 
   def acknowledge(record: OutboxRecord, loadBatchId: Option[String]): ConnectionIO[Boolean] =
@@ -76,8 +79,9 @@ object OutboxSql:
                           AND fence = ${record.lease.fence}
                           AND lease_expires_at > CURRENT_TIMESTAMP""".update.run
       _ <- if updated == 1 then publishAttempt(record, "published", None) else ().pure[ConnectionIO]
-      _ <- if updated == 1 then loadBatchId.traverse_(markBatchDispatched(record.outboxId, _))
-           else ().pure[ConnectionIO]
+      _ <-
+        if updated == 1 then loadBatchId.traverse_(markBatchDispatched(record.outboxId, _))
+        else ().pure[ConnectionIO]
     yield updated == 1
 
   def parkMalformed(record: OutboxRecord, errorText: String): ConnectionIO[Boolean] =
@@ -96,15 +100,16 @@ object OutboxSql:
                           AND lease_token = ${record.lease.token}
                           AND fence = ${record.lease.fence}
                           AND lease_expires_at > CURRENT_TIMESTAMP""".update.run
-      _ <- if updated == 1 then publishAttempt(record, "failed", Some(errorText))
-           else ().pure[ConnectionIO]
+      _ <-
+        if updated == 1 then publishAttempt(record, "failed", Some(errorText))
+        else ().pure[ConnectionIO]
     yield updated == 1
 
   def fail(
-      record: OutboxRecord,
-      status: String,
-      errorText: String,
-      delaySeconds: Long
+    record: OutboxRecord,
+    status: String,
+    errorText: String,
+    delaySeconds: Long
   ): ConnectionIO[Unit] =
     for
       updated <- sql"""UPDATE outbox_events
@@ -121,8 +126,9 @@ object OutboxSql:
                           AND lease_token = ${record.lease.token}
                           AND fence = ${record.lease.fence}
                           AND lease_expires_at > CURRENT_TIMESTAMP""".update.run
-      _ <- if updated == 1 then publishAttempt(record, status, Some(errorText))
-           else doobie.free.connection.raiseError(IllegalStateException(s"lost outbox lease ${record.outboxId}"))
+      _ <-
+        if updated == 1 then publishAttempt(record, status, Some(errorText))
+        else doobie.free.connection.raiseError(IllegalStateException(s"lost outbox lease ${record.outboxId}"))
     yield ()
 
   val RecoverExpiredLeases: ConnectionIO[Int] =
@@ -151,9 +157,9 @@ object OutboxSql:
     yield parked + retried
 
   private def publishAttempt(
-      record: OutboxRecord,
-      status: String,
-      errorText: Option[String]
+    record: OutboxRecord,
+    status: String,
+    errorText: Option[String]
   ): ConnectionIO[Unit] =
     sql"""INSERT INTO outbox_publish_attempts (
              outbox_id, attempt_no, status, error_text, attempted_at

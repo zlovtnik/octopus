@@ -15,9 +15,11 @@ object WirelessProjectionSql:
       Fragment.const0(s"extracted.$alias")
 
     def source(payloadJson: String): Fragment =
-      val columns = aliases.toList.map { case (path, alias) =>
-        fr0"jsonb_path_query_first(source.payload, CAST($path AS jsonpath)) AS " ++ Fragment.const0(alias)
-      }.intercalate(fr0", ")
+      val columns = aliases.toList
+        .map { case (path, alias) =>
+          fr0"jsonb_path_query_first(source.payload, CAST($path AS jsonpath)) AS " ++ Fragment.const0(alias)
+        }
+        .intercalate(fr0", ")
       fr0"(SELECT " ++ columns ++
         fr0" FROM (SELECT CAST($payloadJson AS jsonb) AS payload) source) extracted"
 
@@ -42,10 +44,10 @@ object WirelessProjectionSql:
     jsonText(maxLength, preserveEmpty = true, path, aliases*)
 
   private def jsonText(
-      maxLength: Int,
-      preserveEmpty: Boolean,
-      path: String,
-      aliases: String*
+    maxLength: Int,
+    preserveEmpty: Boolean,
+    path: String,
+    aliases: String*
   )(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)
@@ -60,11 +62,11 @@ object WirelessProjectionSql:
     })
 
   private def jsonInteger(
-      path: String,
-      aliases: String*
+    path: String,
+    aliases: String*
   )(
-      positiveMax: String = "2147483647",
-      negativeMagnitudeMax: String = "2147483648"
+    positiveMax: String = "2147483647",
+    negativeMagnitudeMax: String = "2147483648"
   )(using JsonExtraction): Fragment =
     coalesceJson((path :: aliases.toList).map { candidate =>
       val candidateType = jsonType(candidate)

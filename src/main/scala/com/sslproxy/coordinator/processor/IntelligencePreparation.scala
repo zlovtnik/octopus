@@ -7,155 +7,157 @@ import java.sql.Timestamp
 import java.time.Instant
 
 final case class ProjectionFrame(
-    dedupeKey: String,
-    sourceMac: String,
-    locationId: Option[String],
-    sensorId: Option[String],
-    observedAt: Timestamp,
-    frameType: Option[String],
-    frameSubtype: Option[String],
-    signalDbm: Option[Int],
-    retry: Boolean,
-    protectedFrame: Boolean,
-    bssid: Option[String],
-    appProtocol: Option[String],
-    adjacentMacHint: Option[String],
-    tsftDeltaUs: Option[Long],
-    wallClockDeltaMs: Option[Long],
-    sessionKey: Option[String]
+  dedupeKey: String,
+  sourceMac: String,
+  locationId: Option[String],
+  sensorId: Option[String],
+  observedAt: Timestamp,
+  frameType: Option[String],
+  frameSubtype: Option[String],
+  signalDbm: Option[Int],
+  retry: Boolean,
+  protectedFrame: Boolean,
+  bssid: Option[String],
+  appProtocol: Option[String],
+  adjacentMacHint: Option[String],
+  tsftDeltaUs: Option[Long],
+  wallClockDeltaMs: Option[Long],
+  sessionKey: Option[String]
 )
 
 final case class BehaviorSnapshotProjection(
-    snapshotId: String,
-    snapshotKey: String,
-    sourceMac: String,
-    locationId: Option[String],
-    sensorId: Option[String],
-    windowStart: Timestamp,
-    windowEnd: Timestamp,
-    eventCount: Long,
-    textSummary: String,
-    protocolMixJson: String,
-    frameDistributionJson: String,
-    signalMin: Option[Int],
-    signalMax: Option[Int],
-    signalAverage: Option[Double],
-    retryCount: Long,
-    protectedCount: Long,
-    unprotectedCount: Long,
-    uniqueBssidCount: Long,
-    rotationIndicatorsJson: String,
-    projectionRunId: String
+  snapshotId: String,
+  snapshotKey: String,
+  sourceMac: String,
+  locationId: Option[String],
+  sensorId: Option[String],
+  windowStart: Timestamp,
+  windowEnd: Timestamp,
+  eventCount: Long,
+  textSummary: String,
+  protocolMixJson: String,
+  frameDistributionJson: String,
+  signalMin: Option[Int],
+  signalMax: Option[Int],
+  signalAverage: Option[Double],
+  retryCount: Long,
+  protectedCount: Long,
+  unprotectedCount: Long,
+  uniqueBssidCount: Long,
+  rotationIndicatorsJson: String,
+  projectionRunId: String
 )
 
 final case class TimingProfileProjection(
-    profileId: String,
-    profileKey: String,
-    sourceMac: String,
-    sensorId: Option[String],
-    locationId: Option[String],
-    windowStart: Timestamp,
-    windowEnd: Timestamp,
-    tsftP50: Option[Double],
-    tsftP95: Option[Double],
-    tsftJitter: Option[Double],
-    wallP50: Option[Double],
-    wallJitter: Option[Double],
-    sourceEventCount: Long,
-    projectionRunId: String
+  profileId: String,
+  profileKey: String,
+  sourceMac: String,
+  sensorId: Option[String],
+  locationId: Option[String],
+  windowStart: Timestamp,
+  windowEnd: Timestamp,
+  tsftP50: Option[Double],
+  tsftP95: Option[Double],
+  tsftJitter: Option[Double],
+  wallP50: Option[Double],
+  wallJitter: Option[Double],
+  sourceEventCount: Long,
+  projectionRunId: String
 )
 
 final case class SequenceProjection(
-    sessionKey: String,
-    sourceMac: Option[String],
-    locationId: Option[String],
-    sensorId: Option[String],
-    windowStart: Timestamp,
-    windowEnd: Timestamp,
-    tokens: Vector[FrameToken],
-    projectionRunId: String
+  sessionKey: String,
+  sourceMac: Option[String],
+  locationId: Option[String],
+  sensorId: Option[String],
+  windowStart: Timestamp,
+  windowEnd: Timestamp,
+  tokens: Vector[FrameToken],
+  projectionRunId: String
 )
 
 final case class BaselineProjection(
-    baselineId: String,
-    bssid: String,
-    metric: String,
-    p5: Double,
-    p50: Double,
-    p95: Double,
-    sampleCount: Long,
-    projectionRunId: String
+  baselineId: String,
+  bssid: String,
+  metric: String,
+  p5: Double,
+  p50: Double,
+  p95: Double,
+  sampleCount: Long,
+  projectionRunId: String
 )
 
 final case class SimilarityCandidate(
-    pairKind: String,
-    embeddingKind: String,
-    embeddingModel: String,
-    leftDocumentId: String,
-    rightDocumentId: String,
-    leftSourceTable: String,
-    leftSourceKey: String,
-    leftSourceMac: Option[String],
-    leftSensorId: Option[String],
-    leftLocationId: Option[String],
-    leftObservedAt: Option[Timestamp],
-    rightSourceTable: String,
-    rightSourceKey: String,
-    rightSourceMac: Option[String],
-    rightSensorId: Option[String],
-    rightLocationId: Option[String],
-    rightObservedAt: Option[Timestamp],
-    cosineDistance: Double
+  pairKind: String,
+  embeddingKind: String,
+  embeddingModel: String,
+  leftDocumentId: String,
+  rightDocumentId: String,
+  leftSourceTable: String,
+  leftSourceKey: String,
+  leftSourceMac: Option[String],
+  leftSensorId: Option[String],
+  leftLocationId: Option[String],
+  leftObservedAt: Option[Timestamp],
+  rightSourceTable: String,
+  rightSourceKey: String,
+  rightSourceMac: Option[String],
+  rightSensorId: Option[String],
+  rightLocationId: Option[String],
+  rightObservedAt: Option[Timestamp],
+  cosineDistance: Double
 )
 
 final case class SimilarityProjection(
-    pairId: String,
-    candidate: SimilarityCandidate,
-    cosineSimilarity: Double,
-    evidenceJson: String,
-    projectionRunId: String
+  pairId: String,
+  candidate: SimilarityCandidate,
+  cosineSimilarity: Double,
+  evidenceJson: String,
+  projectionRunId: String
 )
 
 final case class IdentityClusterProjection(
-    clusterId: String,
-    members: Vector[String],
-    confidence: Double,
-    projectionRunId: String
+  clusterId: String,
+  members: Vector[String],
+  confidence: Double,
+  projectionRunId: String
 )
 
 final case class DnsThreatCandidate(
-    host: String,
-    blockedCount: Long,
-    attemptedBytes: Long,
-    recentCount: Long,
-    lastSeen: Timestamp
+  host: String,
+  blockedCount: Long,
+  attemptedBytes: Long,
+  recentCount: Long,
+  lastSeen: Timestamp
 )
 
 final case class DnsThreatProjection(
-    sourceKey: String,
-    signalId: String,
-    score: Double,
-    severity: String,
-    evidenceJson: String,
-    detectedAt: Timestamp,
-    projectionRunId: String
+  sourceKey: String,
+  signalId: String,
+  score: Double,
+  severity: String,
+  evidenceJson: String,
+  detectedAt: Timestamp,
+  projectionRunId: String
 )
 
 final case class ApRiskProjection(
-    bssid: String,
-    composite: Double,
-    signalRisk: Double,
-    identityRisk: Double,
-    behaviorRisk: Double,
-    evidenceJson: String,
-    projectionRunId: String
+  bssid: String,
+  composite: Double,
+  signalRisk: Double,
+  identityRisk: Double,
+  behaviorRisk: Double,
+  evidenceJson: String,
+  projectionRunId: String
 )
 
 object IntelligencePreparation:
   private val WindowSeconds = 3600L
 
   def behavior(frames: List[ProjectionFrame]): List[BehaviorSnapshotProjection] =
-    frames.groupBy(frame => frame.sourceMac -> windowStart(frame.observedAt.toInstant)).toList
+    frames
+      .groupBy(frame => frame.sourceMac -> windowStart(frame.observedAt.toInstant))
+      .toList
       .sortBy((key, _) => key)
       .map { case ((sourceMac, start), grouped) =>
         val ordered = grouped.sortBy(_.observedAt.getTime)
@@ -185,17 +187,21 @@ object IntelligencePreparation:
           grouped.count(_.protectedFrame).toLong,
           grouped.count(frame => !frame.protectedFrame).toLong,
           grouped.flatMap(_.bssid).distinct.size.toLong,
-          Json.obj(
-            "adjacent_mac_count" -> Json.fromInt(adjacent.size),
-            "adjacent_macs" -> adjacent.asJson,
-            "rotation_suspected" -> Json.fromBoolean(adjacent.nonEmpty)
-          ).noSpaces,
+          Json
+            .obj(
+              "adjacent_mac_count" -> Json.fromInt(adjacent.size),
+              "adjacent_macs" -> adjacent.asJson,
+              "rotation_suspected" -> Json.fromBoolean(adjacent.nonEmpty)
+            )
+            .noSpaces,
           runId
         )
       }
 
   def timing(frames: List[ProjectionFrame]): List[TimingProfileProjection] =
-    frames.groupBy(frame => frame.sourceMac -> windowStart(frame.observedAt.toInstant)).toList
+    frames
+      .groupBy(frame => frame.sourceMac -> windowStart(frame.observedAt.toInstant))
+      .toList
       .sortBy((key, _) => key)
       .map { case ((sourceMac, start), grouped) =>
         val ordered = grouped.sortBy(_.observedAt.getTime)
@@ -221,7 +227,10 @@ object IntelligencePreparation:
       }
 
   def sequences(frames: List[ProjectionFrame]): List[SequenceProjection] =
-    frames.flatMap(frame => frame.sessionKey.map(_ -> frame)).groupMap(_._1)(_._2).toList
+    frames
+      .flatMap(frame => frame.sessionKey.map(_ -> frame))
+      .groupMap(_._1)(_._2)
+      .toList
       .sortBy(_._1)
       .map { case (sessionKey, grouped) =>
         val ordered = grouped.sortBy(_.observedAt.getTime)
@@ -262,19 +271,23 @@ object IntelligencePreparation:
         "similarity-pair",
         Vector(candidate.pairKind, candidate.embeddingModel) ++ ordered
       )
-      Right(SimilarityProjection(
-        pairId,
-        candidate,
-        (1.0d - candidate.cosineDistance).max(-1.0d).min(1.0d),
-        Json.obj(
-          "distance_function" -> Json.fromString("pgvector_cosine_<=>"),
-          "content_pair" -> ordered.asJson
-        ).noSpaces,
-        ProjectionFunctions.stableId("similarity-run", Vector(pairId))
-      ))
+      Right(
+        SimilarityProjection(
+          pairId,
+          candidate,
+          (1.0d - candidate.cosineDistance).max(-1.0d).min(1.0d),
+          Json
+            .obj(
+              "distance_function" -> Json.fromString("pgvector_cosine_<=>"),
+              "content_pair" -> ordered.asJson
+            )
+            .noSpaces,
+          ProjectionFunctions.stableId("similarity-run", Vector(pairId))
+        )
+      )
 
   def identityClusters(
-      edges: Iterable[(String, String, Double)]
+    edges: Iterable[(String, String, Double)]
   ): Vector[IdentityClusterProjection] =
     val normalized = edges.iterator
       .filter((left, right, confidence) =>
@@ -284,8 +297,7 @@ object IntelligencePreparation:
     val confidenceByPair = normalized.groupMapReduce { case (left, right, _) =>
       val pair = Vector(left, right).sorted
       (pair.head, pair.last)
-    } { case (_, _, confidence) => confidence.max(0.0d).min(1.0d)
-    }(math.max)
+    } { case (_, _, confidence) => confidence.max(0.0d).min(1.0d) }(math.max)
     ProjectionFunctions.connectedComponents(normalized.map((left, right, _) => left -> right)).map { members =>
       val memberSet = members.toSet
       val confidences = confidenceByPair.collect {
@@ -317,23 +329,25 @@ object IntelligencePreparation:
       signalId,
       score,
       severity,
-      Json.obj(
-        "blocked_count_7d" -> Json.fromLong(candidate.blockedCount),
-        "attempted_bytes_7d" -> Json.fromLong(candidate.attemptedBytes),
-        "recent_count_24h" -> Json.fromLong(candidate.recentCount),
-        "legacy_recency_weight" -> Json.fromDoubleOrNull(recencyWeight)
-      ).noSpaces,
+      Json
+        .obj(
+          "blocked_count_7d" -> Json.fromLong(candidate.blockedCount),
+          "attempted_bytes_7d" -> Json.fromLong(candidate.attemptedBytes),
+          "recent_count_24h" -> Json.fromLong(candidate.recentCount),
+          "legacy_recency_weight" -> Json.fromDoubleOrNull(recencyWeight)
+        )
+        .noSpaces,
       candidate.lastSeen,
       ProjectionFunctions.stableId("dns-threat-run", Vector(candidate.host))
     )
 
   def apRisk(
-      bssid: String,
-      deauthScore: Double,
-      signalAnomalyScore: Double,
-      typosquatScore: Double,
-      vendorMismatchScore: Double,
-      embeddingOutlierScore: Double
+    bssid: String,
+    deauthScore: Double,
+    signalAnomalyScore: Double,
+    typosquatScore: Double,
+    vendorMismatchScore: Double,
+    embeddingOutlierScore: Double
   ): Either[String, ApRiskProjection] =
     val inputs = Vector(
       deauthScore,
@@ -349,28 +363,32 @@ object IntelligencePreparation:
       val identityRisk = (bounded(2) * 0.20d) + (bounded(3) * 0.15d)
       val behaviorRisk = bounded(4) * 0.20d
       val composite = (signalRisk + identityRisk + behaviorRisk).max(0.0d).min(1.0d)
-      Right(ApRiskProjection(
-        bssid,
-        composite,
-        signalRisk,
-        identityRisk,
-        behaviorRisk,
-        Json.obj(
-          "deauth_score" -> Json.fromDoubleOrNull(deauthScore),
-          "signal_anomaly_score" -> Json.fromDoubleOrNull(signalAnomalyScore),
-          "typosquat_score" -> Json.fromDoubleOrNull(typosquatScore),
-          "vendor_mismatch_score" -> Json.fromDoubleOrNull(vendorMismatchScore),
-          "embedding_outlier_score" -> Json.fromDoubleOrNull(embeddingOutlierScore),
-          "weights" -> Json.arr(
-            Json.fromDoubleOrNull(0.25d),
-            Json.fromDoubleOrNull(0.20d),
-            Json.fromDoubleOrNull(0.20d),
-            Json.fromDoubleOrNull(0.15d),
-            Json.fromDoubleOrNull(0.20d)
-          )
-        ).noSpaces,
-        ProjectionFunctions.stableId("ap-risk-run", Vector(bssid))
-      ))
+      Right(
+        ApRiskProjection(
+          bssid,
+          composite,
+          signalRisk,
+          identityRisk,
+          behaviorRisk,
+          Json
+            .obj(
+              "deauth_score" -> Json.fromDoubleOrNull(deauthScore),
+              "signal_anomaly_score" -> Json.fromDoubleOrNull(signalAnomalyScore),
+              "typosquat_score" -> Json.fromDoubleOrNull(typosquatScore),
+              "vendor_mismatch_score" -> Json.fromDoubleOrNull(vendorMismatchScore),
+              "embedding_outlier_score" -> Json.fromDoubleOrNull(embeddingOutlierScore),
+              "weights" -> Json.arr(
+                Json.fromDoubleOrNull(0.25d),
+                Json.fromDoubleOrNull(0.20d),
+                Json.fromDoubleOrNull(0.20d),
+                Json.fromDoubleOrNull(0.15d),
+                Json.fromDoubleOrNull(0.20d)
+              )
+            )
+            .noSpaces,
+          ProjectionFunctions.stableId("ap-risk-run", Vector(bssid))
+        )
+      )
 
   private def windowStart(value: Instant): Instant =
     Instant.ofEpochSecond(Math.floorDiv(value.getEpochSecond, WindowSeconds) * WindowSeconds)

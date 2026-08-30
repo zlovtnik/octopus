@@ -8,11 +8,11 @@ import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.observability.StructuredLogger
 
 final class BackpressureService private (
-    cfg: BackpressureConfig,
-    ingestBatchSize: Int,
-    pendingLedgerCount: IO[Either[DatabaseError, Long]],
-    metrics: CoordinatorMetrics,
-    consumerSuspended: Ref[IO, Boolean]
+  cfg: BackpressureConfig,
+  ingestBatchSize: Int,
+  pendingLedgerCount: IO[Either[DatabaseError, Long]],
+  metrics: CoordinatorMetrics,
+  consumerSuspended: Ref[IO, Boolean]
 ):
   import BackpressureService.log
 
@@ -29,8 +29,14 @@ final class BackpressureService private (
     pendingLedgerCount.flatMap {
       case Left(err) =>
         val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(err.message)
-        IO(log.warn("backpressure", "status" -> "pending_count_failed",
-          "operation" -> err.operation, "error" -> sanitized)) *>
+        IO(
+          log.warn(
+            "backpressure",
+            "status" -> "pending_count_failed",
+            "operation" -> err.operation,
+            "error" -> sanitized
+          )
+        ) *>
           consumerSuspended.get.flatMap { suspended =>
             IO(metrics.recordBackpressureActive(suspended))
               .as(if suspended then budget else 0L)
@@ -49,14 +55,26 @@ final class BackpressureService private (
       if pendingCount >= b then
         if !suspended then
           consumerSuspended.set(true) *>
-            IO(log.info("backpressure", "status" -> "throttled",
-              "pending_count" -> pendingCount.toString, "budget" -> b.toString,
-              "multiplier" -> cfg.budgetMultiplier.toString))
+            IO(
+              log.info(
+                "backpressure",
+                "status" -> "throttled",
+                "pending_count" -> pendingCount.toString,
+                "budget" -> b.toString,
+                "multiplier" -> cfg.budgetMultiplier.toString
+              )
+            )
         else IO.unit
       else if pendingCount <= rt && suspended then
         consumerSuspended.set(false) *>
-          IO(log.info("backpressure", "status" -> "recovered",
-            "pending_count" -> pendingCount.toString, "recovery_threshold" -> rt.toString))
+          IO(
+            log.info(
+              "backpressure",
+              "status" -> "recovered",
+              "pending_count" -> pendingCount.toString,
+              "recovery_threshold" -> rt.toString
+            )
+          )
       else IO.unit
     } *> consumerSuspended.get.flatMap(s => IO(metrics.recordBackpressureActive(s)))
 
@@ -64,10 +82,10 @@ object BackpressureService:
   private val log = StructuredLogger(getClass)
 
   def create(
-      cfg: BackpressureConfig,
-      ingestBatchSize: Int,
-      pendingLedgerCount: IO[Either[DatabaseError, Long]],
-      metrics: CoordinatorMetrics
+    cfg: BackpressureConfig,
+    ingestBatchSize: Int,
+    pendingLedgerCount: IO[Either[DatabaseError, Long]],
+    metrics: CoordinatorMetrics
   ): IO[BackpressureService] =
     Ref.of[IO, Boolean](false).map { state =>
       new BackpressureService(cfg, ingestBatchSize, pendingLedgerCount, metrics, state)

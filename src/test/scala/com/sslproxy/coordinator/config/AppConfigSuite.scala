@@ -82,16 +82,18 @@ class AppConfigSuite extends FunSuite:
     assert(messages.exists(_.contains("sync-result-consumer")))
 
   test("deployment SYNC variables configure locked topics and consumer groups"):
-    val environment = ConfigFactory.parseMap(Map(
-      "SYNC_SCAN_TOPIC" -> "sync.scan.request.cluster",
-      "SYNC_PAYLOAD_AUDIT_TOPIC" -> "proxy.payload_audit.cluster",
-      "SYNC_SCAN_CONSUMER" -> "octopus-scan-v7",
-      "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
-      "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
-      "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
-      "SYNC_STREAM_NAMES" -> "proxy.events,proxy.payload_audit",
-      "COORDINATOR_LOAD_STREAM_NAMES" -> "proxy.events,proxy.payload_audit"
-    ).asJava)
+    val environment = ConfigFactory.parseMap(
+      Map(
+        "SYNC_SCAN_TOPIC" -> "sync.scan.request.cluster",
+        "SYNC_PAYLOAD_AUDIT_TOPIC" -> "proxy.payload_audit.cluster",
+        "SYNC_SCAN_CONSUMER" -> "octopus-scan-v7",
+        "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
+        "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
+        "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
+        "SYNC_STREAM_NAMES" -> "proxy.events,proxy.payload_audit",
+        "COORDINATOR_LOAD_STREAM_NAMES" -> "proxy.events,proxy.payload_audit"
+      ).asJava
+    )
     val loaded = AppConfig.load(
       ConfigFactory.parseResources("application.conf").withFallback(environment).resolve()
     )
@@ -223,15 +225,21 @@ class AppConfigSuite extends FunSuite:
 
   private def defaults: AppConfig =
     AppConfig.load(
-      ConfigFactory.parseResources("application.conf")
+      ConfigFactory
+        .parseResources("application.conf")
         .withFallback(ConfigFactory.empty())
         .resolve(ConfigResolveOptions.defaults().setUseSystemEnvironment(false))
     )
 
   private def validationMessages(config: AppConfig): List[String] =
-    AppConfig.validate(config).left.toOption.map(_.errors.toList).getOrElse(
-      fail("expected invalid configuration")
-    )
+    AppConfig
+      .validate(config)
+      .left
+      .toOption
+      .map(_.errors.toList)
+      .getOrElse(
+        fail("expected invalid configuration")
+      )
 
   private def enabledPostgres(config: PostgresConfig): PostgresConfig =
     config.copy(

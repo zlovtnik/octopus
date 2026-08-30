@@ -19,14 +19,20 @@ class PostgresTransformServiceSuite extends FunSuite:
     assertEquals(result.proxyEvents.head.blocked, true)
 
   test("transform ProxyEvents without blocked does not create blocked"):
-    val row = parse("""{"type": "tls_scan", "host": "example.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get
+    val row = parse(
+      """{"type": "tls_scan", "host": "example.com", "time": "2026-07-20T12:00:00Z", "blocked": false}"""
+    ).toOption.get
     val result = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(row))
     assertEquals(result.proxyEvents.size, 1)
     assertEquals(result.blockedEvents.size, 0)
 
   test("transform ProxyEvents bounds blocked risk scores to DECIMAL(10,4)"):
-    val high = parse("""{"type":"tls_scan","host":"high.example","time":"2026-07-20T12:00:00Z","blocked":true,"risk_score":1000000}""").toOption.get
-    val low = parse("""{"type":"tls_scan","host":"low.example","time":"2026-07-20T12:00:00Z","blocked":true,"metrics":{"risk_score":-1000000}}""").toOption.get
+    val high = parse(
+      """{"type":"tls_scan","host":"high.example","time":"2026-07-20T12:00:00Z","blocked":true,"risk_score":1000000}"""
+    ).toOption.get
+    val low = parse(
+      """{"type":"tls_scan","host":"low.example","time":"2026-07-20T12:00:00Z","blocked":true,"metrics":{"risk_score":-1000000}}"""
+    ).toOption.get
 
     val result = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(high, low))
 
@@ -123,7 +129,8 @@ class PostgresTransformServiceSuite extends FunSuite:
     assert(!alert.toString.contains("sensitive-pmkid"))
 
   test("inputRowCount returns correct counts"):
-    val row = parse("""{"type": "tls_scan", "host": "a.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get
+    val row =
+      parse("""{"type": "tls_scan", "host": "a.com", "time": "2026-07-20T12:00:00Z", "blocked": false}""").toOption.get
     val result = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(row))
     assertEquals(result.inputRowCount(PostgresSinkTarget.ProxyEvents), 1)
     assertEquals(result.inputRowCount(PostgresSinkTarget.WirelessAuditFrames), 0)

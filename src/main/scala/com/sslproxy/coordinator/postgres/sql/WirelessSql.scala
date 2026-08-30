@@ -36,14 +36,14 @@ object WirelessSql:
           WHERE enabled = TRUE"""
 
   def upsertClientProbe(
-      ssid: String,
-      clientMac: String,
-      observedBssid: Option[String],
-      firstSeen: Option[Timestamp],
-      lastSeen: Option[Timestamp],
-      probeCount: Long,
-      locationId: Option[String],
-      batchId: String
+    ssid: String,
+    clientMac: String,
+    observedBssid: Option[String],
+    firstSeen: Option[Timestamp],
+    lastSeen: Option[Timestamp],
+    probeCount: Long,
+    locationId: Option[String],
+    batchId: String
   ): Fragment =
     val normalizedSsid = ssid.trim
     val normalizedBssid = observedBssid.map(_.trim.toLowerCase(java.util.Locale.ROOT))
@@ -87,10 +87,10 @@ object WirelessSql:
             last_probe_batch_id = EXCLUDED.last_probe_batch_id"""
 
   def upsertBacklog(
-      dedupeKey: String,
-      streamName: String,
-      payload: Json,
-      failureStage: String
+    dedupeKey: String,
+    streamName: String,
+    payload: Json,
+    failureStage: String
   ): Fragment =
     sql"""INSERT INTO sync_backlog (
             dedupe_key, stream_name, payload, failure_stage, status,
@@ -120,11 +120,11 @@ object WirelessSql:
             AND status <> 'synced'"""
 
   def markFailed(
-      dedupeKey: String,
-      streamName: String,
-      status: String,
-      error: String,
-      delaySeconds: Long
+    dedupeKey: String,
+    streamName: String,
+    status: String,
+    error: String,
+    delaySeconds: Long
   ): Fragment =
     sql"""UPDATE sync_backlog
           SET status = $status,

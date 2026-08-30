@@ -69,9 +69,11 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         Stream.raiseError[IO](TerminalProcessorError("invalid retention policy"))
       )
       supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
-        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).map { statuses =>
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+          .map { statuses =>
             assertEquals(statuses(id).lastError, Some("invalid retention policy"))
-        }.guarantee(fiber.cancel)
+          }
+          .guarantee(fiber.cancel)
       }
     }
   }
@@ -86,9 +88,11 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         startup = IO.raiseError(TerminalProcessorError("invalid startup configuration"))
       )
       supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
-        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal).map { statuses =>
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+          .map { statuses =>
             assertEquals(statuses(id).lastError, Some("invalid startup configuration"))
-        }.guarantee(fiber.cancel)
+          }
+          .guarantee(fiber.cancel)
       }
     }
   }
@@ -131,18 +135,22 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   test("retryable database operation failures enter backoff") {
     val id = ProcessorId.SyncScanIngestion
     val config = ProcessorConfig(List(id.value), 100L, 100L)
-    val failure = DatabaseOperationException(DatabaseError.Retryable(
-      "payload_audit.record_scan_requests",
-      new java.sql.SQLTransientException("connection unavailable"),
-      "connection unavailable"
-    ))
+    val failure = DatabaseOperationException(
+      DatabaseError.Retryable(
+        "payload_audit.record_scan_requests",
+        new java.sql.SQLTransientException("connection unavailable"),
+        "connection unavailable"
+      )
+    )
 
     ProcessorSupervisor.create(config).flatMap { supervisor =>
       val workload = ProcessorWorkload(id, Stream.raiseError[IO](failure))
       supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
-        awaitLifecycle(supervisor, id, ProcessorLifecycle.BackingOff).map { statuses =>
-          assertEquals(statuses(id).lifecycle, ProcessorLifecycle.BackingOff)
-        }.guarantee(fiber.cancel)
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.BackingOff)
+          .map { statuses =>
+            assertEquals(statuses(id).lifecycle, ProcessorLifecycle.BackingOff)
+          }
+          .guarantee(fiber.cancel)
       }
     }
   }
@@ -154,10 +162,18 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       events <- Ref.of[IO, Vector[String]](Vector.empty)
       store = RecordingProcessorStateStore(events)
       supervisor <- ProcessorSupervisor.create(config, store)
-      _ <- supervisor.run(List(ProcessorWorkload(
-        id,
-        Stream.raiseError[IO](TerminalProcessorError("invalid record"))
-      ))).compile.drain.start
+      _ <- supervisor
+        .run(
+          List(
+            ProcessorWorkload(
+              id,
+              Stream.raiseError[IO](TerminalProcessorError("invalid record"))
+            )
+          )
+        )
+        .compile
+        .drain
+        .start
         .flatMap { fiber =>
           (for
             _ <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
@@ -178,10 +194,18 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       attempts <- Ref.of[IO, Int](0)
       store = new StartRunOnceFailingStore(attempts)
       supervisor <- ProcessorSupervisor.create(config, store)
-      _ <- supervisor.run(List(ProcessorWorkload(
-        id,
-        Stream.raiseError[IO](TerminalProcessorError("invalid record"))
-      ))).compile.drain.start
+      _ <- supervisor
+        .run(
+          List(
+            ProcessorWorkload(
+              id,
+              Stream.raiseError[IO](TerminalProcessorError("invalid record"))
+            )
+          )
+        )
+        .compile
+        .drain
+        .start
         .flatMap { fiber =>
           (for
             statuses <- awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
@@ -195,35 +219,37 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
   }
 
   private def awaitLifecycle(
-      supervisor: ProcessorSupervisor,
-      id: ProcessorId,
-      expected: ProcessorLifecycle
+    supervisor: ProcessorSupervisor,
+    id: ProcessorId,
+    expected: ProcessorLifecycle
   ): IO[Map[ProcessorId, ProcessorStatus]] =
-    supervisor.readiness.statuses.flatMap { statuses =>
-      if statuses(id).lifecycle == expected then IO.pure(statuses)
-      else IO.sleep(10.millis) *> awaitLifecycle(supervisor, id, expected)
-    }.timeout(2.seconds)
+    supervisor.readiness.statuses
+      .flatMap { statuses =>
+        if statuses(id).lifecycle == expected then IO.pure(statuses)
+        else IO.sleep(10.millis) *> awaitLifecycle(supervisor, id, expected)
+      }
+      .timeout(2.seconds)
 
   private final class RecordingProcessorStateStore(
-      events: Ref[IO, Vector[String]]
+    events: Ref[IO, Vector[String]]
   ) extends ProcessorStateStore[IO]:
     def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
 
     def persist(
-        id: ProcessorId,
-        status: ProcessorStatus,
-        observedAt: java.time.Instant
+      id: ProcessorId,
+      status: ProcessorStatus,
+      observedAt: java.time.Instant
     ) = EitherT.liftF(events.update(_ :+ s"state:${id.value}:${status.lifecycle.value}"))
 
     def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
       EitherT.liftF(events.update(_ :+ s"start:${id.value}:$runId"))
 
     def finishRun(
-        runId: String,
-        status: ProcessorRunStatus,
-        errorClass: Option[String],
-        errorText: Option[String],
-        finishedAt: java.time.Instant
+      runId: String,
+      status: ProcessorRunStatus,
+      errorClass: Option[String],
+      errorText: Option[String],
+      finishedAt: java.time.Instant
     ) = EitherT.liftF(events.update(_ :+ s"finish:$runId:${status.value}"))
 
   private object RecordingProcessorStateStore:
@@ -234,15 +260,14 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       def startRun(id: ProcessorId, runId: String, startedAt: java.time.Instant) =
         EitherT.rightT[IO, DatabaseError](())
       def finishRun(
-          runId: String,
-          status: ProcessorRunStatus,
-          errorClass: Option[String],
-          errorText: Option[String],
-          finishedAt: java.time.Instant
+        runId: String,
+        status: ProcessorRunStatus,
+        errorClass: Option[String],
+        errorText: Option[String],
+        finishedAt: java.time.Instant
       ) = EitherT.rightT[IO, DatabaseError](())
 
-  private final class StartRunOnceFailingStore(attempts: Ref[IO, Int])
-      extends ProcessorStateStore[IO]:
+  private final class StartRunOnceFailingStore(attempts: Ref[IO, Int]) extends ProcessorStateStore[IO]:
     def load = EitherT.rightT[IO, DatabaseError](Map.empty[ProcessorId, ProcessorStatus])
 
     def persist(id: ProcessorId, status: ProcessorStatus, observedAt: java.time.Instant) =
@@ -252,19 +277,21 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       EitherT(attempts.modify { count =>
         val result =
           if count == 0 then
-            Left(DatabaseError.Retryable(
-              "processor.start_run",
-              new java.sql.SQLTransientException("connection timeout"),
-              "connection timeout"
-            ))
+            Left(
+              DatabaseError.Retryable(
+                "processor.start_run",
+                new java.sql.SQLTransientException("connection timeout"),
+                "connection timeout"
+              )
+            )
           else Right(())
         (count + 1, result)
       })
 
     def finishRun(
-        runId: String,
-        status: ProcessorRunStatus,
-        errorClass: Option[String],
-        errorText: Option[String],
-        finishedAt: java.time.Instant
+      runId: String,
+      status: ProcessorRunStatus,
+      errorClass: Option[String],
+      errorText: Option[String],
+      finishedAt: java.time.Instant
     ) = EitherT.rightT[IO, DatabaseError](())

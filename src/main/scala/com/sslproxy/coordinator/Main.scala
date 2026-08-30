@@ -87,7 +87,13 @@ object Main extends IOApp.Simple:
                     def payloadLookup(sha: String): IO[Option[String]] =
                       IngestionSql.payloadBySha256(sha).unique.transact(postgresDoobieTx).attempt.map(_.toOption)
                     val handler =
-                      new PostgresLoadHandler(payloadResolver, PostgresTransformService, oldTx, PostgresClock, payloadLookup)
+                      new PostgresLoadHandler(
+                        payloadResolver,
+                        PostgresTransformService,
+                        oldTx,
+                        PostgresClock,
+                        payloadLookup
+                      )
                     val ingestionStore = new PostgresIngestionStore(postgresRepo)
                     val outboxStore = new PostgresOutboxStore(postgresRepo)
                     val projectionStore = new PostgresProjectionStore(postgresRepo)
@@ -457,8 +463,7 @@ object Main extends IOApp.Simple:
                                     )
                                   })
                               val supervisedStreams =
-                                if enabledProcessorIds.isEmpty && runtimeConsumerProcessorIds.isEmpty then
-                                  Stream.empty
+                                if enabledProcessorIds.isEmpty && runtimeConsumerProcessorIds.isEmpty then Stream.empty
                                 else supervisor.run(workloads)
                               val processorSupportStreams =
                                 if enabledProcessorIds.isEmpty then Stream.empty

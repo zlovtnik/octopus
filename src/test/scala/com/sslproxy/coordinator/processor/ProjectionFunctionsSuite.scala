@@ -24,13 +24,15 @@ class ProjectionFunctionsSuite extends FunSuite:
     assertEquals(FrameToken.normalize(None, Some("beacon")), FrameToken.Beacon)
 
   test("transition probabilities sum to one for every previous token"):
-    val probabilities = ProjectionFunctions.transitionProbabilities(Vector(
-      FrameToken.Beacon,
-      FrameToken.ProbeRequest,
-      FrameToken.Beacon,
-      FrameToken.ProbeResponse,
-      FrameToken.Beacon
-    ))
+    val probabilities = ProjectionFunctions.transitionProbabilities(
+      Vector(
+        FrameToken.Beacon,
+        FrameToken.ProbeRequest,
+        FrameToken.Beacon,
+        FrameToken.ProbeResponse,
+        FrameToken.Beacon
+      )
+    )
     probabilities.groupMap(_._1._1)(_._2).foreachEntry { (_, values) =>
       assertEqualsDouble(values.sum, 1.0d, 0.0000001d)
     }

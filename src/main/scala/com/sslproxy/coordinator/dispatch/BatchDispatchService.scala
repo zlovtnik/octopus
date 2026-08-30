@@ -15,26 +15,25 @@ import scala.concurrent.duration.*
   * receiving transaction is therefore required to deduplicate that key.
   */
 final class BatchDispatchService(
-    store: OutboxStore[IO],
-    producer: KafkaProducer[IO, String, String],
-    metrics: CoordinatorMetrics,
-    ownerId: String,
-    destinationTopics: List[String],
-    leaseSeconds: Int,
-    retryBaseSeconds: Int,
-    retryMaxSeconds: Int
+  store: OutboxStore[IO],
+  producer: KafkaProducer[IO, String, String],
+  metrics: CoordinatorMetrics,
+  ownerId: String,
+  destinationTopics: List[String],
+  leaseSeconds: Int,
+  retryBaseSeconds: Int,
+  retryMaxSeconds: Int
 ):
   import BatchDispatchService.{DispatchResult, log}
 
   def dispatchNext(): IO[DispatchResult] = store.claim(ownerId, destinationTopics, leaseSeconds).value.flatMap {
-      case Left(error) =>
-        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
-        IO(log.error("outbox_claim", "status" -> "db_error",
-          "operation" -> error.operation, "error" -> sanitized))
-          .as(DispatchResult.StopDraining)
-      case Right(None) => IO.pure(DispatchResult.NoWork)
-      case Right(Some(record)) => publish(record)
-    }
+    case Left(error) =>
+      val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
+      IO(log.error("outbox_claim", "status" -> "db_error", "operation" -> error.operation, "error" -> sanitized))
+        .as(DispatchResult.StopDraining)
+    case Right(None) => IO.pure(DispatchResult.NoWork)
+    case Right(Some(record)) => publish(record)
+  }
 
   private def publish(record: OutboxRecord): IO[DispatchResult] =
     val brokerRecord = ProducerRecord(
@@ -43,37 +42,60 @@ final class BatchDispatchService(
       record.payload
     )
 
-    CoordinatorTracing.span(
-      "kafka.publish.outbox",
-      SpanKind.PRODUCER,
-      "messaging.system" -> "kafka",
-      "messaging.destination.name" -> record.destinationTopic,
-      "messaging.message.id" -> record.messageKey,
-      "outbox.fence" -> record.lease.fence.toString
-    ) {
-      producer.produce(ProducerRecords.one(brokerRecord)).flatten
-    }.timeout((leaseSeconds.toLong * 900L).max(1L).millis).attempt.flatMap {
-      case Right(_) => acknowledge(record)
-      case Left(error) => fail(record, error)
-    }
+    CoordinatorTracing
+      .span(
+        "kafka.publish.outbox",
+        SpanKind.PRODUCER,
+        "messaging.system" -> "kafka",
+        "messaging.destination.name" -> record.destinationTopic,
+        "messaging.message.id" -> record.messageKey,
+        "outbox.fence" -> record.lease.fence.toString
+      ) {
+        producer.produce(ProducerRecords.one(brokerRecord)).flatten
+      }
+      .timeout((leaseSeconds.toLong * 900L).max(1L).millis)
+      .attempt
+      .flatMap {
+        case Right(_) => acknowledge(record)
+        case Left(error) => fail(record, error)
+      }
 
   private def acknowledge(record: OutboxRecord): IO[DispatchResult] = store.acknowledge(record).value.flatMap {
-      case Right(true) =>
-        IO(metrics.recordBatchDispatched()) *>
-          IO(log.info("outbox_publish", "status" -> "published",
-            "outbox_id" -> record.outboxId, "topic" -> record.destinationTopic,
-            "message_key" -> record.messageKey, "fence" -> record.lease.fence.toString))
-            .as(DispatchResult.Dispatched)
-      case Right(false) =>
-        IO(log.warn("outbox_publish", "status" -> "lease_lost_after_publish",
-          "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString))
-          .as(DispatchResult.ContinueDraining)
-      case Left(error) =>
-        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
-        IO(log.error("outbox_publish", "status" -> "ack_failed",
-          "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> sanitized)).as(DispatchResult.StopDraining)
-    }
+    case Right(true) =>
+      IO(metrics.recordBatchDispatched()) *>
+        IO(
+          log.info(
+            "outbox_publish",
+            "status" -> "published",
+            "outbox_id" -> record.outboxId,
+            "topic" -> record.destinationTopic,
+            "message_key" -> record.messageKey,
+            "fence" -> record.lease.fence.toString
+          )
+        )
+          .as(DispatchResult.Dispatched)
+    case Right(false) =>
+      IO(
+        log.warn(
+          "outbox_publish",
+          "status" -> "lease_lost_after_publish",
+          "outbox_id" -> record.outboxId,
+          "fence" -> record.lease.fence.toString
+        )
+      )
+        .as(DispatchResult.ContinueDraining)
+    case Left(error) =>
+      val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
+      IO(
+        log.error(
+          "outbox_publish",
+          "status" -> "ack_failed",
+          "outbox_id" -> record.outboxId,
+          "operation" -> error.operation,
+          "error" -> sanitized
+        )
+      ).as(DispatchResult.StopDraining)
+  }
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
     val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
@@ -81,15 +103,27 @@ final class BatchDispatchService(
       case Right(disposition) =>
         val status = disposition match
           case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"
-          case OutboxFailureDisposition.Parked         => "parked"
-        IO(log.warn("outbox_publish", "status" -> status,
-          "outbox_id" -> record.outboxId, "attempt" -> record.attemptCount.toString,
-          "error" -> message)).as(DispatchResult.StopDraining)
+          case OutboxFailureDisposition.Parked => "parked"
+        IO(
+          log.warn(
+            "outbox_publish",
+            "status" -> status,
+            "outbox_id" -> record.outboxId,
+            "attempt" -> record.attemptCount.toString,
+            "error" -> message
+          )
+        ).as(DispatchResult.StopDraining)
       case Left(error) =>
         val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.sanitize(error.message)
-        IO(log.error("outbox_publish", "status" -> "fail_transition_failed",
-          "outbox_id" -> record.outboxId, "operation" -> error.operation,
-          "error" -> sanitized)).as(DispatchResult.StopDraining)
+        IO(
+          log.error(
+            "outbox_publish",
+            "status" -> "fail_transition_failed",
+            "outbox_id" -> record.outboxId,
+            "operation" -> error.operation,
+            "error" -> sanitized
+          )
+        ).as(DispatchResult.StopDraining)
     }
 
 object BatchDispatchService:

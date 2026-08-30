@@ -58,9 +58,13 @@ object ProjectionFunctions:
   def transitionProbabilities(tokens: Vector[FrameToken]): Map[(FrameToken, FrameToken), Double] =
     val pairs = tokens.zip(tokens.drop(1))
     val totals = pairs.groupMapReduce(_._1)(_ => 1)(_ + _)
-    pairs.groupMapReduce(identity)(_ => 1)(_ + _).view.map { case (pair, count) =>
-      pair -> (count.toDouble / totals(pair._1).toDouble)
-    }.toMap
+    pairs
+      .groupMapReduce(identity)(_ => 1)(_ + _)
+      .view
+      .map { case (pair, count) =>
+        pair -> (count.toDouble / totals(pair._1).toDouble)
+      }
+      .toMap
 
   def connectedComponents[A: Ordering](edges: Iterable[(A, A)]): Vector[Vector[A]] =
     val adjacency = edges.foldLeft(Map.empty[A, Set[A]]) { case (result, (left, right)) =>
@@ -106,7 +110,8 @@ object ProjectionFunctions:
 
   def stableId(namespace: String, parts: Iterable[String]): String =
     val normalized = (namespace +: parts.toVector).mkString("\u001f")
-    val digest = MessageDigest.getInstance("SHA-256")
+    val digest = MessageDigest
+      .getInstance("SHA-256")
       .digest(normalized.getBytes(StandardCharsets.UTF_8))
     val hex = digest.take(16).map("%02x".format(_)).mkString
     s"${hex.take(8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.drop(20)}"

@@ -14,8 +14,8 @@ import doobie.implicits.*
 
 import java.time.Instant
 
-final class PostgresProcessorStateStore(xa: Transactor[IO],
-  dbSemaphore: Option[Semaphore[IO]] = None) extends ProcessorStateStore[IO]:
+final class PostgresProcessorStateStore(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] = None)
+    extends ProcessorStateStore[IO]:
   import PostgresProcessorStateStore.log
 
   def load: DbResultT[IO, Map[ProcessorId, ProcessorStatus]] =
@@ -42,11 +42,11 @@ final class PostgresProcessorStateStore(xa: Transactor[IO],
   private def lifecycle(databaseStatus: String): Option[ProcessorLifecycle] =
     databaseStatus match
       case "disabled" => Some(ProcessorLifecycle.Disabled)
-      case "running"  => Some(ProcessorLifecycle.Starting)
-      case "idle"     => Some(ProcessorLifecycle.Ready)
+      case "running" => Some(ProcessorLifecycle.Starting)
+      case "idle" => Some(ProcessorLifecycle.Ready)
       case "degraded" => Some(ProcessorLifecycle.BackingOff)
-      case "failed"   => Some(ProcessorLifecycle.FailedTerminal)
-      case _          => None
+      case "failed" => Some(ProcessorLifecycle.FailedTerminal)
+      case _ => None
 
   def persist(id: ProcessorId, status: ProcessorStatus, observedAt: Instant): DbResultT[IO, Unit] =
     run("postgres.processor_state.persist") {
@@ -59,11 +59,11 @@ final class PostgresProcessorStateStore(xa: Transactor[IO],
     }
 
   def finishRun(
-      runId: String,
-      status: ProcessorRunStatus,
-      errorClass: Option[String],
-      errorText: Option[String],
-      finishedAt: Instant
+    runId: String,
+    status: ProcessorRunStatus,
+    errorClass: Option[String],
+    errorText: Option[String],
+    finishedAt: Instant
   ): DbResultT[IO, Unit] =
     run("postgres.processor_run.finish") {
       ProcessorStateSql.finishRun(runId, status, errorClass, errorText, finishedAt).run.flatMap { updated =>
@@ -80,8 +80,10 @@ final class PostgresProcessorStateStore(xa: Transactor[IO],
 
   private def run[A](operation: String)(action: ConnectionIO[A]): DbResultT[IO, A] =
     EitherT(
-      PostgresRepository.retryTransient(operation)(
-          dbSemaphore.fold(action.transact(xa))(semaphore => semaphore.permit.use(_ => action.transact(xa))))
+      PostgresRepository
+        .retryTransient(operation)(
+          dbSemaphore.fold(action.transact(xa))(semaphore => semaphore.permit.use(_ => action.transact(xa)))
+        )
         .map(Right(_))
         .handleError { cause =>
           val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)

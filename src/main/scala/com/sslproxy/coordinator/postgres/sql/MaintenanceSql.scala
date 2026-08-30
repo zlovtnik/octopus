@@ -62,18 +62,22 @@ object MaintenanceSql:
                            AND payload_archived = false
                            AND payload_sha256 = ${receipt.payloadSha256}
                            AND payload IS NOT NULL""".update.run
-      _ <- if updated == 1 then FC.unit
-           else FC.raiseError(IllegalStateException(
-             s"archive candidate ${candidate.streamName}/${candidate.dedupeKey} changed before metadata commit"
-           ))
+      _ <-
+        if updated == 1 then FC.unit
+        else
+          FC.raiseError(
+            IllegalStateException(
+              s"archive candidate ${candidate.streamName}/${candidate.dedupeKey} changed before metadata commit"
+            )
+          )
     yield ()
 
   def claimLease(
-      resourceType: String,
-      resourceId: String,
-      ownerId: String,
-      token: String,
-      ttlSeconds: Int
+    resourceType: String,
+    resourceId: String,
+    ownerId: String,
+    token: String,
+    ttlSeconds: Int
   ): ConnectionIO[Option[Lease]] =
     for
       _ <- sql"""INSERT INTO work_leases (resource_type, resource_id)
@@ -91,19 +95,22 @@ object MaintenanceSql:
                             AND resource_id = $resourceId
                             AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP)
                             AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP)""".update.run
-      lease <- if claimed != 1 then none[Lease].pure[ConnectionIO]
-               else
-                 sql"""SELECT fence, lease_expires_at
+      lease <-
+        if claimed != 1 then none[Lease].pure[ConnectionIO]
+        else
+          sql"""SELECT fence, lease_expires_at
                         FROM work_leases
                         WHERE resource_type = $resourceType
                           AND resource_id = $resourceId
                           AND owner_id = $ownerId
                           AND lease_token = $token"""
-                   .query[(Long, Timestamp)]
-                   .option
-                   .map(_.map((fence, expiresAt) =>
-                     Lease(s"$resourceType/$resourceId", ownerId, token, fence, expiresAt.toInstant)
-                   ))
+            .query[(Long, Timestamp)]
+            .option
+            .map(
+              _.map((fence, expiresAt) =>
+                Lease(s"$resourceType/$resourceId", ownerId, token, fence, expiresAt.toInstant)
+              )
+            )
     yield lease
 
   def releaseLease(resourceType: String, resourceId: String, lease: Lease): Update0 =
@@ -120,10 +127,10 @@ object MaintenanceSql:
              AND fence = ${lease.fence}""".update
 
   def renewLease(
-      resourceType: String,
-      resourceId: String,
-      lease: Lease,
-      ttlSeconds: Int
+    resourceType: String,
+    resourceId: String,
+    lease: Lease,
+    ttlSeconds: Int
   ): Update0 =
     sql"""UPDATE work_leases
            SET lease_expires_at = (CURRENT_TIMESTAMP + (${ttlSeconds.max(1)}) * INTERVAL '1 second'),
@@ -136,11 +143,11 @@ object MaintenanceSql:
              AND lease_expires_at > CURRENT_TIMESTAMP""".update
 
   def startRetentionRun(
-      runId: String,
-      policyName: String,
-      targetTable: String,
-      cutoff: Instant,
-      lease: Lease
+    runId: String,
+    policyName: String,
+    targetTable: String,
+    cutoff: Instant,
+    lease: Lease
   ): Update0 =
     sql"""INSERT INTO retention_runs (
              run_id, policy_name, target_table, cutoff_at, status,
@@ -151,12 +158,12 @@ object MaintenanceSql:
            )""".update
 
   def finishRetentionRun(
-      runId: String,
-      status: String,
-      rowsSelected: Long,
-      rowsArchived: Long,
-      rowsDeleted: Long,
-      error: Option[String]
+    runId: String,
+    status: String,
+    rowsSelected: Long,
+    rowsArchived: Long,
+    rowsDeleted: Long,
+    error: Option[String]
   ): Update0 =
     sql"""UPDATE retention_runs
            SET status = $status,
@@ -205,11 +212,11 @@ object MaintenanceSql:
            LIMIT ${limit.max(1)}""".query[(String, String, String, Timestamp)]
 
   def deleteRetainedEvent(
-      candidate: (String, String, String, Timestamp),
-      tombstoneDays: Int,
-      resourceType: String,
-      resourceId: String,
-      lease: Lease
+    candidate: (String, String, String, Timestamp),
+    tombstoneDays: Int,
+    resourceType: String,
+    resourceId: String,
+    lease: Lease
   ): ConnectionIO[Boolean] =
     val (dedupeKey, streamName, payloadSha256, observedAt) = candidate
     val leaseGuard =
@@ -224,8 +231,9 @@ object MaintenanceSql:
 
     for
       guarded <- leaseGuard
-      _ <- if guarded.contains(1) then FC.unit
-           else FC.raiseError(IllegalStateException(s"maintenance lease ${lease.scope} was lost"))
+      _ <-
+        if guarded.contains(1) then FC.unit
+        else FC.raiseError(IllegalStateException(s"maintenance lease ${lease.scope} was lost"))
       _ <- sql"""INSERT INTO sync_event_tombstones (
                    dedupe_key, stream_name, payload_sha256, observed_at, expires_at
                  ) VALUES (
@@ -271,8 +279,9 @@ object MaintenanceSql:
                            AND payload_archived = true
                            AND payload IS NULL
                            AND payload_sha256 = $payloadSha256""".update.run
-      _ <- if deleted == 1 then FC.unit
-           else FC.raiseError(IllegalStateException(s"retention candidate $streamName/$dedupeKey changed"))
+      _ <-
+        if deleted == 1 then FC.unit
+        else FC.raiseError(IllegalStateException(s"retention candidate $streamName/$dedupeKey changed"))
     yield true
 
   def pruneTombstones(limit: Int): Update0 =
@@ -299,10 +308,10 @@ object MaintenanceSql:
            LIMIT ${limit.max(1)}""".query[String]
 
   def deleteRetainedSearchDocument(
-      documentId: String,
-      resourceType: String,
-      resourceId: String,
-      lease: Lease
+    documentId: String,
+    resourceType: String,
+    resourceId: String,
+    lease: Lease
   ): ConnectionIO[Boolean] =
     val leaseGuard =
       sql"""SELECT 1 FROM work_leases
@@ -316,8 +325,9 @@ object MaintenanceSql:
 
     for
       guarded <- leaseGuard
-      _ <- if guarded.contains(1) then FC.unit
-           else FC.raiseError(IllegalStateException(s"maintenance lease ${lease.scope} was lost"))
+      _ <-
+        if guarded.contains(1) then FC.unit
+        else FC.raiseError(IllegalStateException(s"maintenance lease ${lease.scope} was lost"))
       _ <- sql"""DELETE FROM atheros_search.search_vectors_event
                    WHERE document_id = $documentId""".update.run
       _ <- sql"""DELETE FROM atheros_search.search_vectors_device
@@ -336,8 +346,9 @@ object MaintenanceSql:
       deleted <- sql"""DELETE FROM atheros_search.search_documents
                          WHERE document_id = $documentId
                            AND status IN ('superseded', 'deleted', 'failed')""".update.run
-      _ <- if deleted == 1 then FC.unit
-           else FC.raiseError(IllegalStateException(s"search retention candidate $documentId changed"))
+      _ <-
+        if deleted == 1 then FC.unit
+        else FC.raiseError(IllegalStateException(s"search retention candidate $documentId changed"))
     yield true
 
   def cleanupStaleWorkers(limit: Int): ConnectionIO[Int] =

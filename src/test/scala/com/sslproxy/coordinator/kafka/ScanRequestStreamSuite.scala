@@ -31,12 +31,16 @@ class ScanRequestStreamSuite extends FunSuite:
 
   test("missing or malformed payload references are non-retriable poison records"):
     assert(ScanRequestStream.isNonRetriableResolutionError(IllegalArgumentException("bad payload")))
-    assert(ScanRequestStream.isNonRetriableResolutionError(
-      PostgresPayloadReadException(NoSuchFileException("missing.json"))
-    ))
+    assert(
+      ScanRequestStream.isNonRetriableResolutionError(
+        PostgresPayloadReadException(NoSuchFileException("missing.json"))
+      )
+    )
 
   test("transient payload I/O failures remain retriable"):
-    assert(!ScanRequestStream.isNonRetriableResolutionError(
-      PostgresPayloadReadException(AccessDeniedException("event.json"))
-    ))
+    assert(
+      !ScanRequestStream.isNonRetriableResolutionError(
+        PostgresPayloadReadException(AccessDeniedException("event.json"))
+      )
+    )
     assert(!ScanRequestStream.isNonRetriableResolutionError(RuntimeException("temporary failure")))

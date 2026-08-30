@@ -50,8 +50,7 @@ class BackpressureServiceSuite extends CatsEffectSuite:
       _ <- svc.checkAndAct
       _ <- svc.checkAndAct
       suspended <- svc.isConsumerSuspended
-    yield
-      assertEquals(suspended, true)
+    yield assertEquals(suspended, true)
 
   test("resume when pending count falls to recovery threshold after suspension"):
     for

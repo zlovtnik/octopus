@@ -31,7 +31,8 @@ class IntelligenceSqlSuite extends FunSuite:
   test("dynamic similarity identifiers remain closed by VectorKind"):
     IntelligenceSql.VectorKind.values.foreach { kind =>
       val anchors = IntelligenceSql.similarityAnchors(kind, 10).sql
-      val statement = IntelligenceSql.similarityCandidatesForAnchor(kind, "document", "model", "[0.1,0.2]", 0.2d, 10).sql
+      val statement =
+        IntelligenceSql.similarityCandidatesForAnchor(kind, "document", "model", "[0.1,0.2]", 0.2d, 10).sql
       assert(anchors.contains(s"atheros_search.${kind.table}"))
       assert(anchors.contains("embedding::text"))
       assert(statement.contains(s"atheros_search.${kind.table}"))

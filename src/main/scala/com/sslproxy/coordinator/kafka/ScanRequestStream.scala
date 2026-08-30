@@ -6,11 +6,7 @@ import com.sslproxy.coordinator.config.{IngestConfig, KafkaCfg}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.postgres.{
-  PostgresErrorClass,
-  PostgresPayloadReadException,
-  PostgresPayloadResolver
-}
+import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresPayloadReadException, PostgresPayloadResolver}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 import com.sslproxy.coordinator.observability.StructuredLogger

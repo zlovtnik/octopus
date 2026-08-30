@@ -19,14 +19,17 @@ class MainSuite extends CatsEffectSuite:
     assertEquals(Main.dbWorkerPermits(1, 1), 1L)
 
   test("active runtime starts supervised, processor-support, and required streams"):
-    Main.enabledRuntimeStreams(
-      RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
-      Stream.emit("supervised").covary[IO],
-      Stream.emit("support").covary[IO],
-      Stream.emit("required").covary[IO]
-    ).take(3).compile.toList.map(values =>
-      assertEquals(values.toSet, Set("supervised", "support", "required"))
-    )
+    Main
+      .enabledRuntimeStreams(
+        RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
+        Stream.emit("supervised").covary[IO],
+        Stream.emit("support").covary[IO],
+        Stream.emit("required").covary[IO]
+      )
+      .take(3)
+      .compile
+      .toList
+      .map(values => assertEquals(values.toSet, Set("supervised", "support", "required")))
 
   test("consumer-only runtime excludes processor support"):
     val processorOnly = Main.enabledRuntimeStreams(

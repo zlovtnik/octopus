@@ -7,12 +7,15 @@ class SearchPreparationSqlSuite extends FunSuite:
   test("all public search kinds have document and embedding preparation paths"):
     val kinds = SearchPreparationSql.supportedKinds
 
-    assertEquals(kinds.map(_.sourceKind).toSet, Set(
-      "event",
-      "device",
-      "behaviour_window",
-      "frame_sequence"
-    ))
+    assertEquals(
+      kinds.map(_.sourceKind).toSet,
+      Set(
+        "event",
+        "device",
+        "behaviour_window",
+        "frame_sequence"
+      )
+    )
     assertEquals(kinds.map(_.embeddingKind).toSet, Set("event", "device", "behaviour", "sequence"))
 
     val candidateSql = kinds.map(kind => kind -> SearchPreparationSql.candidates(kind, 10).sql).toMap

@@ -12,17 +12,17 @@ trait Processor[F[_]]:
   def run: Stream[F, Unit]
 
 final case class ProcessorDescriptor(
-    id: ProcessorId,
-    mode: ProcessorMode,
-    dependencies: Set[ProcessorId]
+  id: ProcessorId,
+  mode: ProcessorMode,
+  dependencies: Set[ProcessorId]
 )
 
 final case class Lease(
-    scope: String,
-    ownerId: String,
-    token: String,
-    fence: Long,
-    expiresAt: Instant
+  scope: String,
+  ownerId: String,
+  token: String,
+  fence: Long,
+  expiresAt: Instant
 )
 
 object Lease:
@@ -30,9 +30,9 @@ object Lease:
     Clock[F].realTimeInstant.map(_.plusMillis(ttl.toMillis))
 
 final case class RetryPolicy(
-    baseDelay: FiniteDuration,
-    maxDelay: FiniteDuration,
-    maxAttempts: Option[Int]
+  baseDelay: FiniteDuration,
+  maxDelay: FiniteDuration,
+  maxAttempts: Option[Int]
 ):
   require(baseDelay.length > 0L, "base delay must be positive")
   require(maxDelay >= baseDelay, "max delay must be at least base delay")
@@ -61,8 +61,8 @@ object ProcessorRunner:
     loop(1)
 
   def periodic[F[_]: Temporal](
-      descriptor0: ProcessorDescriptor,
-      interval: FiniteDuration
+    descriptor0: ProcessorDescriptor,
+    interval: FiniteDuration
   )(operation: F[Unit]): Processor[F] =
     new Processor[F]:
       val descriptor: ProcessorDescriptor = descriptor0

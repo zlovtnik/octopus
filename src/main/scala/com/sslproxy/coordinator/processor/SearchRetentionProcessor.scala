@@ -5,11 +5,11 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.persistence.{MaintenanceStore, orRaise}
 
 final class SearchRetentionProcessor[F[_]: Async](
-    store: MaintenanceStore[F],
-    ownerId: String,
-    retentionDays: Int,
-    batchSize: Int,
-    leaseTtlSeconds: Int
+  store: MaintenanceStore[F],
+  ownerId: String,
+  retentionDays: Int,
+  batchSize: Int,
+  leaseTtlSeconds: Int
 ):
   private val ResourceType = "maintenance"
   private val ResourceId = ProcessorId.SearchRetention.value
@@ -25,13 +25,16 @@ final class SearchRetentionProcessor[F[_]: Async](
 
   def runOnce: F[Unit] =
     runner.runOnce { lease =>
-      store.retainSearchDocuments(
-        retentionDays,
-        batchSize,
-        ResourceType,
-        ResourceId,
-        lease
-      ).orRaise.map { case (selected, deleted) =>
-        RetentionCounts(selected, 0L, deleted)
-      }
+      store
+        .retainSearchDocuments(
+          retentionDays,
+          batchSize,
+          ResourceType,
+          ResourceId,
+          lease
+        )
+        .orRaise
+        .map { case (selected, deleted) =>
+          RetentionCounts(selected, 0L, deleted)
+        }
     }

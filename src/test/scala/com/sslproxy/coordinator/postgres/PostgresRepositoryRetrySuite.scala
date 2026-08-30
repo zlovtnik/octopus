@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.postgres
 
-import cats.effect.{Deferred,IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import munit.CatsEffectSuite
@@ -61,7 +61,7 @@ class PostgresRepositoryRetrySuite extends CatsEffectSuite:
             case _ =>
               completed.tryGet.flatMap {
                 case Some(_) => IO.pure(false)
-                case None    => IO.cede *> loop
+                case None => IO.cede *> loop
               }
           }
         loop

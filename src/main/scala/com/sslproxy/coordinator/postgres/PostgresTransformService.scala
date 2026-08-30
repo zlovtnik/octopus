@@ -16,19 +16,30 @@ object PostgresTransformService:
 
   def transform(target: PostgresSinkTarget, rows: List[Json]): PostgresRowSet =
     target match
-      case PostgresSinkTarget.ProxyEvents             => transformProxyRows(rows)
-      case PostgresSinkTarget.ProxyPayloadAudit       => PostgresRowSet.empty.copy(proxyPayloadAudit = transformProxyPayloadAudit(rows))
-      case PostgresSinkTarget.WirelessAuditFrames     => PostgresRowSet.empty.copy(wirelessAuditFrames = transformWirelessAudit(rows))
-      case PostgresSinkTarget.WirelessBandwidth       => PostgresRowSet.empty.copy(wirelessBandwidth = transformWirelessBandwidth(rows))
-      case PostgresSinkTarget.WirelessRogueAp         => PostgresRowSet.empty.copy(wirelessRogueAp = transformRogueAp(rows))
-      case PostgresSinkTarget.WirelessDeauthFlood     => PostgresRowSet.empty.copy(wirelessDeauthFlood = transformDeauthFlood(rows))
-      case PostgresSinkTarget.WirelessSignalAnomaly   => PostgresRowSet.empty.copy(wirelessSignalAnomaly = transformSignalAnomaly(rows))
-      case PostgresSinkTarget.WirelessPmfAttack       => PostgresRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows))
-      case PostgresSinkTarget.WirelessClientInventory => PostgresRowSet.empty.copy(wirelessClientInventory = transformClientInventory(rows))
-      case PostgresSinkTarget.WirelessProbeRequests   => PostgresRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows))
-      case PostgresSinkTarget.WirelessAttackSequence  => PostgresRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows))
-      case PostgresSinkTarget.WirelessSequenceAlert   => PostgresRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows))
-      case PostgresSinkTarget.WirelessHandshakeAlert  => PostgresRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows))
+      case PostgresSinkTarget.ProxyEvents => transformProxyRows(rows)
+      case PostgresSinkTarget.ProxyPayloadAudit =>
+        PostgresRowSet.empty.copy(proxyPayloadAudit = transformProxyPayloadAudit(rows))
+      case PostgresSinkTarget.WirelessAuditFrames =>
+        PostgresRowSet.empty.copy(wirelessAuditFrames = transformWirelessAudit(rows))
+      case PostgresSinkTarget.WirelessBandwidth =>
+        PostgresRowSet.empty.copy(wirelessBandwidth = transformWirelessBandwidth(rows))
+      case PostgresSinkTarget.WirelessRogueAp => PostgresRowSet.empty.copy(wirelessRogueAp = transformRogueAp(rows))
+      case PostgresSinkTarget.WirelessDeauthFlood =>
+        PostgresRowSet.empty.copy(wirelessDeauthFlood = transformDeauthFlood(rows))
+      case PostgresSinkTarget.WirelessSignalAnomaly =>
+        PostgresRowSet.empty.copy(wirelessSignalAnomaly = transformSignalAnomaly(rows))
+      case PostgresSinkTarget.WirelessPmfAttack =>
+        PostgresRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows))
+      case PostgresSinkTarget.WirelessClientInventory =>
+        PostgresRowSet.empty.copy(wirelessClientInventory = transformClientInventory(rows))
+      case PostgresSinkTarget.WirelessProbeRequests =>
+        PostgresRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows))
+      case PostgresSinkTarget.WirelessAttackSequence =>
+        PostgresRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows))
+      case PostgresSinkTarget.WirelessSequenceAlert =>
+        PostgresRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows))
+      case PostgresSinkTarget.WirelessHandshakeAlert =>
+        PostgresRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows))
 
   private def transformProxyRows(rows: List[Json]): PostgresRowSet =
     val proxyRows = List.newBuilder[ProxyEventInsert]
@@ -371,7 +382,7 @@ object PostgresTransformService:
         reasons.asArray.getOrElse(Vector.empty).exists { r =>
           r.asString.exists(s => s == first || s == second)
         } match
-          case true  => 1L
+          case true => 1L
           case false => 0L
       case _ => 0L
 

@@ -6,9 +6,9 @@ import com.sslproxy.coordinator.persistence.{DbResultT, OutboxStore}
 
 final class PostgresOutboxStore(repository: PostgresRepository) extends OutboxStore[IO]:
   def claim(
-      ownerId: String,
-      destinations: List[String],
-      leaseSeconds: Int
+    ownerId: String,
+    destinations: List[String],
+    leaseSeconds: Int
   ): DbResultT[IO, Option[OutboxRecord]] =
     EitherT(repository.claimOutbox(ownerId, destinations, leaseSeconds))
 
@@ -16,10 +16,10 @@ final class PostgresOutboxStore(repository: PostgresRepository) extends OutboxSt
     EitherT(repository.acknowledgeOutbox(record))
 
   def fail(
-      record: OutboxRecord,
-      error: String,
-      retryBaseSeconds: Int,
-      retryMaxSeconds: Int
+    record: OutboxRecord,
+    error: String,
+    retryBaseSeconds: Int,
+    retryMaxSeconds: Int
   ): DbResultT[IO, OutboxFailureDisposition] =
     EitherT(repository.failOutbox(record, error, retryBaseSeconds, retryMaxSeconds))
 

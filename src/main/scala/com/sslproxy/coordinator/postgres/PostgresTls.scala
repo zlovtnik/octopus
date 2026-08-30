@@ -18,8 +18,7 @@ private[postgres] object PostgresTls:
       throw IllegalArgumentException(s"PostgreSQL CA bundle is not a regular file: $caPath")
     hikari.addDataSourceProperty("sslmode", "verify-full")
     hikari.addDataSourceProperty("sslrootcert", caPath.toString)
-    if config.sslClientKeyStorePath.nonEmpty then
-      hikari.addDataSourceProperty("sslcert", config.sslClientKeyStorePath)
+    if config.sslClientKeyStorePath.nonEmpty then hikari.addDataSourceProperty("sslcert", config.sslClientKeyStorePath)
     if config.sslClientKeyStorePassword.nonEmpty then
       hikari.addDataSourceProperty("sslpassword", config.sslClientKeyStorePassword)
     PostgresTlsMaterial()

@@ -10,26 +10,28 @@ import scala.concurrent.duration.*
 class CronSchedulerSuite extends CatsEffectSuite:
 
   test("drainBatch stops after the first unavailable dispatch"):
-    Ref.of[IO, List[DispatchResult]](
-      List(
-        DispatchResult.Dispatched,
-        DispatchResult.Dispatched,
-        DispatchResult.NoWork,
-        DispatchResult.Dispatched
+    Ref
+      .of[IO, List[DispatchResult]](
+        List(
+          DispatchResult.Dispatched,
+          DispatchResult.Dispatched,
+          DispatchResult.NoWork,
+          DispatchResult.Dispatched
+        )
       )
-    ).flatMap { remaining =>
-      val dispatch = remaining.modify {
-        case result :: tail => tail -> result
-        case Nil            => Nil -> DispatchResult.NoWork
-      }
+      .flatMap { remaining =>
+        val dispatch = remaining.modify {
+          case result :: tail => tail -> result
+          case Nil => Nil -> DispatchResult.NoWork
+        }
 
-      for
-        dispatched <- CronScheduler.drainBatch(10)(() => dispatch)
-        notAttempted <- remaining.get
-      yield
-        assertEquals(dispatched, 2)
-        assertEquals(notAttempted, List(DispatchResult.Dispatched))
-    }
+        for
+          dispatched <- CronScheduler.drainBatch(10)(() => dispatch)
+          notAttempted <- remaining.get
+        yield
+          assertEquals(dispatched, 2)
+          assertEquals(notAttempted, List(DispatchResult.Dispatched))
+      }
 
   test("drainBatch never exceeds its configured batch size"):
     Ref.of[IO, Int](0).flatMap { attempts =>
@@ -44,25 +46,27 @@ class CronSchedulerSuite extends CatsEffectSuite:
     }
 
   test("drainBatch continues after a non-terminal dispatch result"):
-    Ref.of[IO, List[DispatchResult]](
-      List(
-        DispatchResult.ContinueDraining,
-        DispatchResult.Dispatched,
-        DispatchResult.NoWork
+    Ref
+      .of[IO, List[DispatchResult]](
+        List(
+          DispatchResult.ContinueDraining,
+          DispatchResult.Dispatched,
+          DispatchResult.NoWork
+        )
       )
-    ).flatMap { remaining =>
-      val dispatch = remaining.modify {
-        case result :: tail => tail -> result
-        case Nil            => Nil -> DispatchResult.NoWork
-      }
+      .flatMap { remaining =>
+        val dispatch = remaining.modify {
+          case result :: tail => tail -> result
+          case Nil => Nil -> DispatchResult.NoWork
+        }
 
-      for
-        dispatched <- CronScheduler.drainBatch(10)(() => dispatch)
-        notAttempted <- remaining.get
-      yield
-        assertEquals(dispatched, 1)
-        assertEquals(notAttempted, Nil)
-    }
+        for
+          dispatched <- CronScheduler.drainBatch(10)(() => dispatch)
+          notAttempted <- remaining.get
+        yield
+          assertEquals(dispatched, 1)
+          assertEquals(notAttempted, Nil)
+      }
 
   test("canonical manifest verification retries transient failures") {
     Ref.of[IO, Int](0).flatMap { attempts =>
@@ -82,7 +86,7 @@ class CronSchedulerSuite extends CatsEffectSuite:
 
   test("canonical manifest verification fails closed on schema drift") {
     val mismatch = IllegalStateException("canonical manifest mismatch")
-    CronScheduler.verifyCanonicalManifestWithRetry(IO.raiseError(mismatch), 1.millis).attempt.map {
-      result => assertEquals(result, Left(mismatch))
+    CronScheduler.verifyCanonicalManifestWithRetry(IO.raiseError(mismatch), 1.millis).attempt.map { result =>
+      assertEquals(result, Left(mismatch))
     }
   }

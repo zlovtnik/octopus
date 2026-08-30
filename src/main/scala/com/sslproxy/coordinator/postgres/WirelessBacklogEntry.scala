@@ -5,10 +5,10 @@ import io.circe.Json
 import java.time.Instant
 
 final case class WirelessBacklogEntry(
-    dedupeKey: String,
-    streamName: String,
-    payload: Json,
-    failureStage: String,
-    attemptCount: Int,
-    createdAt: Instant
+  dedupeKey: String,
+  streamName: String,
+  payload: Json,
+  failureStage: String,
+  attemptCount: Int,
+  createdAt: Instant
 )

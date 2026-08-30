@@ -66,12 +66,14 @@ class PayloadAuditConsumerSuite extends CatsEffectSuite:
 
     import io.circe.parser.decode as circeDecode
     import io.circe.Json
-    val expectedRequest = Json.obj(
-      "stream_name" -> Json.fromString("proxy.payload_audit"),
-      "dedupe_key" -> Json.fromString(dedupeKey),
-      "payload_ref" -> Json.fromString(expectedPayloadRef),
-      "observed_at" -> Json.fromString("2026-06-01T12:00:00Z")
-    ).noSpaces
+    val expectedRequest = Json
+      .obj(
+        "stream_name" -> Json.fromString("proxy.payload_audit"),
+        "dedupe_key" -> Json.fromString(dedupeKey),
+        "payload_ref" -> Json.fromString(expectedPayloadRef),
+        "observed_at" -> Json.fromString("2026-06-01T12:00:00Z")
+      )
+      .noSpaces
 
     val result = translateRecord(
       fs2.kafka.ConsumerRecord[String, String]("proxy.payload_audit", 0, 0L, null, json)
@@ -128,15 +130,13 @@ class PayloadAuditConsumerSuite extends CatsEffectSuite:
       "connection unavailable"
     )
 
-    for
-      result <- PayloadAuditConsumer
+    for result <- PayloadAuditConsumer
         .retryDatabaseWrite(
           IO.pure(Left(retryable)),
           maxAttempts = 3,
           initialDelay = Duration.Zero
         )
-    yield
-      assertEquals(result, Left(retryable))
+    yield assertEquals(result, Left(retryable))
 
   test("permanent database writes are returned for DLQ handling without retry"):
     val permanent = DatabaseError.Permanent(

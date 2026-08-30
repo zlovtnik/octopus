@@ -167,21 +167,26 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
     for
-      decision <- repository.recordScanRequestWithEvidence(resolved, metadata)
+      decision <- repository
+        .recordScanRequestWithEvidence(resolved, metadata)
         .map(requireRight)
       _ = assertEquals(decision.disposition, IngestionDisposition.Processed)
       hashes <- sql"""SELECT payload_sha256, payload IS NOT NULL
                      FROM sync_events
                      WHERE dedupe_key = ${resolved.dedupeKey}
                        AND stream_name = 'wireless.audit'"""
-        .query[(String, Boolean)].unique.transact(xa)
+        .query[(String, Boolean)]
+        .unique
+        .transact(xa)
       evidenceHash <- sql"""SELECT payload_sha256
                             FROM ingestion_evidence
                             WHERE topic = 'sync.scan.request'
                               AND partition_id = 0
                               AND record_offset = 41
                               AND group_id = 'octopus-scan-postgres-v1'"""
-        .query[String].unique.transact(xa)
+        .query[String]
+        .unique
+        .transact(xa)
       projectionJson <- sql"""SELECT jsonb_build_object(
                                 'event_type', event_type,
                                 'sensor_id', sensor_id,
@@ -207,7 +212,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                               FROM sync_events
                               WHERE dedupe_key = ${resolved.dedupeKey}
                                 AND stream_name = 'wireless.audit'"""
-        .query[String].unique.transact(xa)
+        .query[String]
+        .unique
+        .transact(xa)
       projection = circeParser.parse(projectionJson).fold(throw _, identity).hcursor
     yield
       assertEquals(hashes, (resolved.eventPayloadSha256, true))
@@ -287,24 +294,32 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                           FROM sync_events
                           WHERE dedupe_key = $payloadHash
                             AND stream_name = 'wireless.audit'"""
-        .query[(String, String, String)].unique.transact(xa)
+        .query[(String, String, String)]
+        .unique
+        .transact(xa)
       candidates <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
-      candidate = candidates.find(_.dedupeKey == payloadHash)
+      candidate = candidates
+        .find(_.dedupeKey == payloadHash)
         .getOrElse(fail("expected sparse wireless row in hydration page"))
-      nullSchemaCandidate = candidates.find(_.dedupeKey == nullSchemaHash)
+      nullSchemaCandidate = candidates
+        .find(_.dedupeKey == nullSchemaHash)
         .getOrElse(fail("expected JSON-null schema version row in hydration page"))
       _ = assert(!candidates.exists(_.dedupeKey == archivedHash))
       _ = assert(!candidates.exists(_.dedupeKey == tombstonedHash))
       hydrated <- repository.hydrateExistingSyncEvent(candidate, payload).map(requireRight)
-      nullSchemaHydrated <- repository.hydrateExistingSyncEvent(
-        nullSchemaCandidate,
-        nullSchemaPayload
-      ).map(requireRight)
+      nullSchemaHydrated <- repository
+        .hydrateExistingSyncEvent(
+          nullSchemaCandidate,
+          nullSchemaPayload
+        )
+        .map(requireRight)
       rawAfter <- sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
                          FROM sync_events
                          WHERE dedupe_key = $payloadHash
                            AND stream_name = 'wireless.audit'"""
-        .query[(String, String, String)].unique.transact(xa)
+        .query[(String, String, String)]
+        .unique
+        .transact(xa)
       state <- sql"""SELECT schema_version, ssid, signal_dbm, noise_dbm,
                             frequency_mhz, channel_flags, raw_len, frame_control_flags,
                             retry, risk_score, mixed_encryption, protected
@@ -312,12 +327,15 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                      WHERE dedupe_key = $payloadHash
                        AND stream_name = 'wireless.audit'"""
         .query[(Int, String, Int, Option[Int], Int, Int, Int, Int, Boolean, Option[Double], Option[Boolean], Boolean)]
-        .unique.transact(xa)
+        .unique
+        .transact(xa)
       nullSchemaVersion <- sql"""SELECT schema_version
                                   FROM sync_events
                                   WHERE dedupe_key = $nullSchemaHash
                                     AND stream_name = 'wireless.audit'"""
-        .query[Int].unique.transact(xa)
+        .query[Int]
+        .unique
+        .transact(xa)
       remaining <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
     yield
       assert(hydrated)
@@ -362,7 +380,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                        FROM wireless_shadow_alerts
                        WHERE source_mac IN ('aa:bb:cc:dd:ee:20', 'aa:bb:cc:dd:ee:21')
                        ORDER BY source_mac"""
-        .query[(String, Int)].to[List].transact(xa)
+        .query[(String, Int)]
+        .to[List]
+        .transact(xa)
     yield
       assertEquals(stored, List(("aa:bb:cc:dd:ee:21", -40)))
       assert(alerts.exists(_.contains("aa:bb:cc:dd:ee:21")))
@@ -448,9 +468,12 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val filler = "x" * (ProxyMaxAuditBodyBytes - prefix.length - suffix.length)
     val rawJson = prefix + filler + suffix
     val record = translatedAudit(rawJson, offset = 3L)
-    val expectedPayload = circeParser.parse(rawJson)
+    val expectedPayload = circeParser
+      .parse(rawJson)
       .fold(error => fail(s"expected valid payload audit JSON, found $error"), identity)
-    val expectedPayloadRef = circeParser.parse(record.requestJson).toOption
+    val expectedPayloadRef = circeParser
+      .parse(record.requestJson)
+      .toOption
       .flatMap(_.hcursor.get[String]("payload_ref").toOption)
       .getOrElse(fail("translated payload audit must contain payload_ref"))
 
@@ -492,7 +515,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     yield
       assertEquals(eventRef, (expectedPayloadRef, expectedPayloadRef.length.toLong))
       assertEquals(batchRef, eventRef)
-      val parsedStoredPayload = circeParser.parse(storedPayload)
+      val parsedStoredPayload = circeParser
+        .parse(storedPayload)
         .fold(error => fail(s"expected stored payload JSON, found $error"), identity)
       assertEquals(
         Printer.noSpacesSortKeys.print(parsedStoredPayload),
@@ -561,16 +585,20 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
     for
-      result <- repository.recordScanRequestsWithEvidence(List(
-        first -> firstMetadata,
-        second -> invalidSecondMetadata
-      ))
+      result <- repository.recordScanRequestsWithEvidence(
+        List(
+          first -> firstMetadata,
+          second -> invalidSecondMetadata
+        )
+      )
       evidenceCount <- sql"""SELECT COUNT(*) FROM ingestion_evidence
                               WHERE group_id = $group
                                 AND topic = 'sync.scan.request'
                                 AND partition_id = 7
                                 AND record_offset IN (9101, 9102)"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
       eventCount <- (fr"""SELECT COUNT(*) FROM sync_events
                             WHERE stream_name = 'proxy.payload_audit'
                               AND dedupe_key IN (""" ++
@@ -612,31 +640,39 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
   test("column type preflight reports wrong and missing payload_ref columns"):
     requireDocker()
-    schemaTransactor.preflightCheckColumnTypes(List(
-      ("sync_events" -> "payload_ref") -> "longtext",
-      ("sync_events" -> "missing_payload_ref") -> "text"
-    )).map { invalid =>
-      assertEquals(
-        invalid,
+    schemaTransactor
+      .preflightCheckColumnTypes(
         List(
-          "sync_events.payload_ref (expected longtext, found text)",
-          "sync_events.missing_payload_ref (expected text, found missing)"
+          ("sync_events" -> "payload_ref") -> "longtext",
+          ("sync_events" -> "missing_payload_ref") -> "text"
         )
       )
-    }
+      .map { invalid =>
+        assertEquals(
+          invalid,
+          List(
+            "sync_events.payload_ref (expected longtext, found text)",
+            "sync_events.missing_payload_ref (expected text, found missing)"
+          )
+        )
+      }
 
   private def resolvedWireless(payload: String): ResolvedScanRequestRecord =
     val payloadSha256 = Sha256Utils.sha256Hex(payload)
-    val requestJson = io.circe.Json.obj(
-      "stream_name" -> io.circe.Json.fromString("wireless.audit"),
-      "dedupe_key" -> io.circe.Json.fromString(payloadSha256),
-      "payload_ref" -> io.circe.Json.fromString(inlineRef(payload)),
-      "observed_at" -> io.circe.Json.fromString(
-        circeParser.parse(payload).toOption
-          .flatMap(_.hcursor.get[String]("observed_at").toOption)
-          .getOrElse(fail("wireless payload requires observed_at"))
+    val requestJson = io.circe.Json
+      .obj(
+        "stream_name" -> io.circe.Json.fromString("wireless.audit"),
+        "dedupe_key" -> io.circe.Json.fromString(payloadSha256),
+        "payload_ref" -> io.circe.Json.fromString(inlineRef(payload)),
+        "observed_at" -> io.circe.Json.fromString(
+          circeParser
+            .parse(payload)
+            .toOption
+            .flatMap(_.hcursor.get[String]("observed_at").toOption)
+            .getOrElse(fail("wireless payload requires observed_at"))
+        )
       )
-    ).noSpaces
+      .noSpaces
     val source = ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
     new PostgresPayloadResolver("/unused").resolve(source)
 
@@ -645,9 +681,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
 
   private def translatedAudit(rawJson: String, offset: Long): ResolvedScanRequestRecord =
-    PayloadAuditConsumer.translateRecord(
-      ConsumerRecord[String, String]("proxy.payload_audit", 0, offset, null, rawJson)
-    ).fold(error => fail(s"expected valid payload audit, found $error"), identity)
+    PayloadAuditConsumer
+      .translateRecord(
+        ConsumerRecord[String, String]("proxy.payload_audit", 0, offset, null, rawJson)
+      )
+      .fold(error => fail(s"expected valid payload audit, found $error"), identity)
 
   private def persist(record: ResolvedScanRequestRecord, offset: Long): IO[IngestionDecision] =
     val metadata = BrokerRecordMetadata(
@@ -664,7 +702,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     repository.recordScanRequestWithEvidence(record, metadata).flatMap { result =>
       val decision = requireRight(result)
       assertEquals(decision.disposition, IngestionDisposition.Processed)
-      repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+      repository
+        .prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
         .map(dispatch =>
           requireRight(dispatch)
           decision
@@ -720,14 +759,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private def manifestValue(key: String): String =
     val manifest = canonicalManifest()
     key match
-      case "schema_version"  => manifest.schemaVersion
+      case "schema_version" => manifest.schemaVersion
       case "manifest_sha256" => manifest.manifestSha256
       case _ => throw IllegalStateException(s"unsupported canonical manifest key $key")
 
   private final case class CanonicalManifest(
-      schemaVersion: String,
-      manifestSha256: String,
-      applyOrder: List[String]
+    schemaVersion: String,
+    manifestSha256: String,
+    applyOrder: List[String]
   )
 
   private def canonicalManifest(): CanonicalManifest =
@@ -761,7 +800,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     canonicalStatements(canonicalManifest())
 
   private def canonicalStatements(
-      manifest: CanonicalManifest
+    manifest: CanonicalManifest
   ): List[(String, List[String])] =
     manifest.applyOrder.map { relative =>
       val source = Files.readString(schemaRoot.resolve(relative))
@@ -804,8 +843,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       else if char == '-' && next == '-' then
         lineComment = true
         index += 1
-      else if char == '#' then
-        lineComment = true
+      else if char == '#' then lineComment = true
       else if char == '/' && next == '*' then
         blockComment = true
         index += 1
@@ -822,15 +860,15 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
     if quote != 0.toChar then
       throw IllegalStateException(s"unterminated quoted literal in canonical schema file $relative")
-    if blockComment then
-      throw IllegalStateException(s"unterminated block comment in canonical schema file $relative")
+    if blockComment then throw IllegalStateException(s"unterminated block comment in canonical schema file $relative")
     if current.result().trim.nonEmpty then
       throw IllegalStateException(s"incomplete SQL statement without semicolon in canonical schema file $relative")
 
     statements.result()
 
   private def schemaRoot: Path =
-    Iterator.iterate(Path.of("").toAbsolutePath)(_.getParent)
+    Iterator
+      .iterate(Path.of("").toAbsolutePath)(_.getParent)
       .takeWhile(_ != null)
       .map(_.resolve("sql/postgres/octopus_core"))
       .find(path => Files.isDirectory(path))

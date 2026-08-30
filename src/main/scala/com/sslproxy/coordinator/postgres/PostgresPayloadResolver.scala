@@ -11,34 +11,41 @@ import java.util.Base64
 class PostgresPayloadResolver(syncOutboxDir: String):
 
   def resolve(record: ScanRequestRecord): ResolvedScanRequestRecord =
-    ResolvedScanRequestRecord.from(record, resolvePayload(record.payloadRef))
+    ResolvedScanRequestRecord
+      .from(record, resolvePayload(record.payloadRef))
       .fold(throw _, identity)
 
   def resolvePayload(payloadRef: String): String =
     val ref = if payloadRef == null then "" else payloadRef
     if ref.startsWith("inline://json/") then
       val encoded = ref.substring("inline://json/".length())
-      val bytes   = Base64.getUrlDecoder.decode(paddedBase64(encoded))
+      val bytes = Base64.getUrlDecoder.decode(paddedBase64(encoded))
       val payload = new String(bytes, StandardCharsets.UTF_8)
       validateJson(payload)
       payload
-    else if ref.startsWith("outbox://") then
-      resolveOutbox(ref.substring("outbox://".length()))
-    else
-      throw new IllegalArgumentException(s"unsupported payload_ref scheme: $ref")
+    else if ref.startsWith("outbox://") then resolveOutbox(ref.substring("outbox://".length()))
+    else throw new IllegalArgumentException(s"unsupported payload_ref scheme: $ref")
 
   def payloadRows(target: PostgresSinkTarget, payload: String): List[Json] =
     val value = parseJson(payload)
     target match
       case PostgresSinkTarget.WirelessProbeRequests =>
-        val probes = value.hcursor.downField("probes").focus
+        val probes = value.hcursor
+          .downField("probes")
+          .focus
           .getOrElse(throw new IllegalArgumentException("wireless probe payload must contain a probes array"))
-        probes.asArray.getOrElse(
-          throw new IllegalArgumentException("wireless probe payload: 'probes' must be an array")
-        ).toList
+        probes.asArray
+          .getOrElse(
+            throw new IllegalArgumentException("wireless probe payload: 'probes' must be an array")
+          )
+          .toList
       case PostgresSinkTarget.WirelessClientInventory =>
-        val clients = value.hcursor.downField("clients").focus
-          .getOrElse(throw new IllegalArgumentException("wireless client inventory payload must contain a clients array"))
+        val clients = value.hcursor
+          .downField("clients")
+          .focus
+          .getOrElse(
+            throw new IllegalArgumentException("wireless client inventory payload must contain a clients array")
+          )
         val arr = clients.asArray.getOrElse(
           throw new IllegalArgumentException("wireless client inventory: 'clients' must be an array")
         )
@@ -50,7 +57,9 @@ class PostgresPayloadResolver(syncOutboxDir: String):
   private def mergeClientInventory(payload: Json, clients: Vector[Json]): List[Json] =
     val sensorId = payload.hcursor.downField("sensor_id").focus
     val locationId = payload.hcursor.downField("location_id").focus
-    val snapshotAt = payload.hcursor.downField("snapshot_at").focus
+    val snapshotAt = payload.hcursor
+      .downField("snapshot_at")
+      .focus
       .orElse(payload.hcursor.downField("observed_at").focus)
     clients.toList.map { client =>
       val obj = client.asObject.getOrElse(
@@ -72,11 +81,9 @@ class PostgresPayloadResolver(syncOutboxDir: String):
     try
       val outboxBase = java.nio.file.Path.of(syncOutboxDir).toRealPath()
       val unresolved = outboxBase.resolve(relative.normalize()).normalize()
-      if !unresolved.startsWith(outboxBase) then
-        throw new IllegalArgumentException("invalid outbox path escapes base")
+      if !unresolved.startsWith(outboxBase) then throw new IllegalArgumentException("invalid outbox path escapes base")
       val resolved = unresolved.toRealPath()
-      if !resolved.startsWith(outboxBase) then
-        throw new IllegalArgumentException("invalid outbox path escapes base")
+      if !resolved.startsWith(outboxBase) then throw new IllegalArgumentException("invalid outbox path escapes base")
       val payload = java.nio.file.Files.readString(resolved)
       validateJson(payload)
       payload // returned after successful validation
@@ -93,8 +100,8 @@ class PostgresPayloadResolver(syncOutboxDir: String):
     io.circe.parser.parse(payload) match
       case Right(Json.Null) =>
         throw new IllegalArgumentException("payload_ref resolved an empty JSON payload")
-      case Right(json)      => json
-      case Left(error)      =>
+      case Right(json) => json
+      case Left(error) =>
         throw new IllegalArgumentException(s"payload_ref resolved non-JSON payload: $error")
 
   private def paddedBase64(encoded: String): String =

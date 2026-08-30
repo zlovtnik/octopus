@@ -3,12 +3,7 @@ package com.sslproxy.coordinator.ingest
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.domain.{
-  DatabaseError,
-  PayloadAudit,
-  ResolvedScanRequestRecord,
-  ScanRequestRecord
-}
+import com.sslproxy.coordinator.domain.{DatabaseError, PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
@@ -29,10 +24,10 @@ object PayloadAuditConsumer:
   private val RetryDelay = 500.millis
 
   def stream(
-      cfg: KafkaCfg,
-      store: IngestionStore[IO],
-      metrics: CoordinatorMetrics,
-      dlqProducer: KafkaProducer[IO, String, String]
+    cfg: KafkaCfg,
+    store: IngestionStore[IO],
+    metrics: CoordinatorMetrics,
+    dlqProducer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
@@ -67,11 +62,10 @@ object PayloadAuditConsumer:
       }
 
   private[ingest] def translateRecord(
-      record: ConsumerRecord[String, String]
+    record: ConsumerRecord[String, String]
   ): Either[PayloadAuditError, ResolvedScanRequestRecord] =
     val rawJson = record.value
-    if rawJson == null || rawJson.isEmpty then
-      Left(PayloadAuditError.EmptyMessage)
+    if rawJson == null || rawJson.isEmpty then Left(PayloadAuditError.EmptyMessage)
     else
       PayloadAudit.parse(rawJson) match
         case Left(err) =>
@@ -108,21 +102,19 @@ object PayloadAuditConsumer:
           )
           ResolvedScanRequestRecord
             .from(source, rawJson)
-            .leftMap(error =>
-              PayloadAuditError.InvalidPayload(rawJson, errorMessage(error))
-            )
+            .leftMap(error => PayloadAuditError.InvalidPayload(rawJson, errorMessage(error)))
 
   private def batchWrite(
-      store: IngestionStore[IO],
-      dlqProducer: KafkaProducer[IO, String, String],
-      cfg: KafkaCfg,
-      metrics: CoordinatorMetrics
+    store: IngestionStore[IO],
+    dlqProducer: KafkaProducer[IO, String, String],
+    cfg: KafkaCfg,
+    metrics: CoordinatorMetrics
   ): fs2.Pipe[
     IO,
     (
-        String,
-        Either[PayloadAuditError, ResolvedScanRequestRecord],
-        CommittableOffset[IO]
+      String,
+      Either[PayloadAuditError, ResolvedScanRequestRecord],
+      CommittableOffset[IO]
     ),
     CommittableOffset[IO]
   ] =
@@ -138,16 +130,17 @@ object PayloadAuditConsumer:
           publishDlq(dlqProducer, cfg, err)
         }
 
-        val writeAction = if validRecords.nonEmpty then
-          retryBatchWrite(
-            store,
-            dlqProducer,
-            cfg,
-            metrics,
-            validRecords,
-            validWithRaw
-          )
-        else IO.unit
+        val writeAction =
+          if validRecords.nonEmpty then
+            retryBatchWrite(
+              store,
+              dlqProducer,
+              cfg,
+              metrics,
+              validRecords,
+              validWithRaw
+            )
+          else IO.unit
 
         dlqAction *> writeAction
       }
@@ -156,12 +149,12 @@ object PayloadAuditConsumer:
       }
 
   private def retryBatchWrite(
-      store: IngestionStore[IO],
-      dlqProducer: KafkaProducer[IO, String, String],
-      cfg: KafkaCfg,
-      metrics: CoordinatorMetrics,
-      validRecords: List[ResolvedScanRequestRecord],
-      validWithRaw: List[(String, ResolvedScanRequestRecord)]
+    store: IngestionStore[IO],
+    dlqProducer: KafkaProducer[IO, String, String],
+    cfg: KafkaCfg,
+    metrics: CoordinatorMetrics,
+    validRecords: List[ResolvedScanRequestRecord],
+    validWithRaw: List[(String, ResolvedScanRequestRecord)]
   ): IO[Unit] =
     retryDatabaseWrite(store.recordScanRequests(validRecords).value).flatMap {
       case Right(count) =>
@@ -200,49 +193,51 @@ object PayloadAuditConsumer:
     }
 
   private[ingest] def retryDatabaseWrite(
-      write: IO[Either[DatabaseError, Int]],
-      maxAttempts: Int = MaxRetries,
-      initialDelay: FiniteDuration = RetryDelay
+    write: IO[Either[DatabaseError, Int]],
+    maxAttempts: Int = MaxRetries,
+    initialDelay: FiniteDuration = RetryDelay
   ): IO[Either[DatabaseError, Int]] =
-    cats.Monad[IO].tailRecM[(Int, FiniteDuration), Either[DatabaseError, Int]](
-      (maxAttempts.max(1), initialDelay)
-    ) { case (remaining, delay) =>
-      write.flatMap {
-        case Right(count) =>
-          IO.pure(Right(Right(count)))
-        case Left(dbErr: DatabaseError.Permanent) =>
-          IO.pure(Right(Left(dbErr)))
-        case Left(dbErr: DatabaseError.Retryable) if remaining > 1 =>
-          IO(
-            log.warn(
-              "payload_audit_ingest",
-              "status" -> "retry",
-              "attempts_remaining" -> (remaining - 1).toString,
-              "operation" -> dbErr.operation,
-              "error" -> ErrorSanitizer.sanitize(dbErr.message)
-            )
-          ) *>
-            IO.sleep(delay) *>
-            IO.pure(Left((remaining - 1, delay * 2L)))
-        case Left(dbErr: DatabaseError.Retryable) =>
-          IO(
-            log.error(
-              "payload_audit_ingest",
-              "status" -> "retry_exhausted",
-              "operation" -> dbErr.operation,
-              "error" -> ErrorSanitizer.sanitize(dbErr.message)
-            )
-          ) *>
+    cats
+      .Monad[IO]
+      .tailRecM[(Int, FiniteDuration), Either[DatabaseError, Int]](
+        (maxAttempts.max(1), initialDelay)
+      ) { case (remaining, delay) =>
+        write.flatMap {
+          case Right(count) =>
+            IO.pure(Right(Right(count)))
+          case Left(dbErr: DatabaseError.Permanent) =>
             IO.pure(Right(Left(dbErr)))
+          case Left(dbErr: DatabaseError.Retryable) if remaining > 1 =>
+            IO(
+              log.warn(
+                "payload_audit_ingest",
+                "status" -> "retry",
+                "attempts_remaining" -> (remaining - 1).toString,
+                "operation" -> dbErr.operation,
+                "error" -> ErrorSanitizer.sanitize(dbErr.message)
+              )
+            ) *>
+              IO.sleep(delay) *>
+              IO.pure(Left((remaining - 1, delay * 2L)))
+          case Left(dbErr: DatabaseError.Retryable) =>
+            IO(
+              log.error(
+                "payload_audit_ingest",
+                "status" -> "retry_exhausted",
+                "operation" -> dbErr.operation,
+                "error" -> ErrorSanitizer.sanitize(dbErr.message)
+              )
+            ) *>
+              IO.pure(Right(Left(dbErr)))
+        }
       }
-    }
 
   private def publishRecordDlq(
-      dlqProducer: KafkaProducer[IO, String, String],
-      cfg: KafkaCfg,
-      rawJson: String,
-      operation: String,
-      errorMsg: String
+    dlqProducer: KafkaProducer[IO, String, String],
+    cfg: KafkaCfg,
+    rawJson: String,
+    operation: String,
+    errorMsg: String
   ): IO[Unit] =
     val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
     val original =
@@ -267,12 +262,12 @@ object PayloadAuditConsumer:
       .getOrElse(error.getClass.getSimpleName)
 
   private def publishDlq(
-      dlqProducer: KafkaProducer[IO, String, String],
-      cfg: KafkaCfg,
-      err: PayloadAuditError
+    dlqProducer: KafkaProducer[IO, String, String],
+    cfg: KafkaCfg,
+    err: PayloadAuditError
   ): IO[Unit] =
     err match
-      case PayloadAuditError.EmptyMessage                      => IO.unit
+      case PayloadAuditError.EmptyMessage => IO.unit
       case PayloadAuditError.InvalidPayload(rawJson, errorMsg) =>
         val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
         val original =
@@ -291,5 +286,4 @@ object PayloadAuditConsumer:
 sealed trait PayloadAuditError
 object PayloadAuditError:
   case object EmptyMessage extends PayloadAuditError
-  final case class InvalidPayload(rawJson: String, error: String)
-      extends PayloadAuditError
+  final case class InvalidPayload(rawJson: String, error: String) extends PayloadAuditError

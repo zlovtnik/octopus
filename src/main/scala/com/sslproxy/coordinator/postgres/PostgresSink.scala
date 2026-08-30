@@ -5,9 +5,9 @@ import cats.effect.IO
 /** PostgreSQL sink trait — 10 insert methods. */
 trait PostgresSink:
   def insertProxyEvents(
-      batchId: String,
-      rows: List[ProxyEventInsert],
-      blockedRows: List[BlockedEventInsert]
+    batchId: String,
+    rows: List[ProxyEventInsert],
+    blockedRows: List[BlockedEventInsert]
   ): IO[Long]
 
   def insertProxyPayloadAudit(batchId: String, rows: List[ProxyPayloadAuditInsert]): IO[Long]

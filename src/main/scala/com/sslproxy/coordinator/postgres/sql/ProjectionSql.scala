@@ -6,10 +6,10 @@ import doobie.implicits.*
 
 object ProjectionSql:
   def generateShadowAlerts(
-      windowSeconds: Int,
-      signalThresholdDbm: Int,
-      presenceWindowSeconds: Int,
-      batchLimit: Int
+    windowSeconds: Int,
+    signalThresholdDbm: Int,
+    presenceWindowSeconds: Int,
+    batchLimit: Int
   ): ConnectionIO[List[String]] =
     val window = windowSeconds.max(1)
     val presenceWindow = presenceWindowSeconds.max(1)
@@ -73,10 +73,10 @@ object ProjectionSql:
     insert *> markInputs *> select
 
   private def shadowAlertCandidates(
-      windowSeconds: Int,
-      signalThresholdDbm: Int,
-      presenceWindowSeconds: Int,
-      batchLimit: Int
+    windowSeconds: Int,
+    signalThresholdDbm: Int,
+    presenceWindowSeconds: Int,
+    batchLimit: Int
   ): Fragment =
     fr"""SELECT DISTINCT
            e.dedupe_key,

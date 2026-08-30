@@ -6,10 +6,10 @@ import doobie.implicits.*
 
 object JobBatchSql:
   def processIngestLedger(
-      streamNames: List[String],
-      scanMaxAttempts: Int,
-      scanRetryBackoffSeconds: Int,
-      ingestBatchSize: Int
+    streamNames: List[String],
+    scanMaxAttempts: Int,
+    scanRetryBackoffSeconds: Int,
+    ingestBatchSize: Int
   ): ConnectionIO[Long] =
     val normalizedStreams = streamNames.map(_.trim).filter(_.nonEmpty).distinct
     val limit = ingestBatchSize.max(1)
@@ -35,9 +35,11 @@ object JobBatchSql:
       candidateQuery.flatMap {
         case Nil => 0L.pure[ConnectionIO]
         case selected =>
-          val selectedKeys = selected.map { case (streamName, dedupeKey) =>
-            fr0"($streamName, $dedupeKey)"
-          }.intercalate(fr",")
+          val selectedKeys = selected
+            .map { case (streamName, dedupeKey) =>
+              fr0"($streamName, $dedupeKey)"
+            }
+            .intercalate(fr",")
           val selectedPredicate =
             fr0"(e.stream_name, e.dedupe_key) IN (" ++ selectedKeys ++ fr0")"
 
@@ -95,9 +97,9 @@ object JobBatchSql:
       }
 
   def prepareLoadDispatch(
-      streamNames: List[String],
-      maxAttempts: Int,
-      limit: Int
+    streamNames: List[String],
+    maxAttempts: Int,
+    limit: Int
   ): Option[Update0] =
     val normalized = streamNames.map(_.trim).filter(_.nonEmpty).distinct
     Option.when(normalized.nonEmpty) {

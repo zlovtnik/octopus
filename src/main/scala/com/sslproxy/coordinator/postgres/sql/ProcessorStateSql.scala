@@ -15,18 +15,18 @@ object ProcessorStateSql:
       .query[(String, String, Int, Option[String])]
 
   def persistState(
-      id: ProcessorId,
-      status: ProcessorStatus,
-      observedAt: Instant
+    id: ProcessorId,
+    status: ProcessorStatus,
+    observedAt: Instant
   ): Update0 =
     val timestamp = Timestamp.from(observedAt)
     import com.sslproxy.coordinator.processor.ProcessorLifecycle.*
     val databaseStatus = status.lifecycle match
-      case Disabled        => "disabled"
-      case Starting        => "running"
-      case Ready           => "idle"
-      case BackingOff      => "degraded"
-      case FailedTerminal  => "failed"
+      case Disabled => "disabled"
+      case Starting => "running"
+      case Ready => "idle"
+      case BackingOff => "degraded"
+      case FailedTerminal => "failed"
     val startedAt = Option.when(status.lifecycle == Starting)(timestamp)
     val succeededAt = Option.when(status.lifecycle == Ready)(timestamp)
     val failedAt = Option.when(
@@ -59,11 +59,11 @@ object ProcessorStateSql:
            )""".update
 
   def finishRun(
-      runId: String,
-      status: ProcessorRunStatus,
-      errorClass: Option[String],
-      errorText: Option[String],
-      finishedAt: Instant
+    runId: String,
+    status: ProcessorRunStatus,
+    errorClass: Option[String],
+    errorText: Option[String],
+    finishedAt: Instant
   ): Update0 =
     sql"""UPDATE processor_runs
            SET status = ${status.value},

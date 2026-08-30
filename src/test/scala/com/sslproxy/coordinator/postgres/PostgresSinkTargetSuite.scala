@@ -15,11 +15,23 @@ class PostgresSinkTargetSuite extends FunSuite:
 
   test("fromStreamName accepts legacy aliases"):
     assertEquals(PostgresSinkTarget.fromStreamName("wireless.rogue_ap"), Some(PostgresSinkTarget.WirelessRogueAp))
-    assertEquals(PostgresSinkTarget.fromStreamName("wireless.deauth_flood"), Some(PostgresSinkTarget.WirelessDeauthFlood))
-    assertEquals(PostgresSinkTarget.fromStreamName("wireless.signal_anomaly"), Some(PostgresSinkTarget.WirelessSignalAnomaly))
+    assertEquals(
+      PostgresSinkTarget.fromStreamName("wireless.deauth_flood"),
+      Some(PostgresSinkTarget.WirelessDeauthFlood)
+    )
+    assertEquals(
+      PostgresSinkTarget.fromStreamName("wireless.signal_anomaly"),
+      Some(PostgresSinkTarget.WirelessSignalAnomaly)
+    )
     assertEquals(PostgresSinkTarget.fromStreamName("wireless.pmf_attack"), Some(PostgresSinkTarget.WirelessPmfAttack))
-    assertEquals(PostgresSinkTarget.fromStreamName("wireless.client_inventory"), Some(PostgresSinkTarget.WirelessClientInventory))
-    assertEquals(PostgresSinkTarget.fromStreamName("wireless.probe_requests"), Some(PostgresSinkTarget.WirelessProbeRequests))
+    assertEquals(
+      PostgresSinkTarget.fromStreamName("wireless.client_inventory"),
+      Some(PostgresSinkTarget.WirelessClientInventory)
+    )
+    assertEquals(
+      PostgresSinkTarget.fromStreamName("wireless.probe_requests"),
+      Some(PostgresSinkTarget.WirelessProbeRequests)
+    )
 
   test("handshake alert accepts the canonical and firmware topic names"):
     assertEquals(
@@ -32,5 +44,4 @@ class PostgresSinkTargetSuite extends FunSuite:
     )
 
   test("checksumTag is non-empty for all targets"):
-    for target <- PostgresSinkTarget.values do
-      assert(target.checksumTag.nonEmpty, s"${target} has empty checksumTag")
+    for target <- PostgresSinkTarget.values do assert(target.checksumTag.nonEmpty, s"${target} has empty checksumTag")

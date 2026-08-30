@@ -50,13 +50,15 @@ class PostgresSchemaPreflight(transactor: PostgresTransactor, config: PostgresCo
         } ++ Option.when(readiness.isEmpty)("missing octopus_core schema_readiness row").toList
         _ <-
           if missingTables.isEmpty && invalidColumns.isEmpty && manifestProblems.isEmpty then
-            IO(log.info(
-              "postgres_schema_preflight",
-              "status" -> "ok",
-              "tables" -> allRequiredTables.size.toString,
-              "column_types" -> requiredColumnTypes.size.toString,
-              "manifest_sha256" -> config.manifestSha256
-            ))
+            IO(
+              log.info(
+                "postgres_schema_preflight",
+                "status" -> "ok",
+                "tables" -> allRequiredTables.size.toString,
+                "column_types" -> requiredColumnTypes.size.toString,
+                "manifest_sha256" -> config.manifestSha256
+              )
+            )
           else
             val problems = List(
               Option.when(missingTables.nonEmpty)(s"missing tables=[${missingTables.mkString(", ")}]"),
@@ -65,10 +67,8 @@ class PostgresSchemaPreflight(transactor: PostgresTransactor, config: PostgresCo
             ).flatten.mkString("; ")
             val msg = s"PostgreSQL schema preflight failed for database '${config.database}': $problems; " +
               "apply the canonical sql/postgres/octopus_core manifest with the postgres-runtime-schema executor"
-            if config.warnOnly then
-              IO(log.warn("postgres_schema_preflight", "status" -> "warn_only", "error" -> msg))
-            else
-              IO.raiseError(IllegalStateException(msg))
+            if config.warnOnly then IO(log.warn("postgres_schema_preflight", "status" -> "warn_only", "error" -> msg))
+            else IO.raiseError(IllegalStateException(msg))
       yield ()
 
 object PostgresSchemaPreflight:

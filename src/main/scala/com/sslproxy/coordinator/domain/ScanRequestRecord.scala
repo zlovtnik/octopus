@@ -13,12 +13,12 @@ import java.nio.charset.StandardCharsets
   * event payload hash.
   */
 final case class ScanRequestRecord(
-    requestJson: String,
-    sourceRecordSha256: String,
-    streamName: String,
-    dedupeKey: String,
-    observedAt: String,
-    payloadRef: String
+  requestJson: String,
+  sourceRecordSha256: String,
+  streamName: String,
+  dedupeKey: String,
+  observedAt: String,
+  payloadRef: String
 )
 
 object ScanRequestRecord:
@@ -27,10 +27,10 @@ object ScanRequestRecord:
   private[domain] val PayloadRefMaxBytes = 16_777_215
 
   private final case class Wire(
-      streamName: String,
-      dedupeKey: String,
-      payloadRef: String,
-      observedAt: String
+    streamName: String,
+    dedupeKey: String,
+    payloadRef: String,
+    observedAt: String
   )
 
   private given Decoder[Wire] = (cursor: HCursor) =>
@@ -52,7 +52,8 @@ object ScanRequestRecord:
       else if wire.payloadRef.isBlank then Left(IllegalArgumentException("scan request payload_ref must not be empty"))
       else if wire.payloadRef.getBytes(StandardCharsets.UTF_8).length > PayloadRefMaxBytes then
         Left(IllegalArgumentException(s"scan request payload_ref must not exceed $PayloadRefMaxBytes UTF-8 bytes"))
-      else if !isRfc3339(wire.observedAt) then Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
+      else if !isRfc3339(wire.observedAt) then
+        Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
       else
         val sourceRecordSha256 = Sha256Utils.sha256Hex(rawJson.getBytes(StandardCharsets.UTF_8))
         Right(
@@ -77,23 +78,16 @@ object ScanRequestRecord:
   * validated as non-null JSON.
   */
 final case class ResolvedScanRequestRecord(
-    source: ScanRequestRecord,
-    payloadJson: String,
-    eventPayloadSha256: String
+  source: ScanRequestRecord,
+  payloadJson: String,
+  eventPayloadSha256: String
 ):
-  export source.{
-    requestJson,
-    sourceRecordSha256,
-    streamName,
-    dedupeKey,
-    observedAt,
-    payloadRef
-  }
+  export source.{requestJson, sourceRecordSha256, streamName, dedupeKey, observedAt, payloadRef}
 
 object ResolvedScanRequestRecord:
   def from(
-      source: ScanRequestRecord,
-      payloadJson: String
+    source: ScanRequestRecord,
+    payloadJson: String
   ): Either[Throwable, ResolvedScanRequestRecord] =
     parse(payloadJson).left.map(identity[Throwable]).flatMap {
       case io.circe.Json.Null =>
@@ -103,8 +97,7 @@ object ResolvedScanRequestRecord:
           ResolvedScanRequestRecord(
             source = source,
             payloadJson = payloadJson,
-            eventPayloadSha256 =
-              Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
+            eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
           )
         )
     }

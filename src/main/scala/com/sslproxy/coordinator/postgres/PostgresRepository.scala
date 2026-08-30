@@ -160,8 +160,8 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     }
 
   def quarantineSyncEventHydration(
-      candidate: SyncEventHydrationCandidate,
-      error: String
+    candidate: SyncEventHydrationCandidate,
+    error: String
   ): IO[Either[DatabaseError, Unit]] =
     runDb("postgres.quarantine_sync_event_hydration") {
       IngestionSql
@@ -830,8 +830,8 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     }
 
   def quarantineArchiveCandidate(
-      candidate: ArchiveCandidate,
-      error: String
+    candidate: ArchiveCandidate,
+    error: String
   ): IO[Either[DatabaseError, Unit]] =
     runDb("postgres.quarantine_archive_candidate") {
       MaintenanceSql.quarantineArchiveCandidate(candidate, error).run.void

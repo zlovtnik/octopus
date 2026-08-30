@@ -48,17 +48,17 @@ object IdentityGraphSql:
   def persistCluster(value: IdentityClusterProjection): ConnectionIO[Int] =
     if value.members.isEmpty then 0.pure[ConnectionIO]
     else {
-    val memberClause = value.members.map(member => fr0"$member").intercalate(fr",")
-    val firstSeen = (fr"""SELECT MIN(first_seen), MAX(last_seen)
+      val memberClause = value.members.map(member => fr0"$member").intercalate(fr",")
+      val firstSeen = (fr"""SELECT MIN(first_seen), MAX(last_seen)
                             FROM devices
                             WHERE mac_id IN (""" ++ memberClause ++ fr")")
-      .query[(Option[java.sql.Timestamp], Option[java.sql.Timestamp])]
-      .unique
+        .query[(Option[java.sql.Timestamp], Option[java.sql.Timestamp])]
+        .unique
 
-    firstSeen.flatMap { case (minimum, maximum) =>
-      def persistRows(min: java.sql.Timestamp, max: java.sql.Timestamp): ConnectionIO[Int] =
-        for
-          cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
+      firstSeen.flatMap { case (minimum, maximum) =>
+        def persistRows(min: java.sql.Timestamp, max: java.sql.Timestamp): ConnectionIO[Int] =
+          for
+            cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
                             cluster_id, cluster_name, cluster_size, first_seen, last_seen,
                             status, projection_run_id
                           ) VALUES (
@@ -72,8 +72,8 @@ object IdentityGraphSql:
                             status = 'active',
                             projection_run_id = EXCLUDED.projection_run_id,
                             updated_at = CURRENT_TIMESTAMP""".update.run
-          members <- value.members.traverse { mac =>
-            sql"""INSERT INTO atheros_search.identity_cluster_members (
+            members <- value.members.traverse { mac =>
+              sql"""INSERT INTO atheros_search.identity_cluster_members (
                    cluster_id, mac, confidence, evidence, first_seen, last_seen
                  )
                  SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
@@ -88,9 +88,9 @@ object IdentityGraphSql:
                    first_seen = LEAST(first_seen, EXCLUDED.first_seen),
                    last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
                    updated_at = CURRENT_TIMESTAMP""".update.run
-          }
-          inventory <- value.members.traverse { mac =>
-            sql"""INSERT INTO atheros_search.inventory_devices (
+            }
+            inventory <- value.members.traverse { mac =>
+              sql"""INSERT INTO atheros_search.inventory_devices (
                    mac, display_name, location_id, first_registered, last_seen,
                    active, registered, tags, similarity_cluster_id,
                    dedup_confidence, known_macs, projection_run_id
@@ -108,15 +108,15 @@ object IdentityGraphSql:
                    known_macs = EXCLUDED.known_macs,
                    projection_run_id = EXCLUDED.projection_run_id,
                    updated_at = CURRENT_TIMESTAMP""".update.run
-          }
-        yield cluster + members.sum + inventory.sum
+            }
+          yield cluster + members.sum + inventory.sum
 
-      (minimum, maximum) match
-        case (Some(min), Some(max)) => persistRows(min, max)
-        case (Some(min), None)      => persistRows(min, min)
-        case (None, Some(max))      => persistRows(max, max)
-        case (None, None)           => 0.pure[ConnectionIO]
-    }
+        (minimum, maximum) match
+          case (Some(min), Some(max)) => persistRows(min, max)
+          case (Some(min), None) => persistRows(min, min)
+          case (None, Some(max)) => persistRows(max, max)
+          case (None, None) => 0.pure[ConnectionIO]
+      }
     }
 
   def projectGraph(limit: Int, projectionRunId: String): ConnectionIO[Int] =

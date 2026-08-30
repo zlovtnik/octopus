@@ -129,20 +129,24 @@ private final class MinioObjectStore(
 object MinioPayloadArchive:
   private val LowercaseSha256 = "^[0-9a-f]{64}$".r
   def resource(config: ArchiveConfig): Resource[IO, PayloadArchive[IO]] =
-    Resource.make(
-      IO.blocking(
-        MinioClient
-          .builder()
-          .endpoint(config.endpoint)
-          .credentials(config.accessKey, config.secretKey)
-          .region(config.region)
-          .build()
-      )
-    )(client => IO.blocking(client.close())).flatMap { client =>
-      Resource.eval(provisionBucket(client, config.bucket)).as(
-        new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket)
-      )
-    }
+    Resource
+      .make(
+        IO.blocking(
+          MinioClient
+            .builder()
+            .endpoint(config.endpoint)
+            .credentials(config.accessKey, config.secretKey)
+            .region(config.region)
+            .build()
+        )
+      )(client => IO.blocking(client.close()))
+      .flatMap { client =>
+        Resource
+          .eval(provisionBucket(client, config.bucket))
+          .as(
+            new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket)
+          )
+      }
 
   private def provisionBucket(client: MinioClient, bucket: String): IO[Unit] =
     IO.blocking {
@@ -152,8 +156,7 @@ object MinioPayloadArchive:
       if !bucketExists then
         try client.makeBucket(MakeBucketArgs.builder().bucket(bucket).build())
         catch
-          case error: ErrorResponseException
-              if isBucketAlreadyOwnedByCaller(error.errorResponse().code()) =>
+          case error: ErrorResponseException if isBucketAlreadyOwnedByCaller(error.errorResponse().code()) =>
             ()
     }
 

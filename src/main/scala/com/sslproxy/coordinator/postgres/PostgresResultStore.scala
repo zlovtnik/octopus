@@ -12,11 +12,11 @@ final class PostgresResultStore(repository: PostgresRepository) extends ResultSt
   ): DbResultT[IO, Unit] =
     EitherT(repository.recordResultWithEvidence(result, metadata))
   def recordLoadResultsWithEvidence(
-      records: List[(PostgresLoad, PostgresResult, BrokerRecordMetadata)]
+    records: List[(PostgresLoad, PostgresResult, BrokerRecordMetadata)]
   ): DbResultT[IO, Unit] =
     EitherT(repository.recordLoadResultsWithEvidence(records))
 
   def recordResultsWithEvidence(
-      records: List[(PostgresResult, BrokerRecordMetadata)]
+    records: List[(PostgresResult, BrokerRecordMetadata)]
   ): DbResultT[IO, Unit] =
     EitherT(repository.recordResultsWithEvidence(records))

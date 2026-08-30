@@ -180,9 +180,9 @@ object IngestionSql:
              )""".update
 
   def quarantineHydration(
-      streamName: String,
-      dedupeKey: String,
-      error: String
+    streamName: String,
+    dedupeKey: String,
+    error: String
   ): Update0 =
     sql"""UPDATE sync_events
            SET status = 'failed',

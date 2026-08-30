@@ -23,18 +23,14 @@ object PostgresErrorClass:
           case _: SQLRecoverableException | _: SQLTransientException =>
             return Retryable
           case sqlEx: SQLException =>
-            if isRetryableSqlState(sqlEx.getSQLState) || isRetryableVendorCode(sqlEx.getErrorCode) then
-              return Retryable
-            if sqlEx.getNextException != null then
-              failures += sqlEx.getNextException
+            if isRetryableSqlState(sqlEx.getSQLState) || isRetryableVendorCode(sqlEx.getErrorCode) then return Retryable
+            if sqlEx.getNextException != null then failures += sqlEx.getNextException
           case _ => ()
 
-        if isRetryableMessage(current.getMessage) then
-          return Retryable
+        if isRetryableMessage(current.getMessage) then return Retryable
 
         val cause = current.getCause
-        if cause != null && cause != current then
-          failures += cause
+        if cause != null && cause != current then failures += cause
 
     Permanent
 

@@ -311,7 +311,7 @@ object ProcessorSupervisor:
     configured: Set[ProcessorId],
     enabled: Set[ProcessorId]
   ): Either[IllegalArgumentException, Unit] =
-    val missing = enabled.toList.flatMap { id =>
+    val missing = configured.toList.flatMap { id =>
       ProcessorCatalog
         .byId(id)
         .dependencies

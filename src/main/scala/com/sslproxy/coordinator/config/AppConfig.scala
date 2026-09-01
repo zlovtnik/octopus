@@ -6,6 +6,7 @@ import pureconfig.{ConfigReader, ConfigCursor}
 import pureconfig.error.ConfigReaderFailures
 import com.sslproxy.coordinator.config.StringListConfigReader.given
 import com.sslproxy.coordinator.processor.ProcessorId
+import java.nio.file.{Files, Path}
 
 object StringListConfigReader:
   given ConfigReader[List[String]] with
@@ -157,12 +158,41 @@ object AppConfig:
   private val ProxyEventsStream = "proxy.events"
 
   def load: AppConfig =
-    val config = pureconfig.ConfigSource.default.loadOrThrow[AppConfig]
+    val loaded = pureconfig.ConfigSource.default.loadOrThrow[AppConfig]
+    val config = resolvePostgresPassword(
+      loaded,
+      sys.env,
+      path => Files.readString(Path.of(path))
+    )
     validate(config).fold(error => throw error, identity)
 
   private[coordinator] def load(config: Config): AppConfig =
     val loaded = pureconfig.ConfigSource.fromConfig(config).loadOrThrow[AppConfig]
     validate(loaded).fold(error => throw error, identity)
+
+  private[coordinator] def resolvePostgresPassword(
+    config: AppConfig,
+    environment: Map[String, String],
+    readFile: String => String
+  ): AppConfig =
+    environment.get("POSTGRES_PASSWORD_FILE").map(_.trim).filter(_.nonEmpty) match
+      case None => config
+      case Some(path) =>
+        if config.postgres.password.nonEmpty then
+          throw IllegalArgumentException(
+            "POSTGRES_PASSWORD and POSTGRES_PASSWORD_FILE cannot both be configured"
+          )
+        val raw =
+          try readFile(path)
+          catch
+            case error: Exception =>
+              throw IllegalArgumentException("cannot read POSTGRES_PASSWORD_FILE", error)
+        val password = raw.stripSuffix("\n").stripSuffix("\r")
+        if password.isEmpty || password.exists(character => character == '\r' || character == '\n' || character == 0) then
+          throw IllegalArgumentException(
+            "POSTGRES_PASSWORD_FILE must contain one non-empty line"
+          )
+        config.copy(postgres = config.postgres.copy(password = password))
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val isDevelopment = config.runtime.environment == "development"

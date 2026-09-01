@@ -195,7 +195,8 @@ Important gates:
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
-`POSTGRES_PASSWORD`, `POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
+`POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
+`POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
 Kustomize sets `verify-full` with the PgBouncer listener CA and
 `POSTGRES_SSL_SERVER_NAME=postgres-pgbouncer`; the listener private key is never
 mounted in Octopus. Enabled runtime rejects loopback, root accounts,

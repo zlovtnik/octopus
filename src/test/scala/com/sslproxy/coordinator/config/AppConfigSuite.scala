@@ -19,6 +19,29 @@ class AppConfigSuite extends FunSuite:
     assertEquals(config.runtime, RuntimeConfig(processorsEnabled = false, consumersEnabled = false))
     assertEquals(config.processors.enabled, List.empty)
 
+  test("PostgreSQL password file overrides the empty environment password"):
+    val baseline = defaults
+    val resolved = AppConfig.resolvePostgresPassword(
+      baseline,
+      Map("POSTGRES_PASSWORD_FILE" -> "/run/secrets/postgres/password"),
+      _ => "file-secret\n"
+    )
+
+    assertEquals(resolved.postgres.password, "file-secret")
+
+  test("PostgreSQL password sources are mutually exclusive"):
+    val baseline = defaults.copy(postgres = defaults.postgres.copy(password = "environment-secret"))
+
+    interceptMessage[IllegalArgumentException](
+      "POSTGRES_PASSWORD and POSTGRES_PASSWORD_FILE cannot both be configured"
+    ) {
+      AppConfig.resolvePostgresPassword(
+        baseline,
+        Map("POSTGRES_PASSWORD_FILE" -> "/run/secrets/postgres/password"),
+        _ => "file-secret"
+      )
+    }
+
   test("active runtime uses Kafka offsets and accepts the deployed single-broker replication"):
     val baseline = defaults
     val active = baseline.copy(

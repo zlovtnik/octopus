@@ -203,7 +203,7 @@ object MaintenanceSql:
              )
              AND NOT EXISTS (
                SELECT 1 FROM sync_batches batch
-               JOIN outbox_events outbox ON outbox.source_id = batch.batch_id
+               JOIN outbox_events outbox ON outbox.source_id = batch.batch_id::text
                WHERE batch.dedupe_key = e.dedupe_key
                  AND batch.stream_name = e.stream_name
                  AND outbox.status NOT IN ('published', 'failed', 'cancelled')
@@ -240,7 +240,7 @@ object MaintenanceSql:
                    $dedupeKey, $streamName, $payloadSha256, $observedAt,
                    (CURRENT_TIMESTAMP + (${tombstoneDays.max(1)}) * INTERVAL '1 day')
                  ) ON CONFLICT (dedupe_key, stream_name) DO UPDATE SET
-                   expires_at = GREATEST(expires_at, EXCLUDED.expires_at),
+                   expires_at = GREATEST(sync_event_tombstones.expires_at, EXCLUDED.expires_at),
                    updated_at = CURRENT_TIMESTAMP""".update.run
       _ <- sql"""DELETE FROM wireless_frame_security WHERE dedupe_key = $dedupeKey""".update.run
       _ <- sql"""DELETE FROM wireless_frame_identity WHERE dedupe_key = $dedupeKey""".update.run
@@ -249,20 +249,27 @@ object MaintenanceSql:
       _ <- sql"""DELETE FROM wireless_frame_qos WHERE dedupe_key = $dedupeKey""".update.run
       _ <- sql"""DELETE FROM wireless_frame_radio WHERE dedupe_key = $dedupeKey""".update.run
       _ <- sql"""DELETE FROM wireless_frames WHERE dedupe_key = $dedupeKey""".update.run
-      _ <- sql"""DELETE attempt FROM outbox_publish_attempts attempt
-                   JOIN outbox_events outbox ON outbox.outbox_id = attempt.outbox_id
-                   JOIN sync_batches batch ON batch.batch_id = outbox.source_id
-                   WHERE batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
+      _ <- sql"""DELETE FROM outbox_publish_attempts attempt
+                   USING outbox_events outbox, sync_batches batch
+                   WHERE outbox.outbox_id = attempt.outbox_id
+                     AND batch.batch_id::text = outbox.source_id
+                     AND batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
                      AND outbox.status IN ('published', 'failed', 'cancelled')""".update.run
-      _ <- sql"""DELETE outbox FROM outbox_events outbox
-                   JOIN sync_batches batch ON batch.batch_id = outbox.source_id
-                   WHERE batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
+      _ <- sql"""DELETE FROM outbox_events outbox
+                   USING sync_batches batch
+                   WHERE batch.batch_id::text = outbox.source_id
+                     AND batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
                      AND outbox.status IN ('published', 'failed', 'cancelled')""".update.run
-      _ <- sql"""DELETE error_row FROM sync_errors error_row
-                   LEFT JOIN sync_jobs job ON job.job_id = error_row.job_id
-                   LEFT JOIN sync_batches batch ON batch.batch_id = error_row.batch_id
-                   WHERE (job.dedupe_key = $dedupeKey AND job.stream_name = $streamName)
-                      OR (batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName)""".update.run
+      _ <- sql"""DELETE FROM sync_errors error_row
+                   WHERE EXISTS (
+                     SELECT 1 FROM sync_jobs job
+                     WHERE job.job_id = error_row.job_id
+                       AND job.dedupe_key = $dedupeKey AND job.stream_name = $streamName
+                   ) OR EXISTS (
+                     SELECT 1 FROM sync_batches batch
+                     WHERE batch.batch_id = error_row.batch_id
+                       AND batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
+                   )""".update.run
       _ <- sql"""DELETE FROM sync_batches
                    WHERE dedupe_key = $dedupeKey AND stream_name = $streamName
                      AND status IN ('completed', 'failed', 'cancelled')""".update.run

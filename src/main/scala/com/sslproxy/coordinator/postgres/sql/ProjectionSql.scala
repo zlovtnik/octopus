@@ -1,6 +1,5 @@
 package com.sslproxy.coordinator.postgres.sql
 
-import cats.syntax.all.*
 import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
 
@@ -16,14 +15,23 @@ object ProjectionSql:
     val limit = batchLimit.max(1)
     val runId = java.util.UUID.randomUUID().toString
     val candidates = shadowAlertCandidates(window, signalThresholdDbm, presenceWindow, limit)
-    val insert =
-      (fr"""INSERT INTO wireless_shadow_alerts (
+    (fr"""WITH candidates AS MATERIALIZED (""" ++ candidates ++ fr"""),
+             ranked AS (
+               SELECT candidates.*,
+                      MIN(observed_at) OVER (PARTITION BY source_mac) AS first_seen,
+                      COUNT(*) OVER (PARTITION BY source_mac) AS input_count,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY source_mac ORDER BY observed_at DESC, dedupe_key DESC
+                      ) AS position
+               FROM candidates
+             ), upserted AS (
+             INSERT INTO wireless_shadow_alerts (
                source_mac, first_occurred_at, last_occurred_at, occurrence_count,
                destination_bssid, ssid, sensor_id, location_id, signal_dbm,
                reason, evidence, created_at, updated_at, projection_run_id
              )
              SELECT
-               w.source_mac, w.observed_at, w.observed_at, 1,
+               w.source_mac, w.first_seen, w.observed_at, w.input_count,
                w.destination_bssid, w.ssid, w.sensor_id, w.location_id, w.signal_dbm,
                'strong_wireless_without_proxy_presence',
                jsonb_build_object(
@@ -32,26 +40,28 @@ object ProjectionSql:
                  'presence_window_seconds', $presenceWindow
                ),
                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $runId
-             FROM (""" ++ candidates ++ fr""") w
+             FROM ranked w
+             WHERE w.position = 1
              ON CONFLICT (source_mac) DO UPDATE SET
+               first_occurred_at = LEAST(wireless_shadow_alerts.first_occurred_at, EXCLUDED.first_occurred_at),
                last_occurred_at = GREATEST(wireless_shadow_alerts.last_occurred_at, EXCLUDED.last_occurred_at),
-               occurrence_count = wireless_shadow_alerts.occurrence_count + 1,
+               occurrence_count = wireless_shadow_alerts.occurrence_count + EXCLUDED.occurrence_count,
                destination_bssid = CASE WHEN EXCLUDED.last_occurred_at >= wireless_shadow_alerts.last_occurred_at THEN EXCLUDED.destination_bssid ELSE wireless_shadow_alerts.destination_bssid END,
                ssid = CASE WHEN EXCLUDED.last_occurred_at >= wireless_shadow_alerts.last_occurred_at THEN EXCLUDED.ssid ELSE wireless_shadow_alerts.ssid END,
                sensor_id = CASE WHEN EXCLUDED.last_occurred_at >= wireless_shadow_alerts.last_occurred_at THEN EXCLUDED.sensor_id ELSE wireless_shadow_alerts.sensor_id END,
                location_id = CASE WHEN EXCLUDED.last_occurred_at >= wireless_shadow_alerts.last_occurred_at THEN EXCLUDED.location_id ELSE wireless_shadow_alerts.location_id END,
                signal_dbm = CASE WHEN EXCLUDED.last_occurred_at >= wireless_shadow_alerts.last_occurred_at THEN EXCLUDED.signal_dbm ELSE wireless_shadow_alerts.signal_dbm END,
                projection_run_id = EXCLUDED.projection_run_id,
-               updated_at = CURRENT_TIMESTAMP""").update.run
-
-    val markInputs =
-      (fr"""INSERT INTO wireless_shadow_alert_inputs (dedupe_key, source_mac, projected_at)
+               updated_at = CURRENT_TIMESTAMP
+             RETURNING source_mac, first_occurred_at, last_occurred_at, occurrence_count,
+                       destination_bssid, ssid, sensor_id, location_id, signal_dbm, reason, evidence
+             ), marked AS (
+             INSERT INTO wireless_shadow_alert_inputs (dedupe_key, source_mac, projected_at)
              SELECT w.dedupe_key, w.source_mac, CURRENT_TIMESTAMP
-             FROM (""" ++ candidates ++ fr""") w
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""").update.run
-
-    val select =
-      sql"""SELECT jsonb_build_object(
+             FROM candidates w
+             ON CONFLICT (dedupe_key) DO NOTHING
+             )
+             SELECT jsonb_build_object(
                'event_type', 'shadow_device',
                'first_occurred_at', first_occurred_at,
                'last_occurred_at', last_occurred_at,
@@ -65,12 +75,9 @@ object ProjectionSql:
                'reason', reason,
                'evidence', evidence
              ) AS alert_json
-             FROM wireless_shadow_alerts
-             WHERE projection_run_id = $runId"""
-        .query[String]
-        .to[List]
-
-    insert *> markInputs *> select
+             FROM upserted""")
+      .query[String]
+      .to[List]
 
   private def shadowAlertCandidates(
     windowSeconds: Int,

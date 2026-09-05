@@ -8,6 +8,19 @@ object WirelessProcessorSql:
   def normalize(limit: Int): ConnectionIO[Int] =
     val batchLimit = limit.max(1)
 
+    def missingFrameKeys(childTable: Fragment): Fragment =
+      fr"""SELECT frame.dedupe_key
+           FROM wireless_frames frame
+           WHERE NOT EXISTS (
+             SELECT 1 FROM """ ++ childTable ++ fr""" child
+             WHERE child.dedupe_key = frame.dedupe_key
+           ) AND EXISTS (
+             SELECT 1 FROM sync_events event
+             WHERE event.dedupe_key = frame.dedupe_key AND event.stream_name = 'wireless.audit'
+           )
+           ORDER BY frame.observed_at, frame.dedupe_key
+           LIMIT $batchLimit"""
+
     val frames =
       sql"""INSERT INTO wireless_frames (
                dedupe_key, sensor_id, location_id, schema_version, observed_at,
@@ -33,7 +46,8 @@ object WirelessProcessorSql:
              ON CONFLICT (dedupe_key) DO UPDATE SET updated_at = EXCLUDED.updated_at""".update.run
 
     def radio: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_radio (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_radio") ++
+        fr""") INSERT INTO wireless_frame_radio (
                dedupe_key, signal_dbm, noise_dbm, frequency_mhz, channel_flags,
                data_rate_kbps, antenna_id, tsft, fragment_number, channel_number,
                tsft_delta_us, wall_clock_delta_ms
@@ -41,31 +55,27 @@ object WirelessProcessorSql:
              SELECT e.dedupe_key, e.signal_dbm, e.noise_dbm, e.frequency_mhz, e.channel_flags,
                     e.data_rate_kbps, e.antenna_id, e.tsft, e.fragment_number, e.channel_number,
                     e.tsft_delta_us, e.wall_clock_delta_ms
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_radio child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     def qos: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_qos (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_qos") ++
+        fr""") INSERT INTO wireless_frame_qos (
                dedupe_key, qos_tid, qos_eosp, qos_ack_policy, qos_ack_policy_label,
                qos_amsdu, more_data, retry, power_save, protected, frame_control_flags
              )
              SELECT e.dedupe_key, e.qos_tid, e.qos_eosp, e.qos_ack_policy, e.qos_ack_policy_label,
                     e.qos_amsdu, e.more_data, e.retry, e.power_save, e.protected, e.frame_control_flags
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_qos child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     def network: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_network (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_network") ++
+        fr""") INSERT INTO wireless_frame_network (
                dedupe_key, llc_oui, ethertype, ethertype_name, src_ip, dst_ip,
                ip_ttl, ip_protocol, ip_protocol_name, src_port, dst_port,
                transport_protocol, transport_length, transport_checksum, app_protocol
@@ -73,31 +83,27 @@ object WirelessProcessorSql:
              SELECT e.dedupe_key, e.llc_oui, e.ethertype, e.ethertype_name, e.src_ip, e.dst_ip,
                     e.ip_ttl, e.ip_protocol, e.ip_protocol_name, e.src_port, e.dst_port,
                     e.transport_protocol, e.transport_length, e.transport_checksum, e.app_protocol
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_network child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     def appSignals: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_app_signals (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_app_signals") ++
+        fr""") INSERT INTO wireless_frame_app_signals (
                dedupe_key, ssdp_message_type, ssdp_st, ssdp_mx, ssdp_usn,
                dhcp_requested_ip, dhcp_hostname, dhcp_vendor_class, dns_query_name, mdns_name
              )
              SELECT e.dedupe_key, e.ssdp_message_type, e.ssdp_st, e.ssdp_mx, e.ssdp_usn,
                     e.dhcp_requested_ip, e.dhcp_hostname, e.dhcp_vendor_class, e.dns_query_name, e.mdns_name
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_app_signals child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     def identity: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_identity (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_identity") ++
+        fr""") INSERT INTO wireless_frame_identity (
                dedupe_key, username, event_type, session_key, retransmit_key,
                frame_fingerprint, payload_visibility, identity_source, device_fingerprint,
                wps_device_name, wps_manufacturer, wps_model_name, handshake_captured, normalized_text
@@ -106,29 +112,24 @@ object WirelessProcessorSql:
                     e.frame_fingerprint, e.payload_visibility, e.identity_source, e.device_fingerprint,
                     e.wps_device_name, e.wps_manufacturer, e.wps_model_name,
                     e.handshake_captured, e.wireless_search_text
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_identity child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     def security: ConnectionIO[Int] =
-      sql"""INSERT INTO wireless_frame_security (
+      (fr"WITH missing AS MATERIALIZED (" ++ missingFrameKeys(fr"wireless_frame_security") ++
+        fr""") INSERT INTO wireless_frame_security (
                dedupe_key, large_frame, mixed_encryption, dedupe_or_replay_suspect,
                raw_len, security_flags, risk_score, tags, signal_status, adjacent_mac_hint
              )
              SELECT e.dedupe_key, e.large_frame, e.mixed_encryption, e.dedupe_or_replay_suspect,
                     e.raw_len, e.security_flags, e.risk_score, COALESCE(e.tags, jsonb_build_array()),
                     e.signal_status, e.adjacent_mac_hint
-             FROM sync_events e
-             JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             LEFT JOIN wireless_frame_security child ON child.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit' AND child.dedupe_key IS NULL
-             ORDER BY e.observed_at, e.dedupe_key
-             LIMIT $batchLimit
-             ON CONFLICT (dedupe_key) DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key""".update.run
+             FROM missing
+             JOIN sync_events e ON e.dedupe_key = missing.dedupe_key
+             WHERE e.stream_name = 'wireless.audit'
+             ON CONFLICT (dedupe_key) DO NOTHING""").update.run
 
     for
       frameCount <- frames

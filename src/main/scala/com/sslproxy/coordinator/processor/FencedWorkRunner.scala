@@ -3,7 +3,8 @@ package com.sslproxy.coordinator.processor
 import cats.effect.kernel.Async
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import com.sslproxy.coordinator.persistence.{MaintenanceStore, orRaise}
+import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, MaintenanceStore, orRaise}
 
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -74,8 +75,10 @@ final class FencedWorkRunner[F[_]: Async](
   private def requireOne(updated: Int, processorId: ProcessorId, operation: String): F[Unit] =
     if updated == 1 then Async[F].unit
     else
-      Async[F].raiseError(
-        IllegalStateException(
-          s"$operation processor lease for ${processorId.value} affected $updated rows"
-        )
-      )
+      val message = s"$operation processor lease for ${processorId.value} affected $updated rows"
+      val cause = IllegalStateException(message)
+      val error =
+        if updated == 0 then
+          DatabaseOperationException(DatabaseError.Retryable("processor.renew_lease", cause, message))
+        else cause
+      Async[F].raiseError(error)

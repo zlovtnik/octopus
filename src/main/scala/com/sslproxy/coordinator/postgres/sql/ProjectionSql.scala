@@ -16,7 +16,13 @@ object ProjectionSql:
     val runId = java.util.UUID.randomUUID().toString
     val candidates = shadowAlertCandidates(window, signalThresholdDbm, presenceWindow, limit)
     (fr"""WITH candidates AS MATERIALIZED (""" ++ candidates ++ fr"""),
-             ranked AS (
+             marked AS (
+               INSERT INTO wireless_shadow_alert_inputs (dedupe_key, source_mac, projected_at)
+               SELECT w.dedupe_key, w.source_mac, CURRENT_TIMESTAMP
+               FROM candidates w
+               ON CONFLICT (dedupe_key) DO NOTHING
+               RETURNING dedupe_key
+             ), ranked AS (
                SELECT candidates.*,
                       MIN(observed_at) OVER (PARTITION BY source_mac) AS first_seen,
                       COUNT(*) OVER (PARTITION BY source_mac) AS input_count,
@@ -24,6 +30,7 @@ object ProjectionSql:
                         PARTITION BY source_mac ORDER BY observed_at DESC, dedupe_key DESC
                       ) AS position
                FROM candidates
+               JOIN marked USING (dedupe_key)
              ), upserted AS (
              INSERT INTO wireless_shadow_alerts (
                source_mac, first_occurred_at, last_occurred_at, occurrence_count,
@@ -55,11 +62,6 @@ object ProjectionSql:
                updated_at = CURRENT_TIMESTAMP
              RETURNING source_mac, first_occurred_at, last_occurred_at, occurrence_count,
                        destination_bssid, ssid, sensor_id, location_id, signal_dbm, reason, evidence
-             ), marked AS (
-             INSERT INTO wireless_shadow_alert_inputs (dedupe_key, source_mac, projected_at)
-             SELECT w.dedupe_key, w.source_mac, CURRENT_TIMESTAMP
-             FROM candidates w
-             ON CONFLICT (dedupe_key) DO NOTHING
              )
              SELECT jsonb_build_object(
                'event_type', 'shadow_device',

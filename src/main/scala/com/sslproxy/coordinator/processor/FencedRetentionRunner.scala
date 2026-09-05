@@ -3,7 +3,8 @@ package com.sslproxy.coordinator.processor
 import cats.effect.kernel.Async
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import com.sslproxy.coordinator.persistence.{MaintenanceStore, orRaise}
+import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, MaintenanceStore, orRaise}
 
 import java.time.temporal.ChronoUnit
 import java.util.UUID
@@ -49,7 +50,16 @@ final class FencedRetentionRunner[F[_]: Async](
         leaseTtlSeconds
       )
       .orRaise
-      .flatMap(updated => requireOne(updated, "renew maintenance lease"))
+      .flatMap { updated =>
+        if updated == 0 then
+          val message = "renew maintenance lease affected 0 rows"
+          Async[F].raiseError(
+            DatabaseOperationException(
+              DatabaseError.Retryable("maintenance.renew_lease", IllegalStateException(message), message)
+            )
+          )
+        else requireOne(updated, "renew maintenance lease")
+      }
 
   private def runClaimed(
     lease: Lease,

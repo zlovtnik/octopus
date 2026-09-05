@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.ingest
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import cats.effect.implicits.*
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.PostgresConfig
@@ -19,6 +19,7 @@ import com.sslproxy.coordinator.postgres.{
   PostgresTransactor
 }
 import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.postgres.sql.{MaintenanceSql, ProjectionSql}
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
@@ -36,6 +37,7 @@ import java.sql.DriverManager
 import java.util.Base64
 import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
@@ -387,6 +389,172 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(stored, List(("aa:bb:cc:dd:ee:21", -40)))
       assert(alerts.exists(_.contains("aa:bb:cc:dd:ee:21")))
       assert(!alerts.exists(_.contains("aa:bb:cc:dd:ee:20")))
+
+  test("normalization fills a bounded frame and repairs missing children on replay"):
+    requireDocker()
+    val keys = List("normalizer-repair-1", "normalizer-repair-2")
+    val seed = keys.zipWithIndex.traverse_ { case (key, index) =>
+      sql"""INSERT INTO sync_events (
+               dedupe_key, stream_name, observed_at, payload_ref, payload,
+               sensor_id, location_id, frame_control_flags, source_mac
+             ) VALUES (
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(java.time.Instant.EPOCH.plusSeconds(index.toLong))},
+               'inline://test', '{}', 'normalizer-test', 'lab', 0, 'aa:bb:cc:dd:ee:28'
+             )""".update.run.void
+    }
+    for
+      _ <- seed.transact(xa)
+      first <- repository.normalizeWirelessFrames(1).map(requireRight)
+      _ = assertEquals(first, 7)
+      count <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
+        .query[Long].unique.transact(xa)
+      _ = assertEquals(count, 1L)
+      _ <- sql"""DELETE FROM wireless_frame_network WHERE dedupe_key = ${keys.head}""".update.run.transact(xa)
+      _ <- repository.normalizeWirelessFrames(1).map(requireRight)
+      network <- sql"""SELECT COUNT(*) FROM wireless_frame_network WHERE dedupe_key = ${keys.head}"""
+        .query[Long].unique.transact(xa)
+      countAfter <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(network, 1L)
+      assertEquals(countAfter, 2L)
+
+  test("shadow alerts aggregate repeated devices and mark exactly the selected inputs"):
+    requireDocker()
+    val mac = "aa:bb:cc:dd:ee:29"
+    val now = java.time.Instant.now()
+    val observations = List((1, 30L, -42), (2, 10L, -35), (3, 20L, -38))
+    val seed = observations.traverse_ { case (index, age, signal) =>
+      val key = Sha256Utils.sha256Hex(s"shadow-alert-batch-$index")
+      sql"""INSERT INTO sync_events (
+               dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+               payload, status, source_mac, signal_dbm, ssid
+             ) VALUES (
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(now.minusSeconds(age))},
+               'inline://test', $key, '{}', 'completed', $mac, $signal, ${s"network-$index"}
+             )""".update.run.void
+    }
+
+    for
+      _ <- seed.transact(xa)
+      first <- repository.generateShadowAlerts(100).map(requireRight)
+      repeated <- repository.generateShadowAlerts(100).map(requireRight)
+      stored <- sql"""SELECT occurrence_count, signal_dbm, ssid, first_occurred_at, last_occurred_at
+                       FROM wireless_shadow_alerts WHERE source_mac = $mac"""
+        .query[(Long, Int, String, java.sql.Timestamp, java.sql.Timestamp)].unique.transact(xa)
+      marked <- sql"""SELECT COUNT(*) FROM wireless_shadow_alert_inputs WHERE source_mac = $mac"""
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(first.count(_.contains(mac)), 1)
+      assert(!repeated.exists(_.contains(mac)))
+      assertEquals(stored._1, 3L)
+      assertEquals(stored._2, -35)
+      assertEquals(stored._3, "network-2")
+      assertEquals(stored._4.toInstant.toEpochMilli, now.minusSeconds(30L).toEpochMilli)
+      assertEquals(stored._5.toInstant.toEpochMilli, now.minusSeconds(10L).toEpochMilli)
+      assertEquals(marked, 3L)
+
+  test("concurrent shadow alert replays aggregate only the inputs each call claims"):
+    requireDocker()
+    val mac = "aa:bb:cc:dd:ee:30"
+    val now = java.time.Instant.now()
+    val keys = (1 to 3).toList.map(index => Sha256Utils.sha256Hex(s"shadow-alert-concurrent-$index"))
+    val seed = keys.zipWithIndex.traverse_ { case (key, index) =>
+      sql"""INSERT INTO sync_events (
+               dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
+               payload, status, source_mac, signal_dbm
+             ) VALUES (
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(now.minusSeconds(30L - index * 10L))},
+               'inline://test', $key, '{}', 'completed', $mac, -40
+             )""".update.run.void
+    }
+
+    for
+      _ <- seed.transact(xa)
+      firstProjected <- Deferred[IO, Int]
+      allowCommit <- Deferred[IO, Unit]
+      first = xa.liftF { liftIO =>
+        for
+          pid <- sql"SELECT pg_backend_pid()".query[Int].unique
+          alerts <- ProjectionSql.generateShadowAlerts(60, -50, 300, 2)
+          _ <- liftIO(firstProjected.complete(pid) *> allowCommit.get)
+        yield alerts
+      }
+      replays = (
+        ProjectionSql.generateShadowAlerts(60, -50, 300, 2).transact(xa),
+        ProjectionSql.generateShadowAlerts(60, -50, 300, 100).transact(xa)
+      ).parTupled
+      results <- first.background.use { firstResult =>
+        for
+          pid <- firstProjected.get.timeout(10.seconds)
+          alerts <- replays.background.use { replayResult =>
+            (for
+              // Both replays must select their inputs before the first transaction commits.
+              _ <- sql"""SELECT COUNT(*) FROM pg_stat_activity
+                           WHERE $pid = ANY(pg_blocking_pids(pid))"""
+                .query[Long].unique.transact(xa)
+                .flatTap(count => IO.sleep(10.millis).unlessA(count == 2L))
+                .iterateUntil(_ == 2L)
+                .timeout(10.seconds)
+              _ <- allowCommit.complete(())
+              initial <- firstResult.flatMap(_.embedNever)
+              replayed <- replayResult.flatMap(_.embedNever)
+            yield (initial, replayed))
+              .guarantee(allowCommit.complete(()).void)
+          }
+        yield alerts
+      }
+      stored <- sql"""SELECT occurrence_count FROM wireless_shadow_alerts WHERE source_mac = $mac"""
+        .query[Long].unique.transact(xa)
+      marked <- sql"""SELECT dedupe_key FROM wireless_shadow_alert_inputs
+                       WHERE source_mac = $mac ORDER BY dedupe_key"""
+        .query[String].to[List].transact(xa)
+      repeated <- repository.generateShadowAlerts(100).map(requireRight)
+    yield
+      val (initial, (duplicateReplay, overlappingReplay)) = results
+      assertEquals(initial.count(_.contains(mac)), 1)
+      assertEquals(duplicateReplay, Nil)
+      assertEquals(overlappingReplay.count(_.contains(mac)), 1)
+      assertEquals(stored, 3L)
+      assertEquals(marked, keys.sorted)
+      assert(!repeated.exists(_.contains(mac)))
+
+  test("archived retention honors pending outboxes and deletes terminal UUID dependencies"):
+    requireDocker()
+    val payload = """{"observed_at":"2025-01-01T00:00:00Z","event_type":"wifi_data_frame","sensor_id":"retention-test"}"""
+    val record = resolvedWireless(payload)
+    val resourceType = "maintenance"
+    val resourceId = "retention-integration-test"
+
+    for
+      decision <- persist(record, offset = 9501L)
+      _ <- sql"""UPDATE sync_events SET status = 'completed', payload = NULL, payload_archived = true
+                  WHERE dedupe_key = ${record.dedupeKey}""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_event_payload_archives
+                   (dedupe_key, stream_name, observed_at, payload_sha256, archive_uri)
+                 SELECT dedupe_key, stream_name, observed_at, payload_sha256, 's3://test/retention'
+                 FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".update.run.transact(xa)
+      _ <- sql"""UPDATE sync_jobs SET status = 'completed' WHERE job_id = ${decision.jobId}""".update.run.transact(xa)
+      _ <- sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run.transact(xa)
+      blocked <- MaintenanceSql.retentionCandidates(30, 100).to[List].transact(xa)
+      _ = assert(!blocked.exists(_._1 == record.dedupeKey))
+      _ <- sql"""UPDATE outbox_events SET status = 'published' WHERE source_id = ${decision.batchId}""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO outbox_publish_attempts (outbox_id, attempt_no, status)
+                 SELECT outbox_id, 1, 'published' FROM outbox_events WHERE source_id = ${decision.batchId}""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
+                 VALUES (${decision.jobId}, ${decision.batchId}, 'test', 'retention fixture')""".update.run.transact(xa)
+      lease <- repository.claimMaintenanceLease(resourceType, resourceId, "test-worker", java.util.UUID.randomUUID().toString, 60)
+        .map(result => requireRight(result).getOrElse(fail("expected maintenance lease")))
+      result <- repository.retainArchivedEvents(30, 90, 100, resourceType, resourceId, lease).map(requireRight)
+      remaining <- sql"""SELECT COUNT(*) FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
+      outboxes <- sql"""SELECT COUNT(*) FROM outbox_events WHERE source_id = ${decision.batchId}""".query[Long].unique.transact(xa)
+      errors <- sql"""SELECT COUNT(*) FROM sync_errors WHERE batch_id = ${decision.batchId}""".query[Long].unique.transact(xa)
+      tombstones <- sql"""SELECT COUNT(*) FROM sync_event_tombstones WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
+      archives <- sql"""SELECT COUNT(*) FROM sync_event_payload_archives WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
+    yield
+      assertEquals(result, 1L -> 1L)
+      assertEquals((remaining, outboxes, errors), (0L, 0L, 0L))
+      assertEquals((tombstones, archives), (1L, 1L))
 
   test("load acknowledgement binds batch_id without a JSON collation comparison"):
     requireDocker()

@@ -4,7 +4,7 @@ import cats.data.EitherT
 import cats.effect.{Deferred, IO, Ref}
 import com.sslproxy.coordinator.archive.ArchiveReceipt
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.persistence.{DbResultT, MaintenanceStore}
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, DbResultT, MaintenanceStore}
 import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import munit.CatsEffectSuite
 
@@ -88,7 +88,29 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       releases <- store.releases.get
     yield
       assert(result.swap.exists(_.getMessage.contains("affected 0 rows")))
+      assert(result.swap.exists {
+        case DatabaseOperationException(_: DatabaseError.Retryable) => true
+        case _ => false
+      })
       assertEquals(finishes.map(_._1), List("failed"))
+      assertEquals(releases, 1)
+
+  test("processor lease loss cancels the tick and remains retryable"):
+    for
+      store <- TestMaintenanceStore.create(renewedRows = 0)
+      cancelled <- Ref.of[IO, Boolean](false)
+      runner = new FencedWorkRunner[IO](store, "worker-1")
+      result <- runner.runOnce(ProcessorId.BehaviorProjector, 1.second) { _ =>
+        IO.never[Unit].onCancel(cancelled.set(true))
+      }.attempt
+      wasCancelled <- cancelled.get
+      releases <- store.releases.get
+    yield
+      assert(result.swap.exists {
+        case DatabaseOperationException(_: DatabaseError.Retryable) => true
+        case _ => false
+      })
+      assert(wasCancelled)
       assertEquals(releases, 1)
 
   test("generic periodic work is renewed and released under its processor fence"):

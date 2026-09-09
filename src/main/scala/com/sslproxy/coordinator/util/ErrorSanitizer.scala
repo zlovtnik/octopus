@@ -10,7 +10,16 @@ object ErrorSanitizer:
   private val RepeatedWhitespace = "\\s+".r
 
   def message(error: Throwable): String =
-    sanitize(Option(error.getMessage).getOrElse(error.getClass.getSimpleName))
+    val sqlErrors = com.sslproxy.coordinator.postgres.PostgresErrorClass.exceptions(error, includeSuppressed = true).collect {
+      case sql: java.sql.SQLException => sql
+    }
+    if sqlErrors.nonEmpty then
+      val classification = com.sslproxy.coordinator.postgres.PostgresErrorClass.classify(error).wireValue
+      sqlErrors.take(4).map { sql =>
+        val state = Option(sql.getSQLState).filter(_.matches("[A-Za-z0-9]{5}")).getOrElse("unknown")
+        s"${sql.getClass.getSimpleName} SQLSTATE=$state vendor_code=${sql.getErrorCode} classification=$classification"
+      }.mkString("; ").take(MaximumLength)
+    else sanitize(Option(error).flatMap(e => Option(e.getMessage)).getOrElse("Unknown error"))
 
   def sanitize(value: String): String =
     val withoutControls = ControlCharacters.replaceAllIn(Option(value).getOrElse(""), "")

@@ -168,12 +168,46 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | Configuration block | Environment families | Startup requirement |
 |---|---|---|
 | `postgres` | `POSTGRES_*` | Required when either runtime lane is enabled; external host, non-root account, password, verified TLS identity, canonical manifest digest, positive pool/timeouts |
+| `postgres.statement-timeout-secs` | `POSTGRES_STATEMENT_TIMEOUT_SECS` | Optional, default 30; transaction-local PostgreSQL statement timeout for sink transactions only |
+| `postgres.network-timeout-secs` | `POSTGRES_NETWORK_TIMEOUT_SECS` | Optional, default 60; JDBC network timeout for sink attempts, restored before connection reuse |
 | `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition/replication bounds, versioned consumer groups, earliest retained startup for new groups, manual commit after durable processing, and one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |
 | `processors` | `OCTOPUS_PROCESSOR_*`, `OCTOPUS_ENABLED_PROCESSORS`, similarity/distance variables | Enabled IDs must be Octopus-owned with dependencies enabled; delays, interval, and batch size positive; scores finite and in range |
 | `archive` | `OCTOPUS_ARCHIVE_ENABLED`, `MINIO_*`, retention and archive variables | Credentials and bucket required when enabled; retention ordering, intervals, and batch size validated |
+
+Both sink timeouts must be positive, at most 2147483 seconds, and the network
+timeout must exceed the statement timeout. Connection acquisition remains five
+seconds (`POSTGRES_CONNECTION_TIMEOUT_MS=5000`); health queries retain their
+five-second timeout. Each sink attempt uses parameterized transaction-local
+`set_config('statement_timeout', ?, true)` before business SQL. Repository
+transactions retain their existing timeout behavior. Sink retries use three
+total attempts with 200/400 ms backoff after releasing each connection.
+
+### Read-only timeout incident procedure
+
+Correlate `postgres_attempt` timestamps and `operation`, `attempt`, `outcome`,
+`acquisition_ms`, `transaction_ms`, and `elapsed_ms`. Outcomes include `retrying`,
+`exhausted`, `permanent_failure`, and `recovered`; ordinary success is DEBUG.
+Failures include bounded SQLSTATE/vendor-code classifications without driver
+messages or parameters. Pool snapshots are `pool_active`, `pool_idle`, and
+`pool_waiting` (sampled after connection release).
+
+1. Compare acquisition time and pool waiting counts with PgBouncer `SHOW POOLS`
+   and `SHOW STATS` using the approved read-only monitoring connection. Check
+   waiting clients and server availability in the same time window.
+2. On PostgreSQL, inspect `pg_stat_activity` for `pid`, `state`, `xact_start`,
+   `query_start`, `wait_event_type`, `wait_event`, and `pg_blocking_pids(pid)`.
+   Avoid exporting query text, which may contain values. Compare blockers and
+   wait events with transaction duration and SQLSTATE `57014` cancellations.
+3. Compare consumer-group lag with retry/exhaustion timestamps, JVM GC pause
+   telemetry, and container CPU throttled periods/time. Preserve the existing
+   Cats Effect starvation warning: temporal proximity does not establish a
+   shared cause. A JDBC transaction already runs on `IO.blocking`.
+4. Save the time window and safe diagnostic fields for review. Do not change
+   pool size, concurrency, CPU, database settings, offsets, or managed workloads
+   during this procedure. Production changes follow reviewed Git/Argo CD delivery.
 
 Unknown or obsolete overrides are not alternate configuration sources. In
 particular, `WIRELESS_DLQ_SUFFIX` is retired; use `SYNC_DLQ_SUFFIX` for every

@@ -34,44 +34,88 @@ final class PostgresTransactor private (
       finally conn.close()
     }
 
-  private def withTransaction[A](f: Connection => A): IO[A] =
+  private[postgres] def withTransaction[A](f: Connection => A): IO[A] =
+    transactionAttempt(_ => ())(f)
+
+  private def transactionAttempt[A](acquired: Long => Unit)(f: Connection => A): IO[A] =
     IO.blocking {
+      val start = System.nanoTime()
       val conn = ds.getConnection
+      acquired(System.nanoTime() - start)
+      var failure: Throwable = null
+      var previousTimeout: Option[Int] = None
+      var reusable = true
+      def cleanup(action: => Unit): Unit =
+        try action
+        catch
+          case scala.util.control.NonFatal(error) =>
+            reusable = false
+            if failure == null then failure = error
+            else if error ne failure then failure.addSuppressed(error)
       try
+        previousTimeout = Some(conn.getNetworkTimeout)
+        conn.setNetworkTimeout(networkTimeoutExecutor, config.networkTimeoutSecs * 1000)
         conn.setAutoCommit(false)
-        if config.statementTimeoutSecs > 0 then
-          conn.setNetworkTimeout(networkTimeoutExecutor, config.statementTimeoutSecs * 1000)
+        scala.util.Using.resource(conn.prepareStatement(BatchSinkSql.SetLocalStatementTimeout)) { setting =>
+          setting.setString(1, s"${config.statementTimeoutSecs * 1000}ms")
+          setting.executeQuery().close()
+        }
         val result = f(conn)
         conn.commit()
         result
       catch
-        case e: Exception =>
-          rollbackQuietly(conn)
+        case scala.util.control.NonFatal(e) =>
+          failure = e
+          cleanup(conn.rollback())
           throw e
-      finally conn.close()
+      finally
+        cleanup {
+          if !conn.isClosed && reusable then
+            previousTimeout.foreach(conn.setNetworkTimeout(networkTimeoutExecutor, _))
+        }
+        if !reusable then cleanup(ds.evictConnection(conn))
+        cleanup(conn.close())
+        if failure != null then throw failure
     }
 
-  private def withRetry[A](label: String)(f: IO[A]): IO[A] =
-    def go(attempt: Int): IO[A] =
-      f.handleErrorWith { err =>
-        if attempt < retryMaxAttempts && PostgresErrorClass.classify(err) == PostgresErrorClass.Retryable then
-          val delay = retryBaseDelay * (1L << (attempt - 1))
-          val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(err)
-          log.warn(
-            "postgres_retry",
-            "status" -> "retrying",
-            "operation" -> label,
-            "attempt" -> s"$attempt/$retryMaxAttempts",
-            "delay" -> s"${delay.toMillis}ms",
-            "error" -> sanitized
-          )
-          IO.sleep(delay) *> go(attempt + 1)
-        else IO.raiseError(err)
+  private[postgres] def withTransactionRetry[A](label: String)(f: Connection => A): IO[A] =
+    IO.monotonic.flatMap { started =>
+      def go(attempt: Int): IO[A] = IO.defer {
+        var acquisitionNanos = 0L
+        for
+          attemptStart <- IO.monotonic
+          result <- transactionAttempt(nanos => acquisitionNanos = nanos)(f).attempt
+          finished <- IO.monotonic
+          value <-
+            val retryable = result.left.toOption.exists(PostgresErrorClass.classify(_) == PostgresErrorClass.Retryable)
+            val outcome = result match
+              case Right(_) => if attempt > 1 then "recovered" else "succeeded"
+              case Left(_) => if retryable && attempt < retryMaxAttempts then "retrying" else if retryable then "exhausted" else "permanent_failure"
+            val elapsed = finished - attemptStart
+            val pool = ds.getHikariPoolMXBean
+            val fields = Seq(
+              "operation" -> label, "attempt" -> attempt.toString, "outcome" -> outcome,
+              "acquisition_ms" -> (if acquisitionNanos == 0 then elapsed.toMillis else acquisitionNanos / 1000000).toString,
+              "transaction_ms" -> (if acquisitionNanos == 0 then 0L else (elapsed.toNanos - acquisitionNanos) / 1000000).toString,
+              "elapsed_ms" -> (finished - started).toMillis.toString,
+              "error" -> result.left.toOption.map(ErrorSanitizer.message).getOrElse(""),
+              "pool_active" -> Option(pool).map(_.getActiveConnections.toString).getOrElse("unknown"),
+              "pool_idle" -> Option(pool).map(_.getIdleConnections.toString).getOrElse("unknown"),
+              "pool_waiting" -> Option(pool).map(_.getThreadsAwaitingConnection.toString).getOrElse("unknown")
+            )
+            IO {
+              if outcome == "succeeded" then log.debug("postgres_attempt", fields*)
+              else if outcome == "recovered" then log.info("postgres_attempt", fields*)
+              else log.warn("postgres_attempt", fields*)
+            } *> (result match
+              case Right(value) => IO.pure(value)
+              case Left(_) if outcome == "retrying" =>
+                IO.sleep(retryBaseDelay * (1L << (attempt - 1))) *> go(attempt + 1)
+              case Left(error) => IO.raiseError(error))
+        yield value
       }
-    go(1)
-
-  private def withTransactionRetry[A](label: String)(f: Connection => A): IO[A] =
-    withRetry(label)(withTransaction(f))
+      go(1)
+    }
 
   private def checkConnection(): IO[Unit] =
     withConnection { conn =>
@@ -755,10 +799,6 @@ final class PostgresTransactor private (
       finally tlsMaterial.foreach(_.delete())
       log.info("postgres_pool_closed")
     }
-
-  private def rollbackQuietly(conn: Connection): Unit =
-    try conn.rollback()
-    catch case _: Exception => ()
 
 object PostgresTransactor:
   private val log = StructuredLogger(getClass)

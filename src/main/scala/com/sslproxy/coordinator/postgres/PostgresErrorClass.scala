@@ -10,29 +10,36 @@ enum PostgresErrorClass(val wireValue: String):
 object PostgresErrorClass:
 
   def classify(failure: Throwable): PostgresErrorClass =
-    if failure == null then return Permanent
+    val chain = exceptions(failure)
+    val states = chain.collect { case sql: SQLException => Option(sql.getSQLState).filter(_.nonEmpty) }.flatten
+    if states.nonEmpty then
+      if states.exists(isRetryableSqlState) then Retryable else Permanent
+    else if chain.exists {
+      case _: SQLRecoverableException | _: SQLTransientException => true
+      case error => isRetryableMessage(error.getMessage)
+    } then Retryable
+    else Permanent
 
+  def exceptions(failure: Throwable, includeSuppressed: Boolean = false): List[Throwable] =
+    if failure == null then return Nil
     val failures = mutable.ArrayDeque[Throwable](failure)
-    val visited = mutable.Set.empty[Throwable]
+    val visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Throwable, java.lang.Boolean]())
+    val result = List.newBuilder[Throwable]
 
     while failures.nonEmpty do
       val current = failures.removeHead()
       if !visited.add(current) then ()
       else
+        result += current
         current match
-          case _: SQLRecoverableException | _: SQLTransientException =>
-            return Retryable
           case sqlEx: SQLException =>
-            if isRetryableSqlState(sqlEx.getSQLState) || isRetryableVendorCode(sqlEx.getErrorCode) then return Retryable
             if sqlEx.getNextException != null then failures += sqlEx.getNextException
           case _ => ()
-
-        if isRetryableMessage(current.getMessage) then return Retryable
-
+        if includeSuppressed then current.getSuppressed.foreach(failures += _)
         val cause = current.getCause
         if cause != null && cause != current then failures += cause
 
-    Permanent
+    result.result()
 
   private def isRetryableSqlState(sqlState: String): Boolean =
     sqlState != null && {
@@ -42,11 +49,9 @@ object PostgresErrorClass:
       normalized == "HYT00" ||
       normalized == "HYT01" ||
       normalized == "55P03" ||
+      normalized == "57014" ||
       normalized == "57P03"
     }
-
-  private def isRetryableVendorCode(_errorCode: Int): Boolean =
-    false
 
   private def isRetryableMessage(message: String): Boolean =
     val normalized = if message == null then "" else message.toLowerCase(java.util.Locale.ROOT)

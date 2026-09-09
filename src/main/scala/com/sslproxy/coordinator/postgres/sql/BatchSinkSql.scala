@@ -1,6 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 object BatchSinkSql:
+  val SetLocalStatementTimeout: String = "SELECT set_config('statement_timeout', ?, true)"
+
   val ConnectivityQuery: String = "SELECT 1"
 
   val InsertProxyEvents: String =

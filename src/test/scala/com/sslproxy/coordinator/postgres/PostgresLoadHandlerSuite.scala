@@ -16,7 +16,7 @@ import java.util.Base64
 
 class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
-  test("database insert failure logs a structured error with its stack trace") {
+  test("database insert failure logs safe SQL metadata without parameter values or stack traces") {
     val output = new ByteArrayOutputStream()
     val context = LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
     val encoder = new LogstashEncoder()
@@ -32,7 +32,9 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       .getLogger("com.sslproxy.coordinator.postgres.PostgresLoadHandler$")
       .asInstanceOf[Logger]
     val originalAdditivity = logger.isAdditive
-    val cause = new RuntimeException("database insert unavailable")
+    val cause = new RuntimeException("outer-private-value", new java.sql.SQLException(
+      "INSERT INTO inventory VALUES ('synthetic-private-value', 'password=secret-value')", "23505", 7
+    ))
     val handler = new PostgresLoadHandler(
       new PostgresPayloadResolver("/tmp"),
       PostgresTransformService,
@@ -57,7 +59,7 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       .use(_ => handler.handle(proxyEventsLoad))
       .map { result =>
         assertEquals(result.status, "failed")
-        assertEquals(result.errorText, "database insert unavailable")
+        assertEquals(result.errorText, "SQLException SQLSTATE=23505 vendor_code=7 classification=permanent")
 
         val records = new String(output.toByteArray, StandardCharsets.UTF_8)
           .split('\n')
@@ -76,15 +78,12 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
         assertEquals(error.hcursor.downField("batch_id").as[String].toOption, Some("batch-1"))
         assertEquals(error.hcursor.downField("stream_name").as[String].toOption, Some("proxy.events"))
         assertEquals(error.hcursor.downField("error_class").as[String].toOption, Some("permanent"))
-        assert(
-          error.hcursor
-            .downField("stack_trace")
-            .as[String]
-            .toOption
-            .exists(
-              _.contains("database insert unavailable")
-            )
-        )
+        assert(error.hcursor.downField("stack_trace").focus.isEmpty)
+        assertEquals(error.hcursor.downField("error").as[String].toOption, Some(result.errorText))
+        val logged = new String(output.toByteArray, StandardCharsets.UTF_8)
+        List("INSERT", "synthetic-private-value", "secret-value", "outer-private-value").foreach { value =>
+          assert(!logged.contains(value))
+        }
       }
   }
 

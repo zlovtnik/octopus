@@ -34,13 +34,20 @@ final class StructuredLogger private (underlying: Logger):
     val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.trace(event, args: _*)
 
-  /** Error with cause — the Throwable is appended as the final vararg so
-    * Logback attaches it as a real `stack_trace` field.
+  /** Throwable messages and nested driver exceptions may contain SQL values.
+    * Emit only the bounded sanitizer output, never an unsanitized stack trace.
     */
   def error(event: String, cause: Throwable, fields: (String, String)*): Unit =
-    val base = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
-    val args = base :+ cause
-    underlying.error(event, args: _*)
+    val summary = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
+    val hasSql = com.sslproxy.coordinator.postgres.PostgresErrorClass
+      .exceptions(cause, includeSuppressed = true).exists(_.isInstanceOf[java.sql.SQLException])
+    if hasSql then error(event, (fields :+ ("error" -> summary))*)
+    else
+      // Retain call-site diagnostics without exposing nested messages or secrets.
+      val safe = new RuntimeException(summary)
+      if cause != null then safe.setStackTrace(cause.getStackTrace)
+      val base = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
+      underlying.error(event, (base :+ safe): _*)
 
 object StructuredLogger:
   def apply(clazz: Class[?]): StructuredLogger =

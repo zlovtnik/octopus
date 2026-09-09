@@ -67,7 +67,7 @@ class PostgresLoadHandler(
         "stream_name" -> load.streamName,
         "error_class" -> errorClass.wireValue
       )
-      PostgresResult.failure(load.jobId, load.batchId, errorClass, err.getMessage, finishedAt)
+      PostgresResult.failure(load.jobId, load.batchId, errorClass, com.sslproxy.coordinator.util.ErrorSanitizer.message(err), finishedAt)
     }
 
   private def resolveTarget(load: PostgresLoad): IO[PostgresSinkTarget] =
@@ -141,7 +141,7 @@ class PostgresLoadHandler(
       }
 
   private def buildFailureResult(load: PostgresLoad, err: Throwable): PostgresResult =
-    PostgresResult.failure(load.jobId, load.batchId, classifyError(err), err.getMessage, clock.nowRfc3339)
+    PostgresResult.failure(load.jobId, load.batchId, classifyError(err), com.sslproxy.coordinator.util.ErrorSanitizer.message(err), clock.nowRfc3339)
 
   private def repairPayloadRefIfNeeded(load: PostgresLoad): IO[PostgresLoad] =
     IO(validateLoadMetadata(load)) *>

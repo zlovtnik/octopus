@@ -55,7 +55,8 @@ final case class PostgresConfig(
   sslClientKeyStorePassword: String = "",
   sslClientKeyStoreType: String = "PKCS12",
   localDevAllowPublicKeyRetrieval: Boolean = false,
-  manifestSha256: String = ""
+  manifestSha256: String = "",
+  networkTimeoutSecs: Int = 60
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -420,8 +421,14 @@ object AppConfig:
       Option.when(config.connectionTimeoutMs <= 0L)(
         "postgres.connection-timeout-ms must be positive"
       ),
-      Option.when(config.statementTimeoutSecs <= 0)(
-        "postgres.statement-timeout-secs must be positive"
+      Option.when(config.statementTimeoutSecs <= 0 || config.statementTimeoutSecs > Int.MaxValue / 1000)(
+        "postgres.statement-timeout-secs must be positive and safely convertible to milliseconds"
+      ),
+      Option.when(config.networkTimeoutSecs <= 0 || config.networkTimeoutSecs > Int.MaxValue / 1000)(
+        "postgres.network-timeout-secs must be positive and safely convertible to milliseconds"
+      ),
+      Option.when(config.networkTimeoutSecs <= config.statementTimeoutSecs)(
+        "postgres.network-timeout-secs must exceed postgres.statement-timeout-secs"
       )
     ).flatten
 

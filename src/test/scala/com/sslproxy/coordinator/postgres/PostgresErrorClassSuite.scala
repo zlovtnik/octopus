@@ -4,9 +4,26 @@ import java.sql.{SQLException, SQLRecoverableException, SQLTransientException}
 import munit.*
 
 class PostgresErrorClassSuite extends FunSuite:
+  test("cancellation retries but structured permanent states override timeout text and subclasses"):
+    assertEquals(PostgresErrorClass.classify(SQLException("cancelled", "57014")), PostgresErrorClass.Retryable)
+    val permanent = new SQLTransientException("timeout in parameter", "23505")
+    assertEquals(PostgresErrorClass.classify(RuntimeException("timeout", permanent)), PostgresErrorClass.Permanent)
+
+  test("wrapped chained batch cancellations and cyclic causes terminate"):
+    val batch = new java.sql.BatchUpdateException("INSERT synthetic-secret", null, 0, Array.emptyIntArray)
+    val cancellation = SQLException("synthetic-value", "57014")
+    batch.setNextException(cancellation)
+    cancellation.initCause(batch)
+    assertEquals(PostgresErrorClass.classify(RuntimeException("outer", batch)), PostgresErrorClass.Retryable)
+
 
   test("classify null as Permanent"):
     assertEquals(PostgresErrorClass.classify(null), PostgresErrorClass.Permanent)
+
+  test("cleanup failure cannot reclassify the original permanent SQL failure"):
+    val original = SQLException("invalid", "23505")
+    original.addSuppressed(SQLException("rollback failed", "08006"))
+    assertEquals(PostgresErrorClass.classify(original), PostgresErrorClass.Permanent)
 
   test("classify IllegalArgumentException as Permanent"):
     assertEquals(PostgresErrorClass.classify(IllegalArgumentException("bad")), PostgresErrorClass.Permanent)

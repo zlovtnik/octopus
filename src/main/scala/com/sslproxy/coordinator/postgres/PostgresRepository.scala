@@ -1173,24 +1173,36 @@ object PostgresRepository:
 
   private[postgres] def retryTransient[A](operation: String)(fa: IO[A]): IO[A] =
     def loop(attempt: Int): IO[A] =
-      fa.handleErrorWith { cause =>
-        if attempt < transactionRetryMaxAttempts &&
-          PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable
-        then
-          val baseDelay = transactionRetryBaseDelay * (1L << (attempt - 1))
-          val jitterMs = scala.util.Random.nextLong(baseDelay.toMillis.max(1))
-          val delay = baseDelay + jitterMs.millis
-          IO(
-            log.warn(
+      fa.attempt.flatMap {
+        case Right(value) =>
+          IO.whenA(attempt > 1)(IO(log.info(
+            "postgres_transaction_retry", "status" -> "recovered", "operation" -> operation,
+            "attempt" -> attempt.toString
+          ))).as(value)
+        case Left(cause) =>
+          if attempt < transactionRetryMaxAttempts &&
+            PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable
+          then
+            val baseDelay = transactionRetryBaseDelay * (1L << (attempt - 1))
+            val jitterMs = scala.util.Random.nextLong(baseDelay.toMillis.max(1))
+            val delay = baseDelay + jitterMs.millis
+            IO(
+              log.warn(
+                "postgres_transaction_retry",
+                "status" -> "retrying",
+                "operation" -> operation,
+                "attempt" -> s"$attempt/$transactionRetryMaxAttempts",
+                "delay_ms" -> delay.toMillis.toString,
+                "error" -> com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
+              )
+            ) *> IO.sleep(delay) *> loop(attempt + 1)
+          else
+            IO(log.warn(
               "postgres_transaction_retry",
-              "status" -> "retrying",
-              "operation" -> operation,
-              "attempt" -> s"$attempt/$transactionRetryMaxAttempts",
-              "delay_ms" -> delay.toMillis.toString,
-              "error" -> Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
-            )
-          ) *> IO.sleep(delay) *> loop(attempt + 1)
-        else IO.raiseError(cause)
+              "status" -> (if PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable then "exhausted" else "permanent_failure"),
+              "operation" -> operation, "attempt" -> attempt.toString,
+              "error" -> com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
+            )) *> IO.raiseError(cause)
       }
 
     loop(1)

@@ -878,6 +878,68 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         )
     }
 
+  test("projection cursors preserve complete groups across fetch chunks, replay, and late arrivals"):
+    requireDocker()
+    def seed(first: Int, last: Int): IO[Unit] =
+      (for
+        _ <- sql"""INSERT INTO wireless_frames
+                    (dedupe_key, source_mac, bssid, observed_at, frame_type, frame_subtype)
+                    SELECT CONCAT('streaming-', device, '-', hour, '-', sample),
+                           CONCAT('02:00:00:99:00:0', device),
+                           CONCAT('02:00:00:99:00:0', device),
+                           TIMESTAMPTZ '2026-08-01 00:00:00+00'
+                             + hour * INTERVAL '1 hour' + sample * INTERVAL '1 second',
+                           'management', 'beacon'
+                    FROM generate_series(1, 2) device,
+                         generate_series(0, 1) hour,
+                         generate_series($first, $last) sample""".update.run
+        _ <- sql"""INSERT INTO wireless_frame_radio (dedupe_key, signal_dbm, tsft_delta_us, wall_clock_delta_ms)
+                    SELECT dedupe_key, -60, 10, 2 FROM wireless_frames
+                    WHERE dedupe_key LIKE 'streaming-%'
+                    ON CONFLICT (dedupe_key) DO NOTHING""".update.run
+        _ <- sql"""INSERT INTO wireless_frame_identity (dedupe_key, session_key)
+                    SELECT dedupe_key, CONCAT('streaming-session-', source_mac)
+                    FROM wireless_frames WHERE dedupe_key LIKE 'streaming-%'
+                    ON CONFLICT (dedupe_key) DO NOTHING""".update.run
+      yield ()).transact(xa)
+
+    def project: IO[Unit] =
+      (repository.projectBehavior(10000), repository.projectTiming(10000),
+        repository.projectSequences(10000), repository.projectBaselines(10000))
+        .parTupled.map { case (behavior, timing, sequence, baseline) =>
+          List(behavior, timing, sequence, baseline).foreach(requireRight)
+        }
+
+    def verify(samplesPerWindow: Long): IO[Unit] =
+      (for
+        behavior <- sql"""SELECT event_count FROM atheros_search.behaviour_snapshots
+                          WHERE source_mac LIKE '02:00:00:99:00:%'""".query[Long].to[List]
+        timing <- sql"""SELECT source_event_count, tsft_p50_us, wall_p50_ms
+                        FROM atheros_search.timing_profiles
+                        WHERE source_mac LIKE '02:00:00:99:00:%'""".query[(Long, Double, Double)].to[List]
+        sequence <- sql"""SELECT frame_count FROM atheros_search.frame_sequences
+                          WHERE session_key LIKE 'streaming-session-%'""".query[Long].to[List]
+        baseline <- sql"""SELECT sample_count, p50 FROM atheros_search.baseline_profiles
+                          WHERE bssid LIKE '02:00:00:99:00:%' AND metric = 'signal_dbm'"""
+          .query[(Long, Double)].to[List]
+      yield
+        assertEquals(behavior, List.fill(4)(samplesPerWindow))
+        assertEquals(timing, List.fill(4)((samplesPerWindow, 10.0d, 2.0d)))
+        assertEquals(sequence, List.fill(2)(samplesPerWindow * 2))
+        assertEquals(baseline, List.fill(2)((samplesPerWindow * 2, -60.0d)))
+      ).transact(xa)
+
+    for
+      _ <- seed(1, 300)
+      _ <- project
+      _ <- verify(300L)
+      _ <- project
+      _ <- verify(300L)
+      _ <- seed(301, 301)
+      _ <- project
+      _ <- verify(301L)
+    yield ()
+
   private def parkPendingLoadOutboxes(): IO[Unit] =
     sql"""UPDATE outbox_events
            SET status = 'failed',
@@ -894,7 +956,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
   private def applyCanonicalManifest(): Unit =
     val manifest = canonicalManifest()
-    val parsedStatements = canonicalStatements(manifest)
+    val searchRoot = schemaRoot.resolveSibling("atheros_search")
+    val parsedStatements = canonicalStatements(manifest) ++
+      canonicalStatements(canonicalManifest(searchRoot), searchRoot)
 
     val connection = DriverManager.getConnection(jdbcUrl, "postgres", "postgres")
     try
@@ -937,8 +1001,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     applyOrder: List[String]
   )
 
-  private def canonicalManifest(): CanonicalManifest =
-    val input = Files.newInputStream(schemaRoot.resolve("manifest.yaml"))
+  private def canonicalManifest(root: Path = schemaRoot): CanonicalManifest =
+    val input = Files.newInputStream(root.resolve("manifest.yaml"))
     val root =
       try Option(new Yaml().load[java.util.Map[String, Object]](input))
       finally input.close()
@@ -968,10 +1032,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     canonicalStatements(canonicalManifest())
 
   private def canonicalStatements(
-    manifest: CanonicalManifest
+    manifest: CanonicalManifest,
+    root: Path = schemaRoot
   ): List[(String, List[String])] =
     manifest.applyOrder.map { relative =>
-      val source = Files.readString(schemaRoot.resolve(relative))
+      val source = Files.readString(root.resolve(relative))
       val statements = splitSqlStatements(source, relative)
       if statements.isEmpty then
         throw IllegalStateException(s"canonical schema file $relative contains no complete SQL statements")

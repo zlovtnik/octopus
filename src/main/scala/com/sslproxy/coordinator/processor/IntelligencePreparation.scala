@@ -154,6 +154,9 @@ final case class ApRiskProjection(
 object IntelligencePreparation:
   private val WindowSeconds = 3600L
 
+  def windowKey(frame: ProjectionFrame): (String, Long) =
+    frame.sourceMac -> Math.floorDiv(frame.observedAt.toInstant.getEpochSecond, WindowSeconds)
+
   def behavior(frames: List[ProjectionFrame]): List[BehaviorSnapshotProjection] =
     frames
       .groupBy(frame => frame.sourceMac -> windowStart(frame.observedAt.toInstant))

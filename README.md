@@ -11,6 +11,19 @@ runtime database; MongoDB is not a fallback.
 
 ## Current runtime
 
+Production runs one coordinator replica with a `Recreate` rollout, a 4 GiB
+container memory limit, and a 60% JVM heap ceiling. All consumer groups and
+processors run inside that instance; Kafka assigns it the available partitions.
+Updates briefly pause consumption until the replacement starts and resumes from
+committed offsets. Staging currently reuses the production coordinator patch.
+
+Behavior, timing, sequence, and baseline projections fetch rows through JDBC
+cursors in chunks of 128 and persist one complete window, session, or BSSID at a
+time. The processor batch size limits groups, not source frames. Memory therefore
+depends on the largest group instead of the entire batch; unusually large
+individual sessions or BSSID histories still need capacity monitoring. Do not
+add an outer row limit: partial groups would corrupt counts and replay detection.
+
 The currently wired binary provides:
 
 - ordinary Kafka consumer-group restart positions for the three locked consumers;

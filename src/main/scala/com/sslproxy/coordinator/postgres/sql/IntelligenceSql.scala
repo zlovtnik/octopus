@@ -72,7 +72,7 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
+           ORDER BY frame.source_mac, candidate.window_bucket, frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
 
   def timingCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)
@@ -105,7 +105,7 @@ object IntelligenceSql:
            LEFT JOIN wireless_frame_network network_row ON network_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_security security_row ON security_row.dedupe_key = frame.dedupe_key
            LEFT JOIN wireless_frame_identity identity_row ON identity_row.dedupe_key = frame.dedupe_key
-           ORDER BY frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
+           ORDER BY frame.source_mac, candidate.window_bucket, frame.observed_at, frame.dedupe_key""").query[ProjectionFrame]
 
   def sequenceCandidates(limit: Int): Query0[ProjectionFrame] =
     val batchLimit = limit.max(1)

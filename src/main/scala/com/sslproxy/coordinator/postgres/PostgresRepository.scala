@@ -673,38 +673,46 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
 
   def projectBehavior(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_behavior") {
-      IntelligenceSql.behaviorCandidates(limit).to[List].flatMap { frames =>
-        IntelligencePreparation.behavior(frames).traverse(IntelligenceSql.persistBehavior).map(_.sum)
-      }
+      // The SQL limit counts groups, not frames. Fetch through a JDBC cursor and
+      // retain only one complete group; truncating frames would corrupt counts.
+      IntelligenceSql.behaviorCandidates(limit).streamWithChunkSize(128)
+        .groupAdjacentBy(IntelligencePreparation.windowKey)
+        .evalMap { case (_, frames) =>
+          IntelligencePreparation.behavior(frames.toList).traverse(IntelligenceSql.persistBehavior).map(_.sum)
+        }
+        .compile.fold(0)(_ + _)
     }
 
   def projectTiming(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_timing") {
-      IntelligenceSql.timingCandidates(limit).to[List].flatMap { frames =>
-        IntelligencePreparation.timing(frames).traverse(IntelligenceSql.persistTiming).map(_.sum)
-      }
+      IntelligenceSql.timingCandidates(limit).streamWithChunkSize(128)
+        .groupAdjacentBy(IntelligencePreparation.windowKey)
+        .evalMap { case (_, frames) =>
+          IntelligencePreparation.timing(frames.toList).traverse(IntelligenceSql.persistTiming).map(_.sum)
+        }
+        .compile.fold(0)(_ + _)
     }
 
   def projectSequences(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_sequences") {
-      IntelligenceSql.sequenceCandidates(limit).to[List].flatMap { frames =>
-        IntelligencePreparation.sequences(frames).traverse(IntelligenceSql.persistSequence).map(_.sum)
-      }
+      IntelligenceSql.sequenceCandidates(limit).streamWithChunkSize(128)
+        .groupAdjacentBy(_.sessionKey)
+        .evalMap { case (_, frames) =>
+          IntelligencePreparation.sequences(frames.toList).traverse(IntelligenceSql.persistSequence).map(_.sum)
+        }
+        .compile.fold(0)(_ + _)
     }
 
   def projectBaselines(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_baselines") {
-      IntelligenceSql.baselineCandidates(limit).to[List].flatMap { rows =>
-        rows
-          .groupMap(_._1)(_._2)
-          .toList
-          .traverse { case (bssid, signals) =>
-            IntelligencePreparation
-              .baseline(bssid, signals.toVector)
-              .fold(0.pure[ConnectionIO])(IntelligenceSql.persistBaseline)
-          }
-          .map(_.sum)
-      }
+      IntelligenceSql.baselineCandidates(limit).streamWithChunkSize(128)
+        .groupAdjacentBy(_._1)
+        .evalMap { case (bssid, rows) =>
+          IntelligencePreparation
+            .baseline(bssid, rows.toVector.map(_._2))
+            .fold(0.pure[ConnectionIO])(IntelligenceSql.persistBaseline)
+        }
+        .compile.fold(0)(_ + _)
     }
 
   def projectSimilarities(

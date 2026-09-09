@@ -120,7 +120,7 @@ object BatchSinkSql:
       |  device_id, username, identity_source, last_seen, first_seen,
       |  signal_dbm, is_authorized, created_at
       |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT (sensor_id, snapshot_at, client_mac, bssid) DO UPDATE SET
+      |ON CONFLICT (sensor_id, snapshot_at, client_mac) DO UPDATE SET
       |  location_id = EXCLUDED.location_id,
       |  bssid = EXCLUDED.bssid,
       |  ssid = EXCLUDED.ssid,

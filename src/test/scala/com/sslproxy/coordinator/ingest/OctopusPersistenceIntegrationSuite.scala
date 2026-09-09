@@ -1003,10 +1003,10 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
   private def canonicalManifest(root: Path = schemaRoot): CanonicalManifest =
     val input = Files.newInputStream(root.resolve("manifest.yaml"))
-    val root =
+    val document =
       try Option(new Yaml().load[java.util.Map[String, Object]](input))
       finally input.close()
-    val values = root.getOrElse(throw IllegalStateException("canonical manifest is empty"))
+    val values = document.getOrElse(throw IllegalStateException("canonical manifest is empty"))
 
     def requiredScalar(key: String): String =
       Option(values.get(key))

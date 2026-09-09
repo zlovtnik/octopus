@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
 import com.sslproxy.coordinator.config.AppConfig
+import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import com.zaxxer.hikari.HikariDataSource
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
 import java.sql.{Connection, PreparedStatement, ResultSet, SQLException}
@@ -50,7 +51,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
 
   test("recovery releases connections throughout the 200 ms backoff and restores timeout"):
     val pool = new Pool()
-    val sink = PostgresTransactor.fromDataSource(pool, AppConfig.load.postgres)
+    val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
     val calls = new AtomicInteger()
     val work = sink.withTransactionRetry("test_recovery") { _ =>
       if calls.incrementAndGet() == 1 then throw SQLException("cancel", "57014")
@@ -70,7 +71,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
 
   test("exhaustion is exactly three attempts and retains original network failure despite rollback failure"):
     val pool = new Pool(brokenCleanup = true)
-    val sink = PostgresTransactor.fromDataSource(pool, AppConfig.load.postgres)
+    val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
     val original = SQLException("network-secret", "08006")
     sink.withTransactionRetry("test_exhausted")(_ => throw original).attempt.map { result =>
       assertEquals(result, Left(original))
@@ -82,7 +83,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
 
   test("permanent SQL failure containing timeout does not retry"):
     val pool = new Pool()
-    val sink = PostgresTransactor.fromDataSource(pool, AppConfig.load.postgres)
+    val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
     sink.withTransactionRetry("test_permanent")(_ => throw SQLException("timeout-value", "23505")).attempt.map { result =>
       assert(result.isLeft)
       assertEquals(pool.acquisitions.get(), 1)
@@ -91,7 +92,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
 
   test("broken network connection is evicted and next attempt acquires another connection"):
     val pool = new Pool(brokenCleanup = true)
-    val sink = PostgresTransactor.fromDataSource(pool, AppConfig.load.postgres)
+    val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
     sink.withTransactionRetry("test_network_recovery") { _ =>
       if pool.acquisitions.get() == 1 then throw SQLException("network-value", "08006")
       1
@@ -100,3 +101,11 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
       assertEquals(pool.evictions.get(), 1)
       assertEquals(pool.acquisitions.get(), 2)
     }
+
+  private def defaults: AppConfig =
+    AppConfig.load(
+      ConfigFactory
+        .parseResources("application.conf")
+        .withFallback(ConfigFactory.empty())
+        .resolve(ConfigResolveOptions.defaults().setUseSystemEnvironment(false))
+    )

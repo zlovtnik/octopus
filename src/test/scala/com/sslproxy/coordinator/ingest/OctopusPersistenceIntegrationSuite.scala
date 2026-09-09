@@ -964,6 +964,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     try
       val statement = connection.createStatement()
       try
+        val extensionsFile = schemaRoot.resolveSibling("00_extensions/001_runtime_extensions.sql")
+        if Files.exists(extensionsFile) then
+          val extensionsSql = new String(Files.readAllBytes(extensionsFile), StandardCharsets.UTF_8)
+          extensionsSql.split(";").map(_.trim).filter(_.nonEmpty).foreach(statement.execute)
+
         parsedStatements.foreach { case (_, statements) =>
           statements.foreach { sqlStatement =>
             val _ = statement.execute(sqlStatement)

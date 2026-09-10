@@ -226,7 +226,7 @@ Important gates:
 | `OCTOPUS_PROCESSOR_RESTART_MAX_DELAY_MS` | `30000` | Maximum retry delay |
 | `OCTOPUS_PROCESSOR_BATCH_SIZE` | `250` | Bound for normalized projection and search-preparation passes |
 | `OCTOPUS_PROCESSOR_INTERVAL_SECONDS` | `10` | Periodic search preparation interval |
-| `OCTOPUS_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Model attached to newly prepared embedding jobs |
+| `OCTOPUS_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Only supported model; attached to newly prepared embedding jobs. Other values fail startup validation. |
 | `OCTOPUS_EVENT_DUPLICATE_DISTANCE` | `0.05` | Characterized event-vector duplicate distance |
 | `OCTOPUS_BEHAVIOR_SIMILARITY_THRESHOLD` | `0.88` | Characterized behavior similarity threshold |
 | `OCTOPUS_SEQUENCE_DISTANCE_THRESHOLD` | `0.10` | Characterized frame-sequence distance threshold |

@@ -6,6 +6,14 @@ import munit.FunSuite
 import scala.jdk.CollectionConverters.*
 
 class AppConfigSuite extends FunSuite:
+  test("embedding preparation only supports nomic MoE"):
+    assertEquals(defaults.processors.embeddingModel, "nomic-embed-text-v2-moe")
+    assertEquals(ProcessorConfig(enabled = List.empty, restartBaseDelayMs = 1000L, restartMaxDelayMs = 30000L).embeddingModel, "nomic-embed-text-v2-moe")
+    List("", "unsupported-model").foreach { model =>
+      val config = defaults.copy(processors = defaults.processors.copy(embeddingModel = model))
+      assert(validationMessages(config).contains("processors.embedding-model must be nomic-embed-text-v2-moe"))
+    }
+
   test("sink timeout defaults and millisecond bounds"):
     assertEquals(defaults.postgres.statementTimeoutSecs, 30)
     assertEquals(defaults.postgres.networkTimeoutSecs, 60)

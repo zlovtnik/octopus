@@ -126,7 +126,7 @@ final case class ProcessorConfig(
   restartMaxDelayMs: Long,
   batchSize: Int = 250,
   intervalSeconds: Int = 10,
-  embeddingModel: String = "sentence-transformers/all-MiniLM-L6-v2",
+  embeddingModel: String = "nomic-embed-text-v2-moe",
   eventDuplicateDistance: Double = 0.05d,
   behaviorSimilarityThreshold: Double = 0.88d,
   sequenceDistanceThreshold: Double = 0.10d
@@ -281,8 +281,8 @@ object AppConfig:
       Option.when(config.intervalSeconds <= 0)(
         "processors.interval-seconds must be positive"
       ),
-      Option.when(config.embeddingModel.trim.isEmpty)(
-        "processors.embedding-model must not be blank"
+      Option.when(config.embeddingModel != "nomic-embed-text-v2-moe")(
+        "processors.embedding-model must be nomic-embed-text-v2-moe"
       ),
       Option.when(
         !config.eventDuplicateDistance.isFinite || config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d

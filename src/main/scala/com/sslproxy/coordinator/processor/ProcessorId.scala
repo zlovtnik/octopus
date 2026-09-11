@@ -27,26 +27,14 @@ enum ProcessorId(
   case SyncLoadConsumer extends ProcessorId("sync-load-consumer", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case SyncResultConsumer extends ProcessorId("sync-result-consumer", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case SyncOutboxPublisher extends ProcessorId("sync-outbox-publisher", ProcessorOwner.Octopus, ProcessorFamily.Sync)
-  case PayloadAuditIngestion
-      extends ProcessorId("payload-audit-ingestion", ProcessorOwner.Octopus, ProcessorFamily.Sync)
+  case WirelessHeartbeatIngestion
+      extends ProcessorId("wireless-heartbeat-ingestion", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessFrameNormalizer
       extends ProcessorId("wireless-frame-normalizer", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessInventoryProjector
       extends ProcessorId("wireless-inventory-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessIdentityProjector
       extends ProcessorId("wireless-identity-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessBacklogSave
-      extends ProcessorId("wireless-backlog-save", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessBacklogList
-      extends ProcessorId("wireless-backlog-list", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessBacklogSynced
-      extends ProcessorId("wireless-backlog-synced", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessBacklogPrune
-      extends ProcessorId("wireless-backlog-prune", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessMacLookup extends ProcessorId("wireless-mac-lookup", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessNetworksAuthorized
-      extends ProcessorId("wireless-networks-authorized", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
-  case WirelessProbeFlush extends ProcessorId("wireless-probe-flush", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case EmbeddingPreparer extends ProcessorId("embedding-preparer", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
   case EmbeddingCompleter
       extends ProcessorId("embedding-completer", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
@@ -54,23 +42,8 @@ enum ProcessorId(
       extends ProcessorId("embedding-lease-recovery", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
   case EmbeddingTextBuilder
       extends ProcessorId("embedding-text-builder", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
-  case BehaviorProjector
-      extends ProcessorId("behavior-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case TimingProjector extends ProcessorId("timing-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case BaselineProjector
-      extends ProcessorId("baseline-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case SequenceProjector
-      extends ProcessorId("sequence-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case GraphProjector extends ProcessorId("graph-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case SimilarityProjector
-      extends ProcessorId("similarity-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case ClusteringProjector
-      extends ProcessorId("clustering-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case DnsAlertProjector
-      extends ProcessorId("dns-alert-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
   case RfAlertProjector
       extends ProcessorId("rf-alert-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
-  case RiskProjector extends ProcessorId("risk-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
   case EventRetention extends ProcessorId("event-retention", ProcessorOwner.Octopus, ProcessorFamily.Maintenance)
   case SearchRetention extends ProcessorId("search-retention", ProcessorOwner.Octopus, ProcessorFamily.Maintenance)
   case StaleWorkerCleanup
@@ -79,26 +52,38 @@ enum ProcessorId(
       extends ProcessorId("scheduled-reconciliation", ProcessorOwner.Octopus, ProcessorFamily.Maintenance)
 
 object ProcessorId:
-  private val byValue: Map[String, ProcessorId] =
-    ProcessorId.values.iterator.map(id => id.value -> id).toMap
+  val all: List[ProcessorId] = List(
+    ProcessorId.SyncScanIngestion,
+    ProcessorId.SyncJobPlanner,
+    ProcessorId.SyncBacklogRecovery,
+    ProcessorId.SyncLoadDispatch,
+    ProcessorId.SyncLoadConsumer,
+    ProcessorId.SyncResultConsumer,
+    ProcessorId.SyncOutboxPublisher,
+    ProcessorId.WirelessHeartbeatIngestion,
+    ProcessorId.WirelessFrameNormalizer,
+    ProcessorId.WirelessInventoryProjector,
+    ProcessorId.WirelessIdentityProjector,
+    ProcessorId.EmbeddingPreparer,
+    ProcessorId.EmbeddingCompleter,
+    ProcessorId.EmbeddingLeaseRecovery,
+    ProcessorId.EmbeddingTextBuilder,
+    ProcessorId.RfAlertProjector,
+    ProcessorId.EventRetention,
+    ProcessorId.SearchRetention,
+    ProcessorId.StaleWorkerCleanup,
+    ProcessorId.ScheduledReconciliation
+  )
+
+  private val byValue: Map[String, ProcessorId] = all.iterator.map(id => id.value -> id).toMap
 
   def fromString(value: String): Either[String, ProcessorId] =
-    byValue.get(value).toRight(s"unknown processor id: $value")
+    byValue.get(value).toRight(s"unknown or retired processor id: $value")
 
-  val all: List[ProcessorId] = ProcessorId.values.toList
   val octopusOwned: List[ProcessorId] = all.filter(_.owner == ProcessorOwner.Octopus)
   val kafkaConsumers: Set[ProcessorId] = Set(
     ProcessorId.SyncScanIngestion,
-    ProcessorId.SyncLoadConsumer,
-    ProcessorId.SyncResultConsumer,
-    ProcessorId.PayloadAuditIngestion,
-    ProcessorId.WirelessBacklogSave,
-    ProcessorId.WirelessBacklogList,
-    ProcessorId.WirelessBacklogSynced,
-    ProcessorId.WirelessBacklogPrune,
-    ProcessorId.WirelessMacLookup,
-    ProcessorId.WirelessNetworksAuthorized,
-    ProcessorId.WirelessProbeFlush
+    ProcessorId.WirelessHeartbeatIngestion
   )
 
 final case class ProcessorContract(
@@ -190,14 +175,14 @@ object ProcessorCatalog:
       "publish-attempt audit"
     ),
     continuous(
-      ProcessorId.PayloadAuditIngestion,
-      List("proxy.payload_audit"),
-      List("ingestion scan_requests"),
+      ProcessorId.WirelessHeartbeatIngestion,
+      List("wireless.sensor.heartbeat"),
+      List("ingestion_receipts", "sensors"),
       Nil,
-      "stream_name/payload_sha256",
+      "consumer-group/topic/partition/offset and event-id",
       "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
+      "sanitize and park malformed records",
+      "monotonic sensor heartbeat audit"
     ),
     continuous(
       ProcessorId.WirelessFrameNormalizer,
@@ -223,81 +208,11 @@ object ProcessorCatalog:
       ProcessorId.WirelessIdentityProjector,
       List("inventory", "similarity evidence"),
       List("identity projections"),
-      List(ProcessorId.WirelessInventoryProjector, ProcessorId.SimilarityProjector),
+      List(ProcessorId.WirelessInventoryProjector),
       "identity/source",
       "identity key",
       "record reconciliation finding",
       "identity rebuild"
-    ),
-    continuous(
-      ProcessorId.WirelessBacklogSave,
-      List("wireless.backlog.save"),
-      List("wireless backlog table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessBacklogList,
-      List("wireless.backlog.list"),
-      List("wireless backlog table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessBacklogSynced,
-      List("wireless.backlog.synced"),
-      List("wireless backlog table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessBacklogPrune,
-      List("wireless.backlog.prune"),
-      List("wireless backlog table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessMacLookup,
-      List("wireless.mac.lookup"),
-      List("wireless device table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessNetworksAuthorized,
-      List("wireless.networks.authorized"),
-      List("wireless networks table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
-    ),
-    continuous(
-      ProcessorId.WirelessProbeFlush,
-      List("wireless.probe.flush"),
-      List("wireless probe table"),
-      Nil,
-      "topic/partition/offset",
-      "kafka partition",
-      "DLQ invalid records",
-      "bounded offset audit"
     ),
     periodic(
       ProcessorId.EmbeddingPreparer,
@@ -340,104 +255,14 @@ object ProcessorCatalog:
       "document checksum"
     ),
     periodic(
-      ProcessorId.BehaviorProjector,
-      List("wireless/proxy events"),
-      List("behavior snapshots"),
-      List(ProcessorId.WirelessFrameNormalizer),
-      "subject/window/version",
-      "projection key",
-      "record reconciliation finding",
-      "window rebuild"
-    ),
-    periodic(
-      ProcessorId.TimingProjector,
-      List("events"),
-      List("timing projections"),
-      List(ProcessorId.WirelessFrameNormalizer),
-      "subject/window/version",
-      "projection key",
-      "record reconciliation finding",
-      "window rebuild"
-    ),
-    periodic(
-      ProcessorId.BaselineProjector,
-      List("timing", "behavior"),
-      List("baseline projections"),
-      List(ProcessorId.BehaviorProjector, ProcessorId.TimingProjector),
-      "subject/window/version",
-      "projection key",
-      "record reconciliation finding",
-      "baseline rebuild"
-    ),
-    periodic(
-      ProcessorId.SequenceProjector,
-      List("ordered events"),
-      List("sequence transitions"),
-      List(ProcessorId.WirelessFrameNormalizer),
-      "subject/from/to/window",
-      "projection key",
-      "record reconciliation finding",
-      "transition rebuild"
-    ),
-    periodic(
-      ProcessorId.GraphProjector,
-      List("documents", "identities"),
-      List("graph nodes", "graph edges"),
-      List(ProcessorId.WirelessIdentityProjector),
-      "node-or-edge/version",
-      "graph key",
-      "record reconciliation finding",
-      "graph rebuild"
-    ),
-    periodic(
-      ProcessorId.SimilarityProjector,
-      List("search_vectors"),
-      List("similarity projections"),
-      List(ProcessorId.EmbeddingCompleter),
-      "left/right/model",
-      "pair key",
-      "record reconciliation finding",
-      "similarity rebuild"
-    ),
-    periodic(
-      ProcessorId.ClusteringProjector,
-      List("similarities"),
-      List("identity clusters"),
-      List(ProcessorId.SimilarityProjector),
-      "member/model/version",
-      "cluster key",
-      "record reconciliation finding",
-      "cluster rebuild"
-    ),
-    periodic(
-      ProcessorId.DnsAlertProjector,
-      List("proxy DNS events"),
-      List("threat signals"),
-      List(ProcessorId.SyncLoadConsumer),
-      "rule/subject/window",
-      "alert key",
-      "park invalid evidence",
-      "rule replay"
-    ),
-    periodic(
       ProcessorId.RfAlertProjector,
       List("wireless events"),
-      List("wireless alerts", "threat signals"),
-      List(ProcessorId.BaselineProjector, ProcessorId.SequenceProjector),
+      List("wireless alerts"),
+      Nil,
       "rule/subject/window",
       "alert key",
       "park invalid evidence",
       "rule replay"
-    ),
-    periodic(
-      ProcessorId.RiskProjector,
-      List("alerts", "behavior"),
-      List("risk projections"),
-      List(ProcessorId.DnsAlertProjector, ProcessorId.RfAlertProjector),
-      "subject/model/version",
-      "risk key",
-      "record reconciliation finding",
-      "risk rebuild"
     ),
     periodic(
       ProcessorId.EventRetention,

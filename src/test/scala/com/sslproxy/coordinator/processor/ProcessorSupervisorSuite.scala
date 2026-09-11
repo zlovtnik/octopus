@@ -118,8 +118,7 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     val runtimeEnabled = Set(
       ProcessorId.SyncScanIngestion,
       ProcessorId.SyncLoadConsumer,
-      ProcessorId.SyncResultConsumer,
-      ProcessorId.PayloadAuditIngestion
+      ProcessorId.SyncResultConsumer
     )
 
     ProcessorSupervisor

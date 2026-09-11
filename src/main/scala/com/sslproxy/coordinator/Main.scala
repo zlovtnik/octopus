@@ -10,13 +10,12 @@ import com.sslproxy.coordinator.config.{AppConfig, RuntimeConfig}
 import com.sslproxy.coordinator.cron.CronScheduler
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
-import com.sslproxy.coordinator.ingest.{PayloadAuditConsumer, SyncEventHydrationService}
+import com.sslproxy.coordinator.ingest.SyncEventHydrationService
 import com.sslproxy.coordinator.kafka.{
   KafkaComponents,
   ScanRequestStream,
   PostgresLoadStream,
-  PostgresResultStream,
-  WirelessConsumerService
+  PostgresResultStream
 }
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
 import com.sslproxy.coordinator.processor.{
@@ -99,7 +98,7 @@ object Main extends IOApp.Simple:
                     val projectionStore = new PostgresProjectionStore(postgresRepo)
                     val maintenanceStore = new PostgresMaintenanceStore(postgresRepo)
                     val resultStore = new PostgresResultStore(postgresRepo)
-                    val wirelessStore = new PostgresWirelessStore(postgresRepo)
+
                     val hydrationService = new SyncEventHydrationService(
                       ingestionStore,
                       payloadResolver,
@@ -233,79 +232,7 @@ object Main extends IOApp.Simple:
                               val consumerWorkloads = List(
                                 ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
                                 ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
-                                ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessBacklogSave,
-                                  WirelessConsumerService.backlogSaveStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessBacklogList,
-                                  WirelessConsumerService.backlogListStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessBacklogSynced,
-                                  WirelessConsumerService.backlogSyncedStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessBacklogPrune,
-                                  WirelessConsumerService.backlogPruneStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessMacLookup,
-                                  WirelessConsumerService.macLookupStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessNetworksAuthorized,
-                                  WirelessConsumerService.networksAuthorizedStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.WirelessProbeFlush,
-                                  WirelessConsumerService.probeFlushStream(
-                                    cfg.wireless,
-                                    cfg.kafka,
-                                    wirelessStore,
-                                    kafka.producer
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.PayloadAuditIngestion,
-                                  PayloadAuditConsumer.stream(
-                                    cfg.kafka,
-                                    ingestionStore,
-                                    metrics,
-                                    kafka.producer
-                                  )
-                                )
+                                ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream)
                               )
 
                               val workloads = consumerWorkloads ++ List(
@@ -350,73 +277,6 @@ object Main extends IOApp.Simple:
                                     cfg.processors.batchSize,
                                     cfg.processors.intervalSeconds.seconds,
                                     cfg.processors.embeddingModel
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.BehaviorProjector,
-                                  cronScheduler.behaviorProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.TimingProjector,
-                                  cronScheduler.timingProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.BaselineProjector,
-                                  cronScheduler.baselineProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.SequenceProjector,
-                                  cronScheduler.sequenceProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.SimilarityProjector,
-                                  cronScheduler.similarityProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds,
-                                    cfg.processors.eventDuplicateDistance,
-                                    cfg.processors.behaviorSimilarityThreshold,
-                                    cfg.processors.sequenceDistanceThreshold
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.ClusteringProjector,
-                                  cronScheduler.clusteringProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds,
-                                    cfg.processors.behaviorSimilarityThreshold
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.GraphProjector,
-                                  cronScheduler.graphProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.DnsAlertProjector,
-                                  cronScheduler.dnsAlertProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
-                                  )
-                                ),
-                                ProcessorWorkload(
-                                  ProcessorId.RiskProjector,
-                                  cronScheduler.riskProjectorStream(
-                                    cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
                                   )
                                 ),
                                 ProcessorWorkload(

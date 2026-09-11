@@ -69,7 +69,6 @@ class MainSuite extends CatsEffectSuite:
     assert(enabled.contains(ProcessorId.SyncScanIngestion))
     assert(enabled.contains(ProcessorId.SyncLoadConsumer))
     assert(enabled.contains(ProcessorId.SyncResultConsumer))
-    assert(enabled.contains(ProcessorId.PayloadAuditIngestion))
     assertEquals(
       Main.runtimeConsumerProcessorIds(
         RuntimeConfig(processorsEnabled = true, consumersEnabled = false)

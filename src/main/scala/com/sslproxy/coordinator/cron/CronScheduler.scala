@@ -114,64 +114,12 @@ final class CronScheduler private (
       maintenanceStore.reconcileWirelessProjections(batchSize).value
     }
 
-  def behaviorProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.BehaviorProjector, interval, projectionStore.projectBehavior(batchSize).value)
-
-  def timingProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.TimingProjector, interval, projectionStore.projectTiming(batchSize).value)
-
-  def baselineProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.BaselineProjector, interval, projectionStore.projectBaselines(batchSize).value)
-
-  def sequenceProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.SequenceProjector, interval, projectionStore.projectSequences(batchSize).value)
-
-  def similarityProjectorStream(
-    batchSize: Int,
-    interval: FiniteDuration,
-    eventDuplicateDistance: Double,
-    behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
-  ): Stream[IO, Unit] =
-    projectionStream(
-      ProcessorId.SimilarityProjector,
-      interval,
-      projectionStore
-        .projectSimilarities(
-          batchSize,
-          eventDuplicateDistance,
-          behaviorSimilarityThreshold,
-          sequenceDistanceThreshold
-        )
-        .value
-    )
-
-  def clusteringProjectorStream(
-    batchSize: Int,
-    interval: FiniteDuration,
-    minimumSimilarity: Double
-  ): Stream[IO, Unit] =
-    projectionStream(
-      ProcessorId.ClusteringProjector,
-      interval,
-      projectionStore.projectClusterCandidates(batchSize, minimumSimilarity).value
-    )
-
   def identityProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
     projectionStream(
       ProcessorId.WirelessIdentityProjector,
       interval,
       projectionStore.projectApprovedIdentities(batchSize).value
     )
-
-  def graphProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.GraphProjector, interval, projectionStore.projectInfrastructureGraph(batchSize).value)
-
-  def dnsAlertProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.DnsAlertProjector, interval, projectionStore.projectDnsThreats(batchSize).value)
-
-  def riskProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
-    projectionStream(ProcessorId.RiskProjector, interval, projectionStore.projectRisk(batchSize).value)
 
   private def projectionStream(
     processorId: ProcessorId,

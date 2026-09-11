@@ -83,6 +83,8 @@ object ProcessorId:
   val octopusOwned: List[ProcessorId] = all.filter(_.owner == ProcessorOwner.Octopus)
   val kafkaConsumers: Set[ProcessorId] = Set(
     ProcessorId.SyncScanIngestion,
+    ProcessorId.SyncLoadConsumer,
+    ProcessorId.SyncResultConsumer,
     ProcessorId.WirelessHeartbeatIngestion
   )
 

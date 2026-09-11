@@ -15,7 +15,8 @@ import com.sslproxy.coordinator.kafka.{
   KafkaComponents,
   ScanRequestStream,
   PostgresLoadStream,
-  PostgresResultStream
+  PostgresResultStream,
+  WirelessHeartbeatStream
 }
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
 import com.sslproxy.coordinator.processor.{
@@ -228,11 +229,18 @@ object Main extends IOApp.Simple:
                                 resultStore,
                                 kafka.producer
                               )
+                              val heartbeatStream = WirelessHeartbeatStream.run(
+                                cfg.kafka,
+                                ingestionStore,
+                                metrics,
+                                kafka.producer
+                              )
 
                               val consumerWorkloads = List(
                                 ProcessorWorkload(ProcessorId.SyncScanIngestion, scanStream),
                                 ProcessorWorkload(ProcessorId.SyncLoadConsumer, loadStream),
-                                ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream)
+                                ProcessorWorkload(ProcessorId.SyncResultConsumer, resultStream),
+                                ProcessorWorkload(ProcessorId.WirelessHeartbeatIngestion, heartbeatStream)
                               )
 
                               val workloads = consumerWorkloads ++ List(

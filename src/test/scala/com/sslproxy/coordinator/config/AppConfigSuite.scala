@@ -113,7 +113,7 @@ class AppConfigSuite extends FunSuite:
     val invalid = baseline.copy(
       postgres = enabledPostgres(baseline.postgres),
       runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
-      processors = baseline.processors.copy(enabled = List("payload-audit-ingestion"))
+      processors = baseline.processors.copy(enabled = List("wireless-heartbeat-ingestion"))
     )
 
     assert(validationMessages(invalid).exists(_.contains("require runtime.consumers-enabled=true")))
@@ -170,7 +170,7 @@ class AppConfigSuite extends FunSuite:
 
     assert(messages.exists(_.contains("blank processor IDs")))
     assert(messages.exists(_.contains("duplicate processor IDs")))
-    assert(messages.exists(_.contains("unknown processor id")))
+    assert(messages.exists(_.contains("unknown or retired processor id")))
     assert(messages.exists(_.contains("restart-base-delay-ms")))
     assert(messages.exists(_.contains("restart-max-delay-ms")))
 

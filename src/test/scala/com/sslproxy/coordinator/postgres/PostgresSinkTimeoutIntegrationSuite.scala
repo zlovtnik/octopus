@@ -53,7 +53,7 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
         execute(conn, "CREATE TABLE timeout_probe (id integer PRIMARY KEY, value integer)")
         execute(conn, "INSERT INTO timeout_probe VALUES (1, 0)")
         // Read the canonical inventory table definition; never change its replay contract.
-        val ddl = Files.readString(Path.of("../../sql/postgres/octopus_core/01_tables/005_wireless_sink.sql"))
+        val ddl = Files.readString(Path.of("../../sql/postgres/octopus_core/01_tables/010_legacy_sinks_and_leases.sql"))
         val start = ddl.indexOf("CREATE TABLE IF NOT EXISTS octopus_core.wireless_client_inventory (")
         assert(start >= 0)
         execute(conn, ddl.substring(start, ddl.indexOf(";", start) + 1))

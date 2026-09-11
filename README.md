@@ -33,11 +33,8 @@ The currently wired binary provides:
 - PostgreSQL load work on `sync.oracle.load` and outcomes on
   `sync.oracle.result`;
 - durable jobs, batches, cursors, outbox leases, retry state, and DLQ handling;
-- `proxy.payload_audit` ingestion into scan requests, with invalid payloads and
-  exhausted database writes parked on `proxy.payload_audit.dlq`;
-- all seven wireless operations: backlog save, oldest-100 pending list,
-  idempotent mark-synced, seven-day prune, MAC lookup, authorized-network
-  lookup, and probe flush;
+- `wireless.sensor.heartbeat` ingestion via `wireless-heartbeat-ingestion`,
+  with malformed records sanitized and parked on `wireless.sensor.heartbeat.dlq`;
 - JSON hydration and typed JDBC batch sinks for proxy and wireless rows;
 - persisted processor state/runs, dependency validation, deterministic retry
   jitter, backpressure, expired outbox-lease recovery, shadow-alert generation,
@@ -51,16 +48,14 @@ The currently wired binary provides:
   metadata, archive-before-delete enforcement, tombstones, and retention runs;
 - fenced search-document retention, stale worker cleanup, and scheduled
   wireless projection reconciliation with durable findings;
-- pure, deterministic behavior-window, timing percentile/jitter, 13-token
-  sequence, baseline, vector-similarity, clustering, DNS-threat, and AP-risk
-  transformations with PostgreSQL projection writers;
-- approved-merge identity membership and infrastructure graph projection;
+- deterministic RF-alert projection with PostgreSQL projection writers;
+- wireless inventory and identity projection maintenance;
 - `/live`, `/ready`, `/metrics`, `/health`, `/actuator/health`, and
   `/actuator/prometheus` HTTP routes;
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
   and every PostgreSQL durable operation, with error recording and bounded SDK shutdown.
 
-All 34 Octopus-owned processor IDs have exactly one workload declaration and
+All 18 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
 
 ## Components
@@ -92,11 +87,11 @@ The machine-readable source of truth is
 [`sql/postgres/contracts/processors.json`](../../sql/postgres/contracts/processors.json).
 Every entry declares its owner, family, mode, inputs, outputs, dependencies,
 dedupe key, lease scope, terminal behavior, reconciliation policy, and default
-state. All 36 entries default to disabled.
+state. All 20 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 34 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `payload-audit-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-backlog-save`, `wireless-backlog-list`, `wireless-backlog-synced`, `wireless-backlog-prune`, `wireless-mac-lookup`, `wireless-networks-authorized`, `wireless-probe-flush`, `embedding-preparer`, `embedding-text-builder`, `behavior-projector`, `timing-projector`, `baseline-projector`, `sequence-projector`, `graph-projector`, `similarity-projector`, `clustering-projector`, `dns-alert-projector`, `rf-alert-projector`, `risk-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 18 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
 There is no Rails/console processor family. The `integration_console` database
@@ -115,19 +110,17 @@ These names and meanings are locked:
 | `sync.oracle.result` | Octopus load consumer to result consumer | PostgreSQL load outcomes; `oracle` is a legacy name |
 | `wireless.audit` | Atheros Sensor to Redpanda/Octopus | versioned wireless evidence |
 
-Additional currently consumed topics are `proxy.payload_audit`,
-`wireless.backlog.save`, `wireless.backlog.list`, `wireless.backlog.synced`,
-`wireless.backlog.prune`, `wireless.mac.lookup`,
-`wireless.networks.authorized`, and `wireless.probe.flush`.
+The additional currently consumed topic is `wireless.sensor.heartbeat`.
 Request/reply destinations are validated before
 publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 
-`payload-audit-ingestion` translates each `proxy.payload_audit` record into a
-scan request keyed by `stream_name/payload_sha256`. Empty messages are skipped.
-Invalid JSON is published to `proxy.payload_audit.dlq`. Retryable PostgreSQL
-writes retry up to three times with exponential backoff; a permanent error or
-exhausted retry parks the original record on the same DLQ. The consumer then
-commits the offset so poison does not redeliver forever.
+`wireless-heartbeat-ingestion` translates each `wireless.sensor.heartbeat`
+record into a scan request keyed by `stream_name/payload_sha256`. Empty
+messages are skipped. Invalid JSON is published to
+`wireless.sensor.heartbeat.dlq`. Retryable PostgreSQL writes retry up to
+three times with exponential backoff; a permanent error or exhausted retry
+parks the original record on the same DLQ. The consumer then commits the
+offset so poison does not redeliver forever.
 
 Hydration and load planning use the configured ingest stream names (defaults
 include `proxy.events`, `wireless.audit`, wireless alerts, and
@@ -219,7 +212,7 @@ Important gates:
 |---|---|---|
 | `POSTGRES_ENABLED` | `false` | Enables PostgreSQL after TLS, least-privilege, and schema validation |
 | `POSTGRES_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
-| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `payload-audit-ingestion` and the seven wireless request/reply consumers. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
+| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `wireless-heartbeat-ingestion`. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane (cron, projections, retention, and support streams) |
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs for the processor catalog. If this list is non-empty while consumers are enabled, it must include the three locked consumers. |
 | `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Initial retry delay |
@@ -251,10 +244,10 @@ warn-only schema validation, and invalid consumer-group contracts.
 
 The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
 `OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
-processor catalog lists the 26 periodic/locked-load processors; the remaining
-eight Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
+processor catalog lists the 14 periodic/locked-load processors; the remaining
+four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
 is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
-is all 34 Octopus-owned processors.
+is all 18 Octopus-owned processors.
 
 A new consumer group replays every retained record; an existing group resumes
 from its committed Kafka offsets. Rollback must preserve consumer offsets,

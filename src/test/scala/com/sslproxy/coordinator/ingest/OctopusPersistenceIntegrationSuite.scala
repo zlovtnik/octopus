@@ -702,6 +702,16 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         path -> statements.size
       }
       assertEquals(second, first)
+
+      val searchRoot = schemaRoot.resolveSibling("atheros_search")
+      val embeddingRecoveryStatements = canonicalStatements(canonicalManifest(searchRoot), searchRoot)
+        .collectFirst { case ("01_tables/009_embedding_recovery_contract.sql", statements) => statements }
+        .getOrElse(fail("embedding recovery contract is missing from the atheros_search manifest"))
+      val pgvectorRequirement = embeddingRecoveryStatements
+        .find(_.trim.startsWith("DO $$"))
+        .getOrElse(fail("embedding recovery contract is missing its pgvector requirement block"))
+      assert(pgvectorRequirement.contains("RAISE EXCEPTION"))
+      assert(pgvectorRequirement.trim.endsWith("END $$"))
     } *>
       sql"""SELECT table_name, data_type, character_maximum_length
             FROM information_schema.columns
@@ -1055,6 +1065,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     var quote: Char = 0.toChar
     var lineComment = false
     var blockComment = false
+    var dollarTag: Option[String] = None
 
     while index < source.length do
       val char = source.charAt(index)
@@ -1068,6 +1079,12 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         if char == '*' && next == '/' then
           blockComment = false
           index += 1
+      else if dollarTag.exists(source.startsWith(_, index)) then
+        val tag = dollarTag.get
+        current.append(tag)
+        dollarTag = None
+        index += tag.length - 1
+      else if dollarTag.nonEmpty then current.append(char)
       else if quote != 0.toChar then
         current.append(char)
         if char == '\\' && index + 1 < source.length then
@@ -1088,6 +1105,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       else if char == '\'' || char == '"' || char == '`' then
         quote = char
         current.append(char)
+      else if char == '$' then
+        parseDollarTag(source, index) match
+          case Some(tag) =>
+            current.append(tag)
+            dollarTag = Some(tag)
+            index += tag.length - 1
+          case None => current.append(char)
       else if char == ';' then
         val statement = current.result().trim
         if statement.nonEmpty then statements += statement
@@ -1098,11 +1122,22 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
     if quote != 0.toChar then
       throw IllegalStateException(s"unterminated quoted literal in canonical schema file $relative")
+    if dollarTag.nonEmpty then
+      throw IllegalStateException(s"unterminated dollar-quoted block in canonical schema file $relative")
     if blockComment then throw IllegalStateException(s"unterminated block comment in canonical schema file $relative")
     if current.result().trim.nonEmpty then
       throw IllegalStateException(s"incomplete SQL statement without semicolon in canonical schema file $relative")
 
     statements.result()
+
+  private def parseDollarTag(source: String, start: Int): Option[String] =
+    var index = start + 1
+    while index < source.length do
+      val char = source.charAt(index)
+      if char == '$' then return Some(source.substring(start, index + 1))
+      if !char.isLetterOrDigit && char != '_' then return None
+      index += 1
+    None
 
   private def schemaRoot: Path =
     Iterator

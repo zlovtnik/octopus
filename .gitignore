@@ -11,6 +11,7 @@ Thumbs.db
 *.sln.docstates
 .metals/
 .bloop/
+.omx/
 
 
 # Node.js

@@ -43,9 +43,9 @@ class IntelligenceSqlSuite extends FunSuite:
       assert(anchors.contains(s"atheros_search.${kind.table}"))
       assert(anchors.contains("embedding::text"))
       assert(statement.contains(s"atheros_search.${kind.table}"))
-      assert(statement.contains("candidate.embedding <=> CAST(? AS vector)"))
+      assert(statement.contains("candidate.embedding <=> CAST(? AS public.vector)"))
       assert(!statement.contains("JOIN LATERAL"))
-      assert(statement.contains("ORDER BY candidate.embedding <=> CAST(? AS vector)"))
+      assert(statement.contains("ORDER BY candidate.embedding <=> CAST(? AS public.vector)"))
       assert(IntelligenceSql.annReady(kind).sql.contains("pg_catalog.pg_indexes"))
       assert(IntelligenceSql.annReady(kind).sql.contains("USING hnsw"))
     }

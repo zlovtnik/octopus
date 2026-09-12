@@ -205,11 +205,11 @@ object IntelligenceSql:
            FROM (
              SELECT candidate.vector_id, candidate.document_id,
                     candidate.embedding_model,
-                    candidate.embedding <=> CAST($anchorEmbedding AS vector) AS cosine_distance
+                    candidate.embedding <=> CAST($anchorEmbedding AS public.vector) AS cosine_distance
            FROM""" ++ vectorTable ++ fr"""candidate
              WHERE candidate.document_id <> $anchorDocumentId
                AND candidate.embedding_model = $anchorEmbeddingModel
-             ORDER BY candidate.embedding <=> CAST($anchorEmbedding AS vector) ASC
+             ORDER BY candidate.embedding <=> CAST($anchorEmbedding AS public.vector) ASC
              LIMIT $topK
            ) right_vector
            JOIN atheros_search.search_documents left_document

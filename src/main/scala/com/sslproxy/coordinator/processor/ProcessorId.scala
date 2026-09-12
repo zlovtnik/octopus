@@ -208,7 +208,7 @@ object ProcessorCatalog:
     ),
     periodic(
       ProcessorId.WirelessIdentityProjector,
-      List("inventory", "similarity evidence"),
+      List("inventory"),
       List("identity projections"),
       List(ProcessorId.WirelessInventoryProjector),
       "identity/source",

@@ -279,13 +279,13 @@ object SearchPreparationSql:
                      AND document_id <> ${document.documentId}
                      AND status = 'active'""".update.run
       _ <- sql"""INSERT INTO atheros_search.search_documents (
-                   document_id, source_key, source_table, source_kind, source_version,
+                   document_id, source_id, source_key, source_table, source_kind, source_version,
                    source_mac, location_id, sensor_id, observed_at, bssid, ssid,
                    frame_subtype, tags, detail_json, security_flags, handshake_captured,
                    title, normalized_text, normalized_sha256, locale, status, metadata,
                    created_at, updated_at
                  ) VALUES (
-                   ${document.documentId}, ${document.sourceKey}, $sourceTable, $sourceKind,
+                   ${document.documentId}, ${document.sourceKey}, ${document.sourceKey}, $sourceTable, $sourceKind,
                    ${document.sourceVersion}, ${document.sourceMac}, ${document.locationId},
                    ${document.sensorId}, ${document.observedAt}, ${document.bssid}, ${document.ssid},
                    ${document.frameSubtype}, $tagsJson, ${document.detailJson}, ${document.securityFlags},

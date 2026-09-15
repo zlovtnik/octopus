@@ -20,6 +20,7 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
     .withEnv("POSTGRES_PASSWORD", "test-password")
     .withEnv("POSTGRES_DB", "octopus_timeout_test")
   private lazy val available = DockerClientFactory.instance().isDockerAvailable
+  private val dockerRequired = sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true")
   private var pool: HikariDataSource = null
   private def sink = PostgresTransactor.fromDataSource(pool, AppConfig.load.postgres.copy(
     statementTimeoutSecs = 1, networkTimeoutSecs = 4
@@ -67,7 +68,7 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
       super.afterAll()
 
   test("statement cancellation precedes network deadline, rolls back writes, and resets local timeout"):
-    assume(available, "Docker is required for ephemeral PostgreSQL verification")
+    requireDocker()
     val before = Using.resource(pool.getConnection)(conn => (value(conn, "SHOW statement_timeout"), conn.getNetworkTimeout))
     for
       started <- IO.monotonic
@@ -90,7 +91,7 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
     yield assertEquals(reused, "1")
 
   test("lock wait cancels the whole transaction and connection is reusable"):
-    assume(available, "Docker is required for ephemeral PostgreSQL verification")
+    requireDocker()
     val blocker = pool.getConnection
     blocker.setAutoCommit(false)
     execute(blocker, "UPDATE timeout_probe SET value=1 WHERE id=1")
@@ -108,7 +109,7 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
       }
 
   test("inventory replay preserves exactly one snapshot with both present and nullable BSSID"):
-    assume(available, "Docker is required for ephemeral PostgreSQL verification")
+    requireDocker()
     val now = OffsetDateTime.parse("2026-09-09T12:00:00Z")
     val rows = List(None, Some("02:00:00:00:00:03")).zipWithIndex.map { (bssid, index) =>
       WirelessClientInventoryInsert("synthetic-sensor", "synthetic-location", now,
@@ -121,3 +122,8 @@ class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
         assertEquals(value(conn, "SELECT count(*) FROM wireless_client_inventory"), "2")
         assertEquals(value(conn, "SELECT count(*) FROM wireless_client_inventory WHERE bssid IS NULL"), "1")
       }
+
+  private def requireDocker(): Unit =
+    if dockerRequired && !available then
+      throw IllegalStateException("OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable")
+    else assume(available, "Docker is required for ephemeral PostgreSQL verification")

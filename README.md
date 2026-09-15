@@ -115,12 +115,12 @@ Request/reply destinations are validated before
 publication. Non-retryable poison messages go to `<source-topic>.dlq`.
 
 `wireless-heartbeat-ingestion` translates each `wireless.sensor.heartbeat`
-record into a scan request keyed by `stream_name/payload_sha256`. Empty
-messages are skipped. Invalid JSON is published to
-`wireless.sensor.heartbeat.dlq`. Retryable PostgreSQL writes retry up to
-three times with exponential backoff; a permanent error or exhausted retry
-parks the original record on the same DLQ. The consumer then commits the
-offset so poison does not redeliver forever.
+record into a scan request with an explicit `event_id` or a payload-SHA-256
+fallback. Empty or invalid payloads are parked on
+`wireless.sensor.heartbeat.dlq` before the consumer commits the offset.
+Retryable persistence failures propagate to processor supervision, which
+applies bounded exponential backoff; permanent failures are parked on the same
+DLQ so poison does not redeliver forever.
 
 Hydration and load planning use the configured ingest stream names (defaults
 include `proxy.events`, `wireless.audit`, wireless alerts, and
@@ -283,6 +283,20 @@ sbt test
 sbt assembly
 ```
 
+Coverage and BDD commands:
+
+```bash
+sbt jacoco
+sbt "testOnly com.sslproxy.coordinator.bdd.RunCucumberTest"
+python3 scripts/check_coverage.py target/scala-3.3.8/jacoco/report/jacoco.xml
+```
+
+`sbt jacoco` writes its HTML report to
+`target/scala-3.3.8/jacoco/report/html/index.html` and machine-readable XML
+and CSV reports beside it. `coverage-policy.json` records the overall and
+package floors for `config`, `persistence`, `processor`, `postgres`,
+`dispatch`, `http`, and `observability`.
+
 Repository-level checks include:
 
 ```bash
@@ -290,5 +304,7 @@ python3 scripts/check-postgres-schema-contract.py
 make dependency-boundaries
 ```
 
-Docker-backed PostgreSQL/Redpanda/MinIO tests skip when no Docker daemon is
-available; report those skips explicitly rather than treating them as coverage.
+Docker-backed PostgreSQL tests skip when Docker is unavailable during local
+development. CI sets `OCTOPUS_REQUIRE_DOCKER=true`, turning an unavailable
+Docker daemon into a test failure so missing integration coverage cannot pass
+silently.

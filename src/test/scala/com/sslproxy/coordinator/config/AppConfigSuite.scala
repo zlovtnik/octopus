@@ -70,6 +70,28 @@ class AppConfigSuite extends FunSuite:
       )
     }
 
+  test("PostgreSQL password files fail closed when unreadable or not exactly one non-empty line"):
+    val baseline = defaults
+
+    val unreadable = intercept[IllegalArgumentException] {
+      AppConfig.resolvePostgresPassword(
+        baseline,
+        Map("POSTGRES_PASSWORD_FILE" -> "/run/secrets/postgres/password"),
+        _ => throw java.nio.file.NoSuchFileException("/run/secrets/postgres/password")
+      )
+    }
+    assertEquals(unreadable.getMessage, "cannot read POSTGRES_PASSWORD_FILE")
+
+    List("", "\n", "first\nsecond", "secret\u0000").foreach { contents =>
+      interceptMessage[IllegalArgumentException]("POSTGRES_PASSWORD_FILE must contain one non-empty line") {
+        AppConfig.resolvePostgresPassword(
+          baseline,
+          Map("POSTGRES_PASSWORD_FILE" -> "/run/secrets/postgres/password"),
+          _ => contents
+        )
+      }
+    }
+
   test("active runtime uses Kafka offsets and accepts the deployed single-broker replication"):
     val baseline = defaults
     val active = baseline.copy(
@@ -183,6 +205,40 @@ class AppConfigSuite extends FunSuite:
 
     assert(validationMessages(invalid).contains("event-retention requires archive.enabled=true"))
 
+  test("archive retention and storage settings fail closed when archival is enabled"):
+    val baseline = defaults
+    val invalid = baseline.copy(
+      archive = baseline.archive.copy(
+        enabled = true,
+        endpoint = " ",
+        accessKey = " ",
+        secretKey = " ",
+        bucket = " ",
+        hotDays = 0,
+        eventRetentionDays = -1,
+        searchRetentionDays = 0,
+        tombstoneRetentionDays = -2,
+        batchSize = 0,
+        intervalMs = 0L,
+        maintenanceIntervalMs = 0L
+      )
+    )
+
+    val messages = validationMessages(invalid)
+    List(
+      "archive.endpoint",
+      "archive.access-key",
+      "archive.secret-key",
+      "archive.bucket",
+      "archive.hot-days",
+      "archive.event-retention-days",
+      "archive.search-retention-days",
+      "archive.tombstone-retention-days",
+      "archive.batch-size",
+      "archive.interval-ms",
+      "archive.maintenance-interval-ms"
+    ).foreach(expected => assert(messages.exists(_.contains(expected)), expected))
+
   test("topic replication factor must be a positive Kafka value"):
     val baseline = defaults
     val invalid = baseline.copy(kafka = baseline.kafka.copy(topicReplicationFactor = 0))
@@ -273,6 +329,43 @@ class AppConfigSuite extends FunSuite:
     val messages = validationMessages(invalid)
     assert(messages.exists(_.contains("ingest.stream-names must contain proxy.events")))
     assert(messages.exists(_.contains("persisted to PostgreSQL")))
+
+  test("ingest stream lists reject duplicates and load streams outside the intake set"):
+    val baseline = defaults
+    val invalid = baseline.copy(
+      ingest = IngestConfig(
+        streamNames = baseline.ingest.streamNames :+ "proxy.events",
+        loadStreamNames = baseline.ingest.loadStreamNames :+ "unconfigured.stream"
+      )
+    )
+
+    val messages = validationMessages(invalid)
+    assert(messages.contains("ingest.stream-names must not contain duplicates"))
+    assert(messages.contains("ingest.load-stream-names must be a subset of ingest.stream-names"))
+
+  test("enabled PostgreSQL requires matching TLS credentials and endpoint identity"):
+    val baseline = defaults
+    val invalid = baseline.copy(
+      postgres = enabledPostgres(baseline.postgres).copy(
+        host = "localhost",
+        user = "postgres",
+        sslServerName = "postgres.example.internal",
+        sslClientKeyStorePath = "/etc/postgres-tls/client.p12",
+        sslClientKeyStorePassword = "",
+        sslClientKeyStoreType = "PEM",
+        warnOnly = true
+      )
+    )
+
+    val messages = validationMessages(invalid)
+    List(
+      "external PostgreSQL cluster, not loopback",
+      "least-privilege non-superuser",
+      "ssl-server-name must equal postgres.host",
+      "ssl-client-key-store-path and postgres.ssl-client-key-store-password",
+      "ssl-client-key-store-type must be JKS or PKCS12",
+      "postgres.warn-only must be false"
+    ).foreach(expected => assert(messages.exists(_.contains(expected)), expected))
 
   private def defaults: AppConfig =
     AppConfig.load(

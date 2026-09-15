@@ -1,0 +1,12 @@
+{
+  "overall_minimum_line_percentage": 55.0,
+  "packages": {
+    "com.sslproxy.coordinator.config": 97.0,
+    "com.sslproxy.coordinator.dispatch": 31.0,
+    "com.sslproxy.coordinator.http": 8.0,
+    "com.sslproxy.coordinator.observability": 64.0,
+    "com.sslproxy.coordinator.persistence": 57.0,
+    "com.sslproxy.coordinator.postgres": 29.0,
+    "com.sslproxy.coordinator.processor": 86.0
+  }
+}

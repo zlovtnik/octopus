@@ -17,8 +17,8 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
 - `cron/` and `dispatch/` own periodic ingest/batch/dispatch and outbox
   publication. `archive/` owns MinIO payload archival. `http/` owns health
   and metrics. `observability/` owns logs, Micrometer, and OTLP.
-- `src/test/scala/` includes MUnit and MUnit Cats Effect tests, including
-  `DocumentationContractSuite` for README/topic/gate alignment.
+- `src/test/scala/` includes MUnit, MUnit Cats Effect, Cucumber glue in `bdd/`,
+  `DocumentationContractSuite`, and `FeatureContractSuite`; features are one per `ProcessorFamily`.
 
 ## Guardrails
 - Own durable ingestion, leases, outbox, and maintained projections. Do not
@@ -35,12 +35,16 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
   and must not apply DDL at runtime.
 - Keep cursor advancement, batch leasing, dispatch, backlog, and result
   handling idempotent under at-least-once delivery.
+- Every Octopus-owned `ProcessorId` needs a tagged scenario in its family feature; `FeatureContractSuite` rejects missing, unknown, and Atheros Search-owned tags.
+- Do not lower `coverage-policy.json` floors for `persistence`, `processor`, `postgres`, `dispatch`, or `config` without explicit justification and a fresh Docker-enabled report.
 - Do not commit sbt caches, IDE state, `.omx/` output, or generated local
   runtime files.
 
 ## Commands
 - Run tests from this directory: `sbt test`.
 - Build: `sbt assembly`.
+- Coverage: `sbt jacoco`; inspect `target/scala-3.3.8/jacoco/report/html/index.html`.
+- BDD only: `sbt "testOnly com.sslproxy.coordinator.bdd.RunCucumberTest"`.
 - Root broad test target also runs coordinator tests: `make test`.
 
 ## Verification
@@ -48,5 +52,7 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
   `sbt test` for coordinator-wide changes.
 - After README, topic, HTTP route, or runtime-gate edits, run
   `DocumentationContractSuite`.
+- Update the matching Cucumber feature for Octopus processor behavior changes,
+  then run `FeatureContractSuite`.
 - For PostgreSQL sink changes, cover schema preflight failure modes, retry
   classification, transform output, and disabled-sink behavior.

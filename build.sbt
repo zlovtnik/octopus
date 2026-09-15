@@ -60,6 +60,9 @@ val testcontainersVersion = "1.20.6"
 val minioVersion = "9.0.3"
 val openTelemetryVersion = "1.62.0"
 val snakeYamlVersion = "2.3"
+val cucumberScalaVersion = "8.36.0"
+val cucumberJvmVersion = "7.31.0"
+val junitPlatformVersion = "1.14.0"
 
 lazy val root = (project in file("."))
   .settings(
@@ -96,9 +99,13 @@ lazy val root = (project in file("."))
       "org.scalameta" %% "munit" % "1.3.4" % Test,
       "org.typelevel" %% "munit-cats-effect" % "2.1.0" % Test,
       "org.yaml" % "snakeyaml" % snakeYamlVersion % Test,
-      "org.testcontainers" % "kafka" % testcontainersVersion % Test,
-      "org.testcontainers" % "testcontainers" % testcontainersVersion % Test,
-      "org.testcontainers" % "postgresql" % testcontainersVersion % Test
+       "org.testcontainers" % "kafka" % testcontainersVersion % Test,
+       "org.testcontainers" % "testcontainers" % testcontainersVersion % Test,
+       "org.testcontainers" % "postgresql" % testcontainersVersion % Test,
+       "io.cucumber" %% "cucumber-scala" % cucumberScalaVersion % Test,
+       "io.cucumber" % "cucumber-junit-platform-engine" % cucumberJvmVersion % Test,
+       "com.github.sbt.junit" % "jupiter-interface" % JupiterKeys.jupiterVersion.value % Test,
+       "org.junit.platform" % "junit-platform-suite" % junitPlatformVersion % Test
     ),
     Compile / unmanagedSources / excludeFilter := "*.java",
     Test / unmanagedSources / excludeFilter := "*.java",
@@ -114,6 +121,20 @@ lazy val root = (project in file("."))
     assembly / assemblyJarName := "octopus.jar",
     assembly / mainClass := Some("com.sslproxy.coordinator.Main"),
     Test / javaOptions += "-Dapi.version=1.44",
+    jacocoReportSettings := JacocoReportSettings(
+      "Octopus Coverage Report",
+      None,
+      JacocoThresholds(
+        instruction = 0,
+        method = 0,
+        branch = 0,
+        complexity = 0,
+        line = 55,
+        clazz = 0
+      ),
+      Seq(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML, JacocoReportFormats.CSV),
+      "utf-8"
+    ),
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat
       case PathList("META-INF", xs @ _*) => MergeStrategy.discard

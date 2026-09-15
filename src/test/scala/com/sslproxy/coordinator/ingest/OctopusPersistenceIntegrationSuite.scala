@@ -94,10 +94,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   )
   private lazy val schemaTransactor = PostgresTransactor.fromDataSource(dataSource, schemaConfig)
   private lazy val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
+  private val dockerRequired = sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true")
 
   override def beforeAll(): Unit =
     super.beforeAll()
-    if dockerAvailable then
+    if dockerRequired && !dockerAvailable then
+      throw IllegalStateException("OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable")
+    else if dockerAvailable then
       postgres.start()
       containerStarted = true
       applyCanonicalManifest()
@@ -962,7 +965,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     result.fold(error => fail(s"${error.operation}: ${error.message}"), identity)
 
   private def requireDocker(): Unit =
-    assume(dockerAvailable, "Docker is required for the PostgreSQL integration suite")
+    if dockerRequired && !dockerAvailable then
+      throw IllegalStateException("OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable")
+    else assume(dockerAvailable, "Docker is required for the PostgreSQL integration suite")
 
   private def applyCanonicalManifest(): Unit =
     val manifest = canonicalManifest()

@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
 import com.sslproxy.coordinator.config.AppConfig
+import com.sslproxy.coordinator.postgres.sql.BatchSinkSql
 import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import com.zaxxer.hikari.HikariDataSource
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
@@ -22,6 +23,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
     val active = new AtomicInteger()
     val evictions = new AtomicInteger()
     val restores = new AtomicInteger()
+    val localSearchPaths = new AtomicInteger()
     override def getConnection(): Connection =
       val number = acquisitions.incrementAndGet()
       active.incrementAndGet(): Unit
@@ -40,7 +42,10 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
             if args(1) == Integer.valueOf(1234) then restores.incrementAndGet(): Unit
             null
           case "prepareStatement" =>
-            assertEquals(args(0), "SELECT set_config('statement_timeout', ?, true)")
+            args(0) match
+              case BatchSinkSql.SetLocalSearchPath => localSearchPaths.incrementAndGet(): Unit
+              case BatchSinkSql.SetLocalStatementTimeout => ()
+              case unexpected => fail(s"unexpected transaction setup SQL: $unexpected")
             statement
           case "rollback" if brokenCleanup && number == 1 => throw SQLException("cleanup-secret", "08006")
           case "close" => active.decrementAndGet(); null
@@ -68,6 +73,7 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
       assertEquals(value, 42)
       assertEquals(pool.acquisitions.get(), 2)
       assertEquals(pool.restores.get(), 2)
+      assertEquals(pool.localSearchPaths.get(), 2)
 
   test("exhaustion is exactly three attempts and retains original network failure despite rollback failure"):
     val pool = new Pool(brokenCleanup = true)

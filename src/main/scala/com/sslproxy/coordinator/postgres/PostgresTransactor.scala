@@ -56,6 +56,9 @@ final class PostgresTransactor private (
         previousTimeout = Some(conn.getNetworkTimeout)
         conn.setNetworkTimeout(networkTimeoutExecutor, config.networkTimeoutSecs * 1000)
         conn.setAutoCommit(false)
+        scala.util.Using.resource(conn.prepareStatement(BatchSinkSql.SetLocalSearchPath)) { setting =>
+          setting.executeQuery().close()
+        }
         scala.util.Using.resource(conn.prepareStatement(BatchSinkSql.SetLocalStatementTimeout)) { setting =>
           setting.setString(1, s"${config.statementTimeoutSecs * 1000}ms")
           setting.executeQuery().close()

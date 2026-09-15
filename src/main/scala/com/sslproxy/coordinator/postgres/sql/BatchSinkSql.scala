@@ -1,6 +1,9 @@
 package com.sslproxy.coordinator.postgres.sql
 
 object BatchSinkSql:
+  // PgBouncer transaction pooling can switch the upstream session after Hikari
+  // creates a client connection, so the schema path must be set per transaction.
+  val SetLocalSearchPath: String = "SELECT set_config('search_path', 'octopus_core, atheros_search', true)"
   val SetLocalStatementTimeout: String = "SELECT set_config('statement_timeout', ?, true)"
 
   val ConnectivityQuery: String = "SELECT 1"
@@ -142,7 +145,7 @@ object BatchSinkSql:
 object SchemaChecksSql:
   val SchemaReadinessQuery: String =
     """SELECT required_version, applied_version, required_checksum, applied_checksum, ready
-      |FROM schema_readiness
+      |FROM octopus_core.schema_readiness
       |WHERE domain = ?""".stripMargin
 
   def tableLookup(tableCount: Int): Either[String, String] =

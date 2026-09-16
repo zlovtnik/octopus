@@ -4,7 +4,6 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.processor.{IdentityClusterProjection, ProjectionFunctions}
 import doobie.ConnectionIO
 import doobie.implicits.*
-import io.circe.syntax.*
 
 object IdentityGraphSql:
   def similarityEdges(minimumSimilarity: Double, limit: Int): doobie.Query0[(String, String, Double)] =
@@ -89,27 +88,7 @@ object IdentityGraphSql:
                    last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
                    updated_at = CURRENT_TIMESTAMP""".update.run
             }
-            inventory <- value.members.traverse { mac =>
-              sql"""INSERT INTO atheros_search.inventory_devices (
-                   mac, display_name, location_id, first_registered, last_seen,
-                   active, registered, tags, similarity_cluster_id,
-                   dedup_confidence, known_macs, projection_run_id
-                 )
-                 SELECT device.mac_id, device.display_name, NULL, device.first_seen, device.last_seen,
-                        TRUE, FALSE, jsonb_build_array(), ${value.clusterId}, ${value.confidence},
-                        CAST(${value.members.asJson.noSpaces} AS JSONB), ${value.projectionRunId}
-                 FROM devices device
-                 WHERE device.mac_id = $mac
-                 ON CONFLICT (mac) DO UPDATE SET
-                   display_name = COALESCE(EXCLUDED.display_name, display_name),
-                   last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
-                   similarity_cluster_id = EXCLUDED.similarity_cluster_id,
-                   dedup_confidence = EXCLUDED.dedup_confidence,
-                   known_macs = EXCLUDED.known_macs,
-                   projection_run_id = EXCLUDED.projection_run_id,
-                   updated_at = CURRENT_TIMESTAMP""".update.run
-            }
-          yield cluster + members.sum + inventory.sum
+          yield cluster + members.sum
 
         (minimum, maximum) match
           case (Some(min), Some(max)) => persistRows(min, max)

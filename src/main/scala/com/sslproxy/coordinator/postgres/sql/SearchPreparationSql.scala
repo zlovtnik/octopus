@@ -84,23 +84,17 @@ object SearchPreparationSql:
                   device.last_seen, CAST(NULL AS TEXT), CAST(NULL AS TEXT), CAST(NULL AS TEXT),
                   0, FALSE,
                   CONCAT_WS(' ', 'kind: device', device.mac, device.display_name, device.owner_id,
-                    device.location_id, cluster.cluster_name,
-                    CASE WHEN cluster.cluster_size IS NULL THEN NULL
-                         ELSE CONCAT('cluster_size: ', cluster.cluster_size) END),
+                    device.location_id),
                   jsonb_build_object(
                     'registered', device.registered,
                     'active', device.active,
                     'owner_id', device.owner_id,
-                    'similarity_cluster_id', device.similarity_cluster_id,
-                    'dedup_confidence', device.dedup_confidence,
                     'known_macs', device.known_macs,
                     'tags', device.tags
                   )
-           FROM atheros_search.inventory_devices device
-           LEFT JOIN atheros_search.identity_clusters cluster
-             ON cluster.cluster_id = device.similarity_cluster_id
+           FROM atheros_search.devices device
            LEFT JOIN atheros_search.search_documents document
-             ON document.source_table = 'inventory_devices'
+             ON document.source_table = 'devices'
             AND document.source_key = device.mac
             AND document.source_kind = 'device'
             AND document.status = 'active'

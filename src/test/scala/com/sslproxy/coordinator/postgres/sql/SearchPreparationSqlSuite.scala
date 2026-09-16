@@ -20,7 +20,7 @@ class SearchPreparationSqlSuite extends FunSuite:
 
     val candidateSql = kinds.map(kind => kind -> SearchPreparationSql.candidates(kind, 10).sql).toMap
     assert(candidateSql(SearchDocumentKind.Event).contains("FROM wireless_frames"))
-    assert(candidateSql(SearchDocumentKind.Device).contains("atheros_search.inventory_devices"))
+    assert(candidateSql(SearchDocumentKind.Device).contains("atheros_search.devices"))
     assert(candidateSql(SearchDocumentKind.Behaviour).contains("atheros_search.behaviour_snapshots"))
     assert(candidateSql(SearchDocumentKind.Sequence).contains("atheros_search.frame_sequences"))
 

@@ -12,7 +12,7 @@ enum SearchDocumentKind(
   val embeddingKind: String
 ):
   case Event extends SearchDocumentKind("wireless_frames", "event", "event")
-  case Device extends SearchDocumentKind("inventory_devices", "device", "device")
+  case Device extends SearchDocumentKind("devices", "device", "device")
   case Behaviour extends SearchDocumentKind("behaviour_snapshots", "behaviour_window", "behaviour")
   case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
 

@@ -17,6 +17,23 @@ class PostgresTransformServiceSuite extends FunSuite:
     assertEquals(result.proxyEvents.head.bytesUp, 100L)
     assertEquals(result.proxyEvents.head.bytesDown, 200L)
     assertEquals(result.proxyEvents.head.blocked, true)
+    assertEquals(result.proxyEvents.head.classification, "unknown")
+    assertEquals(result.proxyEvents.head.rawJson, row.noSpaces)
+
+  test("transform ProxyEvents preserves canonical envelope fields"):
+    val eventId = "cb2c1f16-d5bb-4a22-9890-49f0dbb547e3"
+    val row = parse(
+      s"""{"event_id":"$eventId","type":"http_proxied","host":"cdn.example","time":"2026-07-20T12:00:00Z","blocked":false,"classification":"cdn","wg_pubkey":"wire-key"}"""
+    ).toOption.get
+
+    val event = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(row)).proxyEvents.head
+
+    assertEquals(event.eventId, eventId)
+    assertEquals(event.eventTime.toString, "2026-07-20T12:00Z")
+    assertEquals(event.eventType, "http_proxied")
+    assertEquals(event.classification, "cdn")
+    assertEquals(event.wgPubkey, Some("wire-key"))
+    assertEquals(event.rawJson, row.noSpaces)
 
   test("transform ProxyEvents without blocked does not create blocked"):
     val row = parse(

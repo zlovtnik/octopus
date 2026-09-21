@@ -65,6 +65,15 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("correlation_id, host, direction, captured_at, byte_offset"))
     assert(statement.contains("ON CONFLICT (correlation_id, direction, byte_offset) DO UPDATE SET"))
 
+  test("proxy event replays use the canonical event id conflict path"):
+    val statement = BatchSinkSql.InsertProxyEvents
+
+    assert(statement.contains("event_id, event_time, event_type"))
+    assert(statement.contains("wireguard_pubkey"))
+    assert(statement.contains("classification"))
+    assert(statement.contains("CAST(? AS jsonb)"))
+    assert(statement.contains("ON CONFLICT (event_id) DO UPDATE SET"))
+
   test("wireless client inventory preserves monotonic observation bounds"):
     val statement = BatchSinkSql.UpsertWirelessClientInventory
 

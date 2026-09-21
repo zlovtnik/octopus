@@ -13,6 +13,7 @@ object PostgresTransformService:
   // source score from rolling back the proxy event that owns the rollup.
   private val MinRollupRiskScore = -999999.9999d
   private val MaxRollupRiskScore = 999999.9999d
+  private val ProxyClassifications = Set("ads_tracker", "analytics", "cdn", "essential_api", "auth", "unknown")
 
   def transform(target: PostgresSinkTarget, rows: List[Json]): PostgresRowSet =
     target match
@@ -57,7 +58,19 @@ object PostgresTransformService:
   private def proxyEvent(row: Json): ProxyEventInsert =
     val eventType = requiredString(row, "type", "proxy.events")
     val host = requiredString(row, "host", "proxy.events")
+    val raw = rawJson(row).getOrElse("{}")
+    val eventId = optionalString(row, "event_id") match
+      case Some(value) =>
+        try UUID.fromString(value).toString
+        catch case _: IllegalArgumentException =>
+          throw new IllegalArgumentException(s"Invalid UUID '$value' for field 'event_id' in proxy.events")
+      case None => stableCorrelationId(raw)
+    val classification = optionalString(row, "classification")
+      .orElse(optionalString(row, "category"))
+      .filter(ProxyClassifications.contains)
+      .getOrElse("unknown")
     ProxyEventInsert(
+      eventId = eventId,
       eventTime = requiredTimestamp(row, "time", "proxy.events"),
       eventType = eventType,
       host = host,
@@ -71,13 +84,14 @@ object PostgresTransformService:
       bytesDown = optionalLong(row, "bytes_down").getOrElse(0L),
       statusCode = optionalLong(row, "status_code"),
       blocked = boolValue(row, "blocked"),
+      classification = classification,
       obfuscationProfile = optionalString(row, "obfuscation_profile"),
       correlationId = optionalString(row, "correlation_id"),
       parentEventId = optionalString(row, "parent_event_id"),
       eventSequence = optionalLong(row, "event_sequence"),
       durationMs = optionalLong(row, "duration_ms"),
       reason = optionalString(row, "reason"),
-      rawJson = rawJson(row)
+      rawJson = raw
     )
 
   private def transformProxyPayloadAudit(rows: List[Json]): List[ProxyPayloadAuditInsert] =

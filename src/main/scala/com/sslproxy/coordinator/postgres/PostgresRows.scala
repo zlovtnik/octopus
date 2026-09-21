@@ -58,6 +58,7 @@ object PostgresRowSet:
 // ---------------------------------------------------------------------------
 
 final case class ProxyEventInsert(
+  eventId: String,
   eventTime: OffsetDateTime,
   eventType: String,
   host: String,
@@ -71,13 +72,14 @@ final case class ProxyEventInsert(
   bytesDown: Long,
   statusCode: Option[Long],
   blocked: Boolean,
+  classification: String,
   obfuscationProfile: Option[String],
   correlationId: Option[String],
   parentEventId: Option[String],
   eventSequence: Option[Long],
   durationMs: Option[Long],
   reason: Option[String],
-  rawJson: Option[String]
+  rawJson: String
 )
 
 final case class BlockedEventInsert(

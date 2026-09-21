@@ -196,29 +196,34 @@ final class PostgresTransactor private (
       try
         val allRows = rows.zipWithIndex.map { case (r, idx) =>
           Seq[Any](
-            batchId,
-            idx + 1L,
-            ts(r.eventTime),
+            r.eventId,
             ts(r.eventTime),
             r.eventType,
             r.host,
             optStr(r.peerIp),
             optStr(r.wgPubkey),
-            optStr(r.deviceId),
-            r.identitySource,
-            optStr(r.peerHostname),
-            optStr(r.clientUa),
+            optStr(r.deviceId.flatMap(value => scala.util.Try(java.util.UUID.fromString(value).toString).toOption)),
             r.bytesUp,
             r.bytesDown,
             optLong(r.statusCode),
             r.blocked,
-            optStr(r.obfuscationProfile),
+            r.classification,
             optStr(r.correlationId),
-            optLong(r.parentEventId.map(_.toLong)),
+            optStr(r.parentEventId),
+            r.rawJson,
+            batchId,
+            idx + 1L,
+            ts(r.eventTime),
+            optStr(r.wgPubkey),
+            optStr(r.deviceId),
+            r.identitySource,
+            optStr(r.peerHostname),
+            optStr(r.clientUa),
+            optStr(r.obfuscationProfile),
             optLong(r.eventSequence),
             optLong(r.durationMs),
             optStr(r.reason),
-            optStr(r.rawJson)
+            r.rawJson
           )
         }
         val count = executeBatch(stmt, allRows)

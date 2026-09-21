@@ -15,6 +15,9 @@ enum SearchDocumentKind(
   case Device extends SearchDocumentKind("devices", "device", "device")
   case Behaviour extends SearchDocumentKind("behaviour_snapshots", "behaviour_window", "behaviour")
   case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
+  case ProxyEvent extends SearchDocumentKind("proxy_events", "proxy_event", "event")
+  case ProxyBlockedHostWindow
+      extends SearchDocumentKind("proxy_events", "proxy_blocked_host_window", "event")
 
 final case class SearchDocumentSource(
   kind: SearchDocumentKind,
@@ -29,7 +32,14 @@ final case class SearchDocumentSource(
   securityFlags: Int,
   handshakeCaptured: Boolean,
   searchText: String,
-  detailJson: String
+  detailJson: String,
+  host: Option[String] = None,
+  proxyDeviceId: Option[String] = None,
+  proxyEventType: Option[String] = None,
+  blocked: Option[Boolean] = None,
+  classification: Option[String] = None,
+  windowStart: Option[java.sql.Timestamp] = None,
+  windowEnd: Option[java.sql.Timestamp] = None
 )
 
 final case class PreparedSearchDocument(
@@ -51,7 +61,14 @@ final case class PreparedSearchDocument(
   title: Option[String],
   normalizedText: String,
   normalizedSha256: String,
-  tokens: List[(String, Double, Int)]
+  tokens: List[(String, Double, Int)],
+  host: Option[String] = None,
+  proxyDeviceId: Option[String] = None,
+  proxyEventType: Option[String] = None,
+  blocked: Option[Boolean] = None,
+  classification: Option[String] = None,
+  windowStart: Option[java.sql.Timestamp] = None,
+  windowEnd: Option[java.sql.Timestamp] = None
 )
 
 object SearchDocumentPreparation:
@@ -75,10 +92,16 @@ object SearchDocumentPreparation:
         source.sensorId.map("sensor_id" -> _),
         source.bssid.map("bssid" -> _),
         source.ssid.map("ssid" -> _),
-        source.frameSubtype.map("frame_subtype" -> _)
+        source.frameSubtype.map("frame_subtype" -> _),
+        source.host.map("host" -> _),
+        source.proxyDeviceId.map("proxy_device_id" -> _),
+        source.proxyEventType.map("proxy_event_type" -> _),
+        source.classification.map("classification" -> _),
+        source.blocked.map(value => "blocked" -> value.toString)
       ).flatten.distinct.sortBy(identity)
       val title =
-        List(source.frameSubtype, source.ssid, source.sourceMac).flatten.map(_.trim).filter(_.nonEmpty).distinct match
+        List(source.proxyEventType, source.host, source.frameSubtype, source.ssid, source.sourceMac)
+          .flatten.map(_.trim).filter(_.nonEmpty).distinct match
           case Nil => None
           case values => Some(values.mkString(" ").take(512))
 
@@ -102,7 +125,14 @@ object SearchDocumentPreparation:
           title = title,
           normalizedText = normalizedText,
           normalizedSha256 = checksum,
-          tokens = tokens
+          tokens = tokens,
+          host = source.host,
+          proxyDeviceId = source.proxyDeviceId,
+          proxyEventType = source.proxyEventType,
+          blocked = source.blocked,
+          classification = source.classification,
+          windowStart = source.windowStart,
+          windowEnd = source.windowEnd
         )
       )
 

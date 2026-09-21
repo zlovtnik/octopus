@@ -16,6 +16,8 @@ object SearchPreparationSql:
       case SearchDocumentKind.Device => deviceCandidates(limit)
       case SearchDocumentKind.Behaviour => behaviourCandidates(limit)
       case SearchDocumentKind.Sequence => sequenceCandidates(limit)
+      case SearchDocumentKind.ProxyEvent => proxyEventCandidates(limit)
+      case SearchDocumentKind.ProxyBlockedHostWindow => proxyBlockedHostWindowCandidates(limit)
 
   private def eventCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id,
@@ -248,6 +250,176 @@ object SearchPreparationSql:
         )
       )
 
+  private def proxyEventCandidates(limit: Int): Query0[SearchDocumentSource] =
+    sql"""SELECT event.event_id, event.event_time, event.host,
+                  CAST(event.registered_device_id AS TEXT), event.event_type,
+                  event.blocked, event.classification,
+                  CONCAT_WS(' ', 'proxy event', event.event_type, event.host,
+                    event.classification, CASE WHEN event.blocked THEN 'blocked' ELSE 'allowed' END,
+                    CAST(event.registered_device_id AS TEXT), CAST(event.status_code AS TEXT)),
+                  jsonb_strip_nulls(jsonb_build_object(
+                    'event_id', event.event_id,
+                    'event_type', event.event_type,
+                    'host', event.host,
+                    'proxy_device_id', event.registered_device_id,
+                    'blocked', event.blocked,
+                    'classification', event.classification,
+                    'bytes_up', event.bytes_up,
+                    'bytes_down', event.bytes_down,
+                    'status_code', event.status_code,
+                    'correlation_id', event.correlation_id
+                  ))
+           FROM octopus_core.proxy_events event
+           LEFT JOIN atheros_search.search_documents document
+             ON document.source_table = 'proxy_events'
+            AND document.source_key = event.event_id
+            AND document.source_kind = 'proxy_event'
+            AND document.status = 'active'
+           WHERE document.document_id IS NULL
+           ORDER BY event.event_time, event.event_id
+           LIMIT ${limit.max(1)}"""
+      .query[(String, java.sql.Timestamp, String, Option[String], String, Boolean, String, String, String)]
+      .map { row =>
+        SearchDocumentSource(
+          kind = SearchDocumentKind.ProxyEvent,
+          sourceKey = row._1,
+          sourceMac = None,
+          locationId = None,
+          sensorId = None,
+          observedAt = row._2,
+          bssid = None,
+          ssid = None,
+          frameSubtype = None,
+          securityFlags = 0,
+          handshakeCaptured = false,
+          searchText = row._8,
+          detailJson = row._9,
+          host = Some(row._3),
+          proxyDeviceId = row._4,
+          proxyEventType = Some(row._5),
+          blocked = Some(row._6),
+          classification = Some(row._7)
+        )
+      }
+
+  private def proxyBlockedHostWindowCandidates(limit: Int): Query0[SearchDocumentSource] =
+    sql"""WITH base AS (
+             SELECT host, COALESCE(CAST(registered_device_id AS TEXT), '') AS proxy_device_key,
+                    event_time, event_type, classification,
+                    status_code, bytes_up, bytes_down,
+                    date_trunc('hour', event_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS window_start
+             FROM octopus_core.proxy_events
+             WHERE blocked = TRUE
+               AND event_time < date_trunc('hour', CURRENT_TIMESTAMP)
+           ), aggregate_rows AS (
+             SELECT host, proxy_device_key, window_start,
+                    window_start + INTERVAL '1 hour' AS window_end,
+                    COUNT(*) AS blocked_attempts,
+                    SUM(bytes_up) + SUM(bytes_down) AS total_bytes,
+                    MIN(event_time) AS first_event_time,
+                    MAX(event_time) AS last_event_time
+             FROM base
+             GROUP BY host, proxy_device_key, window_start
+           ), event_type_counts AS (
+             SELECT host, proxy_device_key, window_start,
+                    jsonb_object_agg(event_type, event_count ORDER BY event_type) AS counts
+             FROM (
+               SELECT host, proxy_device_key, window_start, event_type, COUNT(*) AS event_count
+               FROM base
+               GROUP BY host, proxy_device_key, window_start, event_type
+             ) counts
+             GROUP BY host, proxy_device_key, window_start
+           ), classification_counts AS (
+             SELECT host, proxy_device_key, window_start,
+                    jsonb_object_agg(classification, classification_count ORDER BY classification) AS counts
+             FROM (
+               SELECT host, proxy_device_key, window_start, classification, COUNT(*) AS classification_count
+               FROM base
+               GROUP BY host, proxy_device_key, window_start, classification
+             ) counts
+             GROUP BY host, proxy_device_key, window_start
+           ), status_code_counts AS (
+             SELECT host, proxy_device_key, window_start,
+                    jsonb_object_agg(status_key, status_count ORDER BY status_key) AS counts
+             FROM (
+               SELECT host, proxy_device_key, window_start,
+                      COALESCE(CAST(status_code AS TEXT), 'none') AS status_key,
+                      COUNT(*) AS status_count
+               FROM base
+               GROUP BY host, proxy_device_key, window_start, status_key
+             ) counts
+             GROUP BY host, proxy_device_key, window_start
+           ), summaries AS (
+             SELECT CONCAT('proxy-window:', md5(jsonb_build_array(
+                      aggregate_rows.host, aggregate_rows.proxy_device_key,
+                      aggregate_rows.window_start
+                    )::text)) AS source_key,
+                    aggregate_rows.host,
+                    NULLIF(aggregate_rows.proxy_device_key, '') AS proxy_device_id,
+                    aggregate_rows.window_start,
+                    aggregate_rows.window_end,
+                    aggregate_rows.last_event_time,
+                    CONCAT_WS(' ', 'blocked proxy host window', aggregate_rows.host,
+                      NULLIF(aggregate_rows.proxy_device_key, ''),
+                      event_type_counts.counts::text, classification_counts.counts::text,
+                      status_code_counts.counts::text,
+                      'blocked attempts', aggregate_rows.blocked_attempts::text,
+                      'total bytes', aggregate_rows.total_bytes::text) AS search_text,
+                    jsonb_build_object(
+                      'host', aggregate_rows.host,
+                      'proxy_device_id', NULLIF(aggregate_rows.proxy_device_key, ''),
+                      'window_start', aggregate_rows.window_start,
+                      'window_end', aggregate_rows.window_end,
+                      'blocked_attempts', aggregate_rows.blocked_attempts,
+                      'total_bytes', aggregate_rows.total_bytes,
+                      'event_type_counts', event_type_counts.counts,
+                      'classification_counts', classification_counts.counts,
+                      'status_code_distribution', status_code_counts.counts,
+                      'first_event_time', aggregate_rows.first_event_time,
+                      'last_event_time', aggregate_rows.last_event_time
+                    ) AS detail_json
+             FROM aggregate_rows
+             JOIN event_type_counts USING (host, proxy_device_key, window_start)
+             JOIN classification_counts USING (host, proxy_device_key, window_start)
+             JOIN status_code_counts USING (host, proxy_device_key, window_start)
+           )
+           SELECT summaries.source_key, summaries.last_event_time, summaries.host,
+                  summaries.proxy_device_id, summaries.window_start, summaries.window_end,
+                  summaries.search_text, summaries.detail_json
+           FROM summaries
+           LEFT JOIN atheros_search.search_documents document
+             ON document.source_table = 'proxy_events'
+            AND document.source_key = summaries.source_key
+            AND document.source_kind = 'proxy_blocked_host_window'
+            AND document.status = 'active'
+           WHERE document.document_id IS NULL
+              OR document.detail_json IS DISTINCT FROM summaries.detail_json
+           ORDER BY summaries.window_end, summaries.source_key
+           LIMIT ${limit.max(1)}"""
+      .query[(String, java.sql.Timestamp, String, Option[String], java.sql.Timestamp, java.sql.Timestamp, String, String)]
+      .map { row =>
+        SearchDocumentSource(
+          kind = SearchDocumentKind.ProxyBlockedHostWindow,
+          sourceKey = row._1,
+          sourceMac = None,
+          locationId = None,
+          sensorId = None,
+          observedAt = row._2,
+          bssid = None,
+          ssid = None,
+          frameSubtype = None,
+          securityFlags = 0,
+          handshakeCaptured = false,
+          searchText = row._7,
+          detailJson = row._8,
+          host = Some(row._3),
+          proxyDeviceId = row._4,
+          blocked = Some(true),
+          windowStart = Some(row._5),
+          windowEnd = Some(row._6)
+        )
+      }
+
   def persist(document: PreparedSearchDocument): ConnectionIO[Unit] =
     val sourceTable = document.kind.sourceTable
     val sourceKind = document.kind.sourceKind
@@ -276,7 +448,9 @@ object SearchPreparationSql:
                    document_id, source_id, source_key, source_table, source_kind, source_version,
                    source_mac, location_id, sensor_id, observed_at, bssid, ssid,
                    frame_subtype, tags, detail_json, security_flags, handshake_captured,
-                   title, normalized_text, normalized_sha256, locale, status, metadata,
+                   title, normalized_text, normalized_sha256, search_vector, locale, status, metadata,
+                   host, proxy_device_id, proxy_event_type, blocked, classification,
+                   window_start, window_end,
                    created_at, updated_at
                  ) VALUES (
                    ${document.documentId}, ${document.sourceKey}, ${document.sourceKey}, $sourceTable, $sourceKind,
@@ -284,7 +458,10 @@ object SearchPreparationSql:
                    ${document.sensorId}, ${document.observedAt}, ${document.bssid}, ${document.ssid},
                    ${document.frameSubtype}, $tagsJson, ${document.detailJson}, ${document.securityFlags},
                    ${document.handshakeCaptured}, ${document.title}, ${document.normalizedText},
-                   ${document.normalizedSha256}, 'und', 'active', $metadata,
+                   ${document.normalizedSha256}, to_tsvector('simple', ${document.normalizedText}),
+                   'und', 'active', $metadata,
+                   ${document.host}, ${document.proxyDeviceId}, ${document.proxyEventType},
+                   ${document.blocked}, ${document.classification}, ${document.windowStart}, ${document.windowEnd},
                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                  ) ON CONFLICT (document_id) DO UPDATE SET
                    status = 'active',
@@ -305,8 +482,16 @@ object SearchPreparationSql:
                    title = EXCLUDED.title,
                    normalized_text = EXCLUDED.normalized_text,
                    normalized_sha256 = EXCLUDED.normalized_sha256,
+                   search_vector = EXCLUDED.search_vector,
                    source_version = EXCLUDED.source_version,
                    metadata = EXCLUDED.metadata,
+                   host = EXCLUDED.host,
+                   proxy_device_id = EXCLUDED.proxy_device_id,
+                   proxy_event_type = EXCLUDED.proxy_event_type,
+                   blocked = EXCLUDED.blocked,
+                   classification = EXCLUDED.classification,
+                   window_start = EXCLUDED.window_start,
+                   window_end = EXCLUDED.window_end,
                    updated_at = CURRENT_TIMESTAMP""".update.run
       _ <- sql"DELETE FROM atheros_search.search_document_tokens WHERE document_id = ${document.documentId}".update.run
       _ <- TokenInsert

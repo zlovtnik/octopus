@@ -10,12 +10,13 @@ object BatchSinkSql:
 
   val InsertProxyEvents: String =
     """INSERT INTO proxy_events (
-      |  batch_id, row_sequence, event_timestamp_utc, event_time, event_type, host,
-      |  peer_ip, wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
-      |  bytes_up, bytes_down, status_code, blocked, obfuscation_profile,
-      |  correlation_id, parent_event_id, event_sequence, duration_ms, reason, raw_json
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT (batch_id, row_sequence) DO UPDATE SET batch_id = EXCLUDED.batch_id""".stripMargin
+      |  event_id, event_time, event_type, host, peer_ip, wireguard_pubkey,
+      |  registered_device_id, bytes_up, bytes_down, status_code, blocked, classification,
+      |  correlation_id, causation_id, payload, batch_id, row_sequence, event_timestamp_utc,
+      |  wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
+      |  obfuscation_profile, event_sequence, duration_ms, reason, raw_json
+      |) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS uuid), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      |ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id""".stripMargin
 
   val UpsertBlockedHostRollups: String =
     """INSERT INTO proxy_blocked_host_rollups (

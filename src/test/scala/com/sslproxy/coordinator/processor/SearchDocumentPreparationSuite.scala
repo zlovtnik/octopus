@@ -59,3 +59,28 @@ class SearchDocumentPreparationSuite extends FunSuite:
       SearchDocumentPreparation.prepare(source.copy(kind = SearchDocumentKind.Device)).fold(fail(_), identity)
 
     assertNotEquals(event.documentId, device.documentId)
+
+  test("proxy documents retain typed metadata without copying raw payloads into text"):
+    val proxy = source.copy(
+      kind = SearchDocumentKind.ProxyEvent,
+      sourceKey = "80fbe8b2-b482-4bdc-a497-a6c15043eaa8",
+      sourceMac = None,
+      bssid = None,
+      ssid = None,
+      frameSubtype = None,
+      searchText = "proxy event http_proxied api.example cdn allowed",
+      detailJson = "{\"bytes_up\":12,\"bytes_down\":34}",
+      host = Some("api.example"),
+      proxyDeviceId = Some("8df7e18f-219e-4c33-9427-11fe3ae63ee8"),
+      proxyEventType = Some("http_proxied"),
+      blocked = Some(false),
+      classification = Some("cdn")
+    )
+
+    val document = SearchDocumentPreparation.prepare(proxy).fold(fail(_), identity)
+
+    assertEquals(document.host, Some("api.example"))
+    assertEquals(document.blocked, Some(false))
+    assertEquals(document.classification, Some("cdn"))
+    assert(!document.normalizedText.contains("bytes_up"))
+    assert(document.tags.contains("blocked" -> "false"))

@@ -1,8 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
 import com.sslproxy.coordinator.domain.{ResolvedScanRequestRecord, ScanRequestRecord}
-import io.circe.Json
-import io.circe.JsonObject
+import io.circe.{Json, JsonObject}
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64

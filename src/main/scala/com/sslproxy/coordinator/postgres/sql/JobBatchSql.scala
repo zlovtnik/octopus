@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-import doobie.{ConnectionIO, Update0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Update0}
 
 object JobBatchSql:
   def processIngestLedger(

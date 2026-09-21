@@ -12,12 +12,8 @@ import com.sslproxy.coordinator.domain.{
   IngestionDisposition,
   ResolvedScanRequestRecord
 }
-import doobie.*
-import doobie.implicits.*
-import io.circe.{Json, parser as circeParser}
 import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
-import com.sslproxy.coordinator.processor.{IntelligencePreparation, Lease, SearchDocumentPreparation}
-import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.postgres.HydrationCursor
 import com.sslproxy.coordinator.postgres.sql.{
   IdentityGraphSql,
   IngestionSql,
@@ -33,11 +29,15 @@ import com.sslproxy.coordinator.postgres.sql.{
   WirelessProjectionSql,
   WirelessSql
 }
-import com.sslproxy.coordinator.postgres.HydrationCursor
+import com.sslproxy.coordinator.processor.{IntelligencePreparation, Lease, SearchDocumentPreparation}
+import com.sslproxy.coordinator.util.Sha256Utils
+import doobie.*
+import doobie.implicits.*
+import io.circe.{Json, parser as circeParser}
+import io.opentelemetry.api.trace.SpanKind
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import io.opentelemetry.api.trace.SpanKind
 import scala.concurrent.duration.*
 
 class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] = None):
@@ -675,44 +675,56 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     runDb("postgres.project_behavior") {
       // The SQL limit counts groups, not frames. Fetch through a JDBC cursor and
       // retain only one complete group; truncating frames would corrupt counts.
-      IntelligenceSql.behaviorCandidates(limit).streamWithChunkSize(128)
+      IntelligenceSql
+        .behaviorCandidates(limit)
+        .streamWithChunkSize(128)
         .groupAdjacentBy(IntelligencePreparation.windowKey)
         .evalMap { case (_, frames) =>
           IntelligencePreparation.behavior(frames.toList).traverse(IntelligenceSql.persistBehavior).map(_.sum)
         }
-        .compile.fold(0)(_ + _)
+        .compile
+        .fold(0)(_ + _)
     }
 
   def projectTiming(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_timing") {
-      IntelligenceSql.timingCandidates(limit).streamWithChunkSize(128)
+      IntelligenceSql
+        .timingCandidates(limit)
+        .streamWithChunkSize(128)
         .groupAdjacentBy(IntelligencePreparation.windowKey)
         .evalMap { case (_, frames) =>
           IntelligencePreparation.timing(frames.toList).traverse(IntelligenceSql.persistTiming).map(_.sum)
         }
-        .compile.fold(0)(_ + _)
+        .compile
+        .fold(0)(_ + _)
     }
 
   def projectSequences(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_sequences") {
-      IntelligenceSql.sequenceCandidates(limit).streamWithChunkSize(128)
+      IntelligenceSql
+        .sequenceCandidates(limit)
+        .streamWithChunkSize(128)
         .groupAdjacentBy(_.sessionKey)
         .evalMap { case (_, frames) =>
           IntelligencePreparation.sequences(frames.toList).traverse(IntelligenceSql.persistSequence).map(_.sum)
         }
-        .compile.fold(0)(_ + _)
+        .compile
+        .fold(0)(_ + _)
     }
 
   def projectBaselines(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_baselines") {
-      IntelligenceSql.baselineCandidates(limit).streamWithChunkSize(128)
+      IntelligenceSql
+        .baselineCandidates(limit)
+        .streamWithChunkSize(128)
         .groupAdjacentBy(_._1)
         .evalMap { case (bssid, rows) =>
           IntelligencePreparation
             .baseline(bssid, rows.toVector.map(_._2))
             .fold(0.pure[ConnectionIO])(IntelligenceSql.persistBaseline)
         }
-        .compile.fold(0)(_ + _)
+        .compile
+        .fold(0)(_ + _)
     }
 
   def projectSimilarities(
@@ -1175,10 +1187,16 @@ object PostgresRepository:
     def loop(attempt: Int): IO[A] =
       fa.attempt.flatMap {
         case Right(value) =>
-          IO.whenA(attempt > 1)(IO(log.info(
-            "postgres_transaction_retry", "status" -> "recovered", "operation" -> operation,
-            "attempt" -> attempt.toString
-          ))).as(value)
+          IO.whenA(attempt > 1)(
+            IO(
+              log.info(
+                "postgres_transaction_retry",
+                "status" -> "recovered",
+                "operation" -> operation,
+                "attempt" -> attempt.toString
+              )
+            )
+          ).as(value)
         case Left(cause) =>
           if attempt < transactionRetryMaxAttempts &&
             PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable
@@ -1197,12 +1215,16 @@ object PostgresRepository:
               )
             ) *> IO.sleep(delay) *> loop(attempt + 1)
           else
-            IO(log.warn(
-              "postgres_transaction_retry",
-              "status" -> (if PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable then "exhausted" else "permanent_failure"),
-              "operation" -> operation, "attempt" -> attempt.toString,
-              "error" -> com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
-            )) *> IO.raiseError(cause)
+            IO(
+              log.warn(
+                "postgres_transaction_retry",
+                "status" -> (if PostgresErrorClass.classify(cause) == PostgresErrorClass.Retryable then "exhausted"
+                             else "permanent_failure"),
+                "operation" -> operation,
+                "attempt" -> attempt.toString,
+                "error" -> com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
+              )
+            ) *> IO.raiseError(cause)
       }
 
     loop(1)

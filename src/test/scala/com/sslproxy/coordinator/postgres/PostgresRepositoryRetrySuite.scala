@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
-import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Semaphore
+import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 

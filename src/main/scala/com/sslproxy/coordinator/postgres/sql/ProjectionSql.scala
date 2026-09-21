@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.postgres.sql
 
-import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment}
 
 object ProjectionSql:
   def generateShadowAlerts(

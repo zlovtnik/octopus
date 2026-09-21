@@ -2,8 +2,8 @@ package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
 import com.sslproxy.coordinator.processor.{PreparedSearchDocument, SearchDocumentKind, SearchDocumentSource}
-import doobie.{ConnectionIO, Query0, Update}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Query0, Update}
 import io.circe.Json
 import io.circe.syntax.*
 
@@ -396,7 +396,9 @@ object SearchPreparationSql:
               OR document.detail_json IS DISTINCT FROM summaries.detail_json
            ORDER BY summaries.window_end, summaries.source_key
            LIMIT ${limit.max(1)}"""
-      .query[(String, java.sql.Timestamp, String, Option[String], java.sql.Timestamp, java.sql.Timestamp, String, String)]
+      .query[
+        (String, java.sql.Timestamp, String, Option[String], java.sql.Timestamp, java.sql.Timestamp, String, String)
+      ]
       .map { row =>
         SearchDocumentSource(
           kind = SearchDocumentKind.ProxyBlockedHostWindow,

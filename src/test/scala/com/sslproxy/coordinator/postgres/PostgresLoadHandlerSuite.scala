@@ -32,9 +32,14 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       .getLogger("com.sslproxy.coordinator.postgres.PostgresLoadHandler$")
       .asInstanceOf[Logger]
     val originalAdditivity = logger.isAdditive
-    val cause = new RuntimeException("outer-private-value", new java.sql.SQLException(
-      "INSERT INTO inventory VALUES ('synthetic-private-value', 'password=secret-value')", "23505", 7
-    ))
+    val cause = new RuntimeException(
+      "outer-private-value",
+      new java.sql.SQLException(
+        "INSERT INTO inventory VALUES ('synthetic-private-value', 'password=secret-value')",
+        "23505",
+        7
+      )
+    )
     val handler = new PostgresLoadHandler(
       new PostgresPayloadResolver("/tmp"),
       PostgresTransformService,

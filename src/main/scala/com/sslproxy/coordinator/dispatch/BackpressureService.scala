@@ -4,8 +4,7 @@ import cats.effect.IO
 import cats.effect.kernel.Ref
 import com.sslproxy.coordinator.config.BackpressureConfig
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 
 final class BackpressureService private (
   cfg: BackpressureConfig,

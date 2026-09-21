@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorRunStatus, ProcessorStatus}
-import doobie.{Query0, Update0}
 import doobie.implicits.*
+import doobie.{Query0, Update0}
 
 import java.sql.Timestamp
 import java.time.Instant

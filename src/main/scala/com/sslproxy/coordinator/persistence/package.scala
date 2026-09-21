@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator
 
-import cats.data.EitherT
 import cats.MonadThrow
+import cats.data.EitherT
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.util.ErrorSanitizer

@@ -17,7 +17,9 @@ class FeatureContractSuite extends FunSuite:
   private def featureFiles: Map[String, String] =
     val paths = Files.list(featuresRoot)
     try
-      paths.iterator().asScala
+      paths
+        .iterator()
+        .asScala
         .filter(path => path.getFileName.toString.endsWith(".feature"))
         .map(path => path.getFileName.toString -> Files.readString(path))
         .toMap

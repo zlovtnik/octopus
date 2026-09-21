@@ -1,11 +1,12 @@
 package com.sslproxy.coordinator.config
 
 import cats.data.NonEmptyList
-import com.typesafe.config.Config
-import pureconfig.{ConfigReader, ConfigCursor}
-import pureconfig.error.ConfigReaderFailures
 import com.sslproxy.coordinator.config.StringListConfigReader.given
 import com.sslproxy.coordinator.processor.ProcessorId
+import com.typesafe.config.Config
+import pureconfig.error.ConfigReaderFailures
+import pureconfig.{ConfigCursor, ConfigReader}
+
 import java.nio.file.{Files, Path}
 
 object StringListConfigReader:
@@ -189,7 +190,8 @@ object AppConfig:
             case error: Exception =>
               throw IllegalArgumentException("cannot read POSTGRES_PASSWORD_FILE", error)
         val password = raw.stripSuffix("\n").stripSuffix("\r")
-        if password.isEmpty || password.exists(character => character == '\r' || character == '\n' || character == 0) then
+        if password.isEmpty || password.exists(character => character == '\r' || character == '\n' || character == 0)
+        then
           throw IllegalArgumentException(
             "POSTGRES_PASSWORD_FILE must contain one non-empty line"
           )

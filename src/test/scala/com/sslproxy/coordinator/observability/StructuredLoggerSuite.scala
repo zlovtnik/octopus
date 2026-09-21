@@ -8,6 +8,7 @@ import io.circe.parser.parse
 import munit.FunSuite
 import net.logstash.logback.encoder.LogstashEncoder
 import org.slf4j.LoggerFactory
+
 import java.io.ByteArrayOutputStream
 
 class StructuredLoggerSuite extends FunSuite:

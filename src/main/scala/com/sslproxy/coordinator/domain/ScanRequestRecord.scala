@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.domain
 
 import com.sslproxy.coordinator.util.Sha256Utils
-import io.circe.{Decoder, HCursor}
 import io.circe.parser.{decode, parse}
+import io.circe.{Decoder, HCursor}
 
 import java.nio.charset.StandardCharsets
 

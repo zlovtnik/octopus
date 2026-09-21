@@ -2,8 +2,8 @@ package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
 import com.sslproxy.coordinator.postgres.PostgresResult
-import doobie.{ConnectionIO, Query0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Query0}
 import io.circe.syntax.*
 
 object ResultSql:

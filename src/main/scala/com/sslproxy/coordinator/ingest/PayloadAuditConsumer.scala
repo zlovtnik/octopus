@@ -5,14 +5,12 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{DatabaseError, PayloadAudit, ResolvedScanRequestRecord, ScanRequestRecord}
 import com.sslproxy.coordinator.kafka.KafkaComponents
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
 import fs2.Stream
 import fs2.kafka.*
-import io.circe.Json
-import io.circe.parser as circeParser
-import com.sslproxy.coordinator.observability.StructuredLogger
+import io.circe.{Json, parser as circeParser}
 
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*

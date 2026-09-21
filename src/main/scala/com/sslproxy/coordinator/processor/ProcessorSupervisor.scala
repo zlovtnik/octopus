@@ -6,11 +6,10 @@ import cats.syntax.all.*
 import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import fs2.Stream
-import com.sslproxy.coordinator.observability.StructuredLogger
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
 
 import scala.concurrent.duration.*
 

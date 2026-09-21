@@ -9,8 +9,8 @@ import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorReadiness, Proc
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.parser.parse
 import munit.CatsEffectSuite
-import org.http4s.{Method, Request, Status, Uri}
 import org.http4s.implicits.*
+import org.http4s.{Method, Request, Status, Uri}
 
 import scala.concurrent.duration.*
 
@@ -85,8 +85,14 @@ class HealthRoutesSuite extends CatsEffectSuite:
         val cursor = parse(body).toOption.map(_.hcursor)
         assertEquals(status, Status.ServiceUnavailable)
         assertEquals(cursor.flatMap(_.get[String]("status").toOption), Some("DOWN"))
-        assertEquals(cursor.flatMap(_.downField("components").downField("postgres").get[String]("status").toOption), Some("DOWN"))
-        assertEquals(cursor.flatMap(_.downField("components").downField("processors").get[String]("status").toOption), Some("UP"))
+        assertEquals(
+          cursor.flatMap(_.downField("components").downField("postgres").get[String]("status").toOption),
+          Some("DOWN")
+        )
+        assertEquals(
+          cursor.flatMap(_.downField("components").downField("processors").get[String]("status").toOption),
+          Some("UP")
+        )
       }
     }
 
@@ -98,7 +104,10 @@ class HealthRoutesSuite extends CatsEffectSuite:
           get(healthRoutes, uri"/ready").map { case (status, body) =>
             val cursor = parse(body).toOption.map(_.hcursor)
             assertEquals(status, Status.ServiceUnavailable)
-            assertEquals(cursor.flatMap(_.downField("components").downField("processors").get[String]("status").toOption), Some("DOWN"))
+            assertEquals(
+              cursor.flatMap(_.downField("components").downField("processors").get[String]("status").toOption),
+              Some("DOWN")
+            )
           }
         }
       }

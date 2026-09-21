@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.ingest
 
-import cats.effect.{Deferred, IO}
 import cats.effect.implicits.*
+import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.PostgresConfig
 import com.sslproxy.coordinator.domain.{
@@ -12,6 +12,7 @@ import com.sslproxy.coordinator.domain.{
   ResolvedScanRequestRecord,
   ScanRequestRecord
 }
+import com.sslproxy.coordinator.postgres.sql.{MaintenanceSql, ProjectionSql}
 import com.sslproxy.coordinator.postgres.{
   PostgresPayloadResolver,
   PostgresRepository,
@@ -19,7 +20,6 @@ import com.sslproxy.coordinator.postgres.{
   PostgresTransactor
 }
 import com.sslproxy.coordinator.util.Sha256Utils
-import com.sslproxy.coordinator.postgres.sql.{MaintenanceSql, ProjectionSql}
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
@@ -410,14 +410,20 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       first <- repository.normalizeWirelessFrames(1).map(requireRight)
       _ = assertEquals(first, 7)
       count <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
       _ = assertEquals(count, 1L)
       _ <- sql"""DELETE FROM wireless_frame_network WHERE dedupe_key = ${keys.head}""".update.run.transact(xa)
       _ <- repository.normalizeWirelessFrames(1).map(requireRight)
       network <- sql"""SELECT COUNT(*) FROM wireless_frame_network WHERE dedupe_key = ${keys.head}"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
       countAfter <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
     yield
       assertEquals(network, 1L)
       assertEquals(countAfter, 2L)
@@ -444,9 +450,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       repeated <- repository.generateShadowAlerts(100).map(requireRight)
       stored <- sql"""SELECT occurrence_count, signal_dbm, ssid, first_occurred_at, last_occurred_at
                        FROM wireless_shadow_alerts WHERE source_mac = $mac"""
-        .query[(Long, Int, String, java.sql.Timestamp, java.sql.Timestamp)].unique.transact(xa)
+        .query[(Long, Int, String, java.sql.Timestamp, java.sql.Timestamp)]
+        .unique
+        .transact(xa)
       marked <- sql"""SELECT COUNT(*) FROM wireless_shadow_alert_inputs WHERE source_mac = $mac"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
     yield
       assertEquals(first.count(_.contains(mac)), 1)
       assert(!repeated.exists(_.contains(mac)))
@@ -495,7 +505,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
               // Both replays must select their inputs before the first transaction commits.
               _ <- sql"""SELECT COUNT(*) FROM pg_stat_activity
                            WHERE $pid = ANY(pg_blocking_pids(pid))"""
-                .query[Long].unique.transact(xa)
+                .query[Long]
+                .unique
+                .transact(xa)
                 .flatTap(count => IO.sleep(10.millis).unlessA(count == 2L))
                 .iterateUntil(_ == 2L)
                 .timeout(10.seconds)
@@ -508,10 +520,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         yield alerts
       }
       stored <- sql"""SELECT occurrence_count FROM wireless_shadow_alerts WHERE source_mac = $mac"""
-        .query[Long].unique.transact(xa)
+        .query[Long]
+        .unique
+        .transact(xa)
       marked <- sql"""SELECT dedupe_key FROM wireless_shadow_alert_inputs
                        WHERE source_mac = $mac ORDER BY dedupe_key"""
-        .query[String].to[List].transact(xa)
+        .query[String]
+        .to[List]
+        .transact(xa)
       repeated <- repository.generateShadowAlerts(100).map(requireRight)
     yield
       val (initial, (duplicateReplay, overlappingReplay)) = results
@@ -524,7 +540,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
   test("archived retention honors pending outboxes and deletes terminal UUID dependencies"):
     requireDocker()
-    val payload = """{"observed_at":"2025-01-01T00:00:00Z","event_type":"wifi_data_frame","sensor_id":"retention-test"}"""
+    val payload =
+      """{"observed_at":"2025-01-01T00:00:00Z","event_type":"wifi_data_frame","sensor_id":"retention-test"}"""
     val record = resolvedWireless(payload)
     val resourceType = "maintenance"
     val resourceId = "retention-integration-test"
@@ -538,22 +555,41 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                  SELECT dedupe_key, stream_name, observed_at, payload_sha256, 's3://test/retention'
                  FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".update.run.transact(xa)
       _ <- sql"""UPDATE sync_jobs SET status = 'completed' WHERE job_id = ${decision.jobId}""".update.run.transact(xa)
-      _ <- sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run.transact(xa)
+      _ <- sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run
+        .transact(xa)
       blocked <- MaintenanceSql.retentionCandidates(30, 100).to[List].transact(xa)
       _ = assert(!blocked.exists(_._1 == record.dedupeKey))
-      _ <- sql"""UPDATE outbox_events SET status = 'published' WHERE source_id = ${decision.batchId}""".update.run.transact(xa)
+      _ <- sql"""UPDATE outbox_events SET status = 'published' WHERE source_id = ${decision.batchId}""".update.run
+        .transact(xa)
       _ <- sql"""INSERT INTO outbox_publish_attempts (outbox_id, attempt_no, status)
-                 SELECT outbox_id, 1, 'published' FROM outbox_events WHERE source_id = ${decision.batchId}""".update.run.transact(xa)
+                 SELECT outbox_id, 1, 'published' FROM outbox_events WHERE source_id = ${decision.batchId}""".update.run
+        .transact(xa)
       _ <- sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
                  VALUES (${decision.jobId}, ${decision.batchId}, 'test', 'retention fixture')""".update.run.transact(xa)
-      lease <- repository.claimMaintenanceLease(resourceType, resourceId, "test-worker", java.util.UUID.randomUUID().toString, 60)
+      lease <- repository
+        .claimMaintenanceLease(resourceType, resourceId, "test-worker", java.util.UUID.randomUUID().toString, 60)
         .map(result => requireRight(result).getOrElse(fail("expected maintenance lease")))
       result <- repository.retainArchivedEvents(30, 90, 100, resourceType, resourceId, lease).map(requireRight)
-      remaining <- sql"""SELECT COUNT(*) FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
-      outboxes <- sql"""SELECT COUNT(*) FROM outbox_events WHERE source_id = ${decision.batchId}""".query[Long].unique.transact(xa)
-      errors <- sql"""SELECT COUNT(*) FROM sync_errors WHERE batch_id = ${decision.batchId}""".query[Long].unique.transact(xa)
-      tombstones <- sql"""SELECT COUNT(*) FROM sync_event_tombstones WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
-      archives <- sql"""SELECT COUNT(*) FROM sync_event_payload_archives WHERE dedupe_key = ${record.dedupeKey}""".query[Long].unique.transact(xa)
+      remaining <- sql"""SELECT COUNT(*) FROM sync_events WHERE dedupe_key = ${record.dedupeKey}"""
+        .query[Long]
+        .unique
+        .transact(xa)
+      outboxes <- sql"""SELECT COUNT(*) FROM outbox_events WHERE source_id = ${decision.batchId}"""
+        .query[Long]
+        .unique
+        .transact(xa)
+      errors <- sql"""SELECT COUNT(*) FROM sync_errors WHERE batch_id = ${decision.batchId}"""
+        .query[Long]
+        .unique
+        .transact(xa)
+      tombstones <- sql"""SELECT COUNT(*) FROM sync_event_tombstones WHERE dedupe_key = ${record.dedupeKey}"""
+        .query[Long]
+        .unique
+        .transact(xa)
+      archives <- sql"""SELECT COUNT(*) FROM sync_event_payload_archives WHERE dedupe_key = ${record.dedupeKey}"""
+        .query[Long]
+        .unique
+        .transact(xa)
     yield
       assertEquals(result, 1L -> 1L)
       assertEquals((remaining, outboxes, errors), (0L, 0L, 0L))
@@ -886,7 +922,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       repository
         .prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
         .map(dispatch =>
-          requireRight(dispatch)
+          requireRight(dispatch): Unit
           decision
         )
     }
@@ -917,11 +953,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       yield ()).transact(xa)
 
     def project: IO[Unit] =
-      (repository.projectBehavior(10000), repository.projectTiming(10000),
-        repository.projectSequences(10000), repository.projectBaselines(10000))
-        .parTupled.map { case (behavior, timing, sequence, baseline) =>
-          List(behavior, timing, sequence, baseline).foreach(requireRight)
-        }
+      (
+        repository.projectBehavior(10000),
+        repository.projectTiming(10000),
+        repository.projectSequences(10000),
+        repository.projectBaselines(10000)
+      ).parTupled.map { case (behavior, timing, sequence, baseline) =>
+        List(behavior, timing, sequence, baseline).foreach(requireRight)
+      }
 
     def verify(samplesPerWindow: Long): IO[Unit] =
       (for
@@ -934,7 +973,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                           WHERE session_key LIKE 'streaming-session-%'""".query[Long].to[List]
         baseline <- sql"""SELECT sample_count, p50 FROM atheros_search.baseline_profiles
                           WHERE bssid LIKE '02:00:00:99:00:%' AND metric = 'signal_dbm'"""
-          .query[(Long, Double)].to[List]
+          .query[(Long, Double)]
+          .to[List]
       yield
         assertEquals(behavior, List.fill(4)(samplesPerWindow))
         assertEquals(timing, List.fill(4)((samplesPerWindow, 10.0d, 2.0d)))

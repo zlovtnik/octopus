@@ -4,11 +4,11 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.persistence.ResultStore
 import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresLoadHandler}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 object PostgresLoadStream:
   private val log = StructuredLogger(getClass)

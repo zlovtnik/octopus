@@ -3,11 +3,11 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.persistence.ResultStore
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import fs2.Stream
 import fs2.kafka.KafkaProducer
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 object PostgresResultStream:
   private val log = StructuredLogger(getClass)

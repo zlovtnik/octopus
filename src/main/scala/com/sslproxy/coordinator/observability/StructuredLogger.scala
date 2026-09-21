@@ -40,7 +40,8 @@ final class StructuredLogger private (underlying: Logger):
   def error(event: String, cause: Throwable, fields: (String, String)*): Unit =
     val summary = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
     val hasSql = com.sslproxy.coordinator.postgres.PostgresErrorClass
-      .exceptions(cause, includeSuppressed = true).exists(_.isInstanceOf[java.sql.SQLException])
+      .exceptions(cause, includeSuppressed = true)
+      .exists(_.isInstanceOf[java.sql.SQLException])
     if hasSql then error(event, (fields :+ ("error" -> summary))*)
     else
       // Retain call-site diagnostics without exposing nested messages or secrets.

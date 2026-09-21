@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.ingest
 
 import cats.data.EitherT
-import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
+import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.domain.{
   BrokerRecordMetadata,
   DatabaseError,
@@ -11,7 +11,7 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
-import com.sslproxy.coordinator.postgres.{HydrationCursor, SyncEventHydrationCandidate, PostgresPayloadResolver}
+import com.sslproxy.coordinator.postgres.{HydrationCursor, PostgresPayloadResolver, SyncEventHydrationCandidate}
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
 

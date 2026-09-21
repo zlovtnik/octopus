@@ -1,13 +1,14 @@
 package com.sslproxy.coordinator.observability
 
 import cats.effect.IO
+import com.sslproxy.coordinator.observability.StructuredLogger
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.core.instrument.{Counter, Gauge, MeterRegistry}
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.concurrent.{ConcurrentHashMap, atomic}
-import atomic.AtomicLong
 import scala.jdk.CollectionConverters.*
+
+import atomic.AtomicLong
 
 class CoordinatorMetrics(private val registry: MeterRegistry):
   import CoordinatorMetrics.{ProcessorLifecycleValues, log}

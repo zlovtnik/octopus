@@ -12,12 +12,12 @@ object PostgresErrorClass:
   def classify(failure: Throwable): PostgresErrorClass =
     val chain = exceptions(failure)
     val states = chain.collect { case sql: SQLException => Option(sql.getSQLState).filter(_.nonEmpty) }.flatten
-    if states.nonEmpty then
-      if states.exists(isRetryableSqlState) then Retryable else Permanent
+    if states.nonEmpty then if states.exists(isRetryableSqlState) then Retryable else Permanent
     else if chain.exists {
-      case _: SQLRecoverableException | _: SQLTransientException => true
-      case error => isRetryableMessage(error.getMessage)
-    } then Retryable
+        case _: SQLRecoverableException | _: SQLTransientException => true
+        case error => isRetryableMessage(error.getMessage)
+      }
+    then Retryable
     else Permanent
 
   def exceptions(failure: Throwable, includeSuppressed: Boolean = false): List[Throwable] =

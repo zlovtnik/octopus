@@ -2,8 +2,9 @@ package com.sslproxy.coordinator.postgres
 
 import com.sslproxy.coordinator.config.AppConfig
 import io.circe.parser.parse
-import java.sql.{BatchUpdateException, SQLException, Statement}
 import munit.FunSuite
+
+import java.sql.{BatchUpdateException, SQLException, Statement}
 
 class PostgresTransactorSuite extends FunSuite:
 

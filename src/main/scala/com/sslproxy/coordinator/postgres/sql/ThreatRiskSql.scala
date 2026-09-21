@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import com.sslproxy.coordinator.processor.{ApRiskProjection, DnsThreatCandidate, DnsThreatProjection}
-import doobie.{ConnectionIO, Query0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Query0}
 
 object ThreatRiskSql:
   def dnsCandidates(limit: Int): Query0[DnsThreatCandidate] =

@@ -5,18 +5,24 @@ import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.postgres.sql.BatchSinkSql
 import com.typesafe.config.{ConfigFactory, ConfigResolveOptions}
 import com.zaxxer.hikari.HikariDataSource
+import munit.CatsEffectSuite
+
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
 import java.sql.{Connection, PreparedStatement, ResultSet, SQLException}
 import java.util.concurrent.atomic.AtomicInteger
-import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 class PostgresSinkRetrySuite extends CatsEffectSuite:
   private def proxy[A](kind: Class[A])(run: (String, Array[AnyRef]) => AnyRef): A =
-    kind.cast(Proxy.newProxyInstance(kind.getClassLoader, Array(kind), new InvocationHandler:
-      def invoke(target: Any, method: Method, args: Array[AnyRef]): AnyRef =
-        run(method.getName, Option(args).getOrElse(Array.empty[AnyRef]))
-    ))
+    kind.cast(
+      Proxy.newProxyInstance(
+        kind.getClassLoader,
+        Array(kind),
+        new InvocationHandler:
+          def invoke(target: Any, method: Method, args: Array[AnyRef]): AnyRef =
+            run(method.getName, Option(args).getOrElse(Array.empty[AnyRef]))
+      )
+    )
 
   private class Pool(brokenCleanup: Boolean = false) extends HikariDataSource:
     val acquisitions = new AtomicInteger()
@@ -90,23 +96,26 @@ class PostgresSinkRetrySuite extends CatsEffectSuite:
   test("permanent SQL failure containing timeout does not retry"):
     val pool = new Pool()
     val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
-    sink.withTransactionRetry("test_permanent")(_ => throw SQLException("timeout-value", "23505")).attempt.map { result =>
-      assert(result.isLeft)
-      assertEquals(pool.acquisitions.get(), 1)
-      assertEquals(pool.active.get(), 0)
+    sink.withTransactionRetry("test_permanent")(_ => throw SQLException("timeout-value", "23505")).attempt.map {
+      result =>
+        assert(result.isLeft)
+        assertEquals(pool.acquisitions.get(), 1)
+        assertEquals(pool.active.get(), 0)
     }
 
   test("broken network connection is evicted and next attempt acquires another connection"):
     val pool = new Pool(brokenCleanup = true)
     val sink = PostgresTransactor.fromDataSource(pool, defaults.postgres)
-    sink.withTransactionRetry("test_network_recovery") { _ =>
-      if pool.acquisitions.get() == 1 then throw SQLException("network-value", "08006")
-      1
-    }.map { value =>
-      assertEquals(value, 1)
-      assertEquals(pool.evictions.get(), 1)
-      assertEquals(pool.acquisitions.get(), 2)
-    }
+    sink
+      .withTransactionRetry("test_network_recovery") { _ =>
+        if pool.acquisitions.get() == 1 then throw SQLException("network-value", "08006")
+        1
+      }
+      .map { value =>
+        assertEquals(value, 1)
+        assertEquals(pool.evictions.get(), 1)
+        assertEquals(pool.acquisitions.get(), 2)
+      }
 
   private def defaults: AppConfig =
     AppConfig.load(

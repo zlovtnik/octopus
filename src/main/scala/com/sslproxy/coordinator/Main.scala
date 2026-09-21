@@ -1,10 +1,9 @@
 package com.sslproxy.coordinator
 
-import cats.effect.{IO, IOApp, Resource}
 import cats.effect.kernel.Fiber
 import cats.effect.std.Semaphore
+import cats.effect.{IO, IOApp, Resource}
 import com.comcast.ip4s.*
-import fs2.Stream
 import com.sslproxy.coordinator.archive.MinioPayloadArchive
 import com.sslproxy.coordinator.config.{AppConfig, RuntimeConfig}
 import com.sslproxy.coordinator.cron.CronScheduler
@@ -13,12 +12,14 @@ import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.SyncEventHydrationService
 import com.sslproxy.coordinator.kafka.{
   KafkaComponents,
-  ScanRequestStream,
   PostgresLoadStream,
   PostgresResultStream,
+  ScanRequestStream,
   WirelessHeartbeatStream
 }
-import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing, StructuredLogger}
+import com.sslproxy.coordinator.postgres.*
+import com.sslproxy.coordinator.postgres.sql.IngestionSql
 import com.sslproxy.coordinator.processor.{
   EventRetentionProcessor,
   PayloadArchiver,
@@ -27,13 +28,11 @@ import com.sslproxy.coordinator.processor.{
   ProcessorWorkload,
   SearchRetentionProcessor
 }
-import com.sslproxy.coordinator.postgres.*
-import com.sslproxy.coordinator.postgres.sql.IngestionSql
 import doobie.Transactor
 import doobie.implicits.*
+import fs2.Stream
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 

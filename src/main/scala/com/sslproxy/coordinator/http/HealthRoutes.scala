@@ -2,13 +2,13 @@ package com.sslproxy.coordinator.http
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.sslproxy.coordinator.processor.ProcessorReadiness
-import com.sslproxy.coordinator.postgres.PostgresTransactor
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.postgres.PostgresTransactor
+import com.sslproxy.coordinator.processor.ProcessorReadiness
 import io.circe.Json
 import org.http4s.HttpRoutes
-import org.http4s.dsl.io.*
 import org.http4s.circe.*
+import org.http4s.dsl.io.*
 
 import scala.concurrent.duration.*
 

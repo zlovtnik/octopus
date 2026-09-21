@@ -1,18 +1,18 @@
 package com.sslproxy.coordinator.persistence
 
-import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.archive.ArchiveReceipt
-import com.sslproxy.coordinator.processor.{Lease, ProcessorId, ProcessorRunStatus, ProcessorStatus}
+import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDecision, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.postgres.{
   ArchiveCandidate,
   HydrationCursor,
   OutboxFailureDisposition,
   OutboxRecord,
-  SyncEventHydrationCandidate,
   PostgresLoad,
   PostgresResult,
+  SyncEventHydrationCandidate,
   WirelessBacklogEntry
 }
+import com.sslproxy.coordinator.processor.{Lease, ProcessorId, ProcessorRunStatus, ProcessorStatus}
 import io.circe.Json
 
 import java.time.Instant

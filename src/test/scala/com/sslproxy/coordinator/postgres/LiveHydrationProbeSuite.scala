@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.postgres
 
-import cats.effect.IO
-import cats.effect.Resource
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor

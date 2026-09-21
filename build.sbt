@@ -113,6 +113,7 @@ lazy val root = (project in file("."))
       "-Yfuture-lazy-vals",
       "-release:21",
       "-deprecation",
+      "-Wnonunit-statement",
       "-Wvalue-discard",
       "-Wunused:all",
       "-Werror"

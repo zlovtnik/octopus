@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import com.sslproxy.coordinator.config.{KafkaCfg, WirelessConfig}
 import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, WirelessStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
@@ -11,7 +12,6 @@ import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser.parse as parseJson
 import io.circe.syntax.*
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom

@@ -28,9 +28,12 @@ class IntelligenceSqlSuite extends FunSuite:
       assert(!statement.trim.endsWith("LIMIT ?"), s"outer LIMIT should be removed: $statement")
     }
     List(behavior, timing).foreach { statement =>
-      assert(statement.contains(
-        "ORDER BY frame.source_mac, candidate.window_bucket, frame.observed_at, frame.dedupe_key"
-      ), "streaming must keep complete windows adjacent, including interleaved devices")
+      assert(
+        statement.contains(
+          "ORDER BY frame.source_mac, candidate.window_bucket, frame.observed_at, frame.dedupe_key"
+        ),
+        "streaming must keep complete windows adjacent, including interleaved devices"
+      )
     }
     assert(sequence.contains("ORDER BY identity_row.session_key, frame.observed_at, frame.dedupe_key"))
     assert(baseline.contains("ORDER BY frame.bssid, frame.observed_at, frame.dedupe_key"))

@@ -4,14 +4,13 @@ import cats.effect.IO
 import cats.effect.kernel.Ref
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
-import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.dispatch.BatchDispatchService.DispatchResult
-import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.{IngestionStore, MaintenanceStore, OutboxStore, ProjectionStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import com.sslproxy.coordinator.processor.{FencedWorkRunner, ProcessorId}
 import fs2.Stream
-import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 

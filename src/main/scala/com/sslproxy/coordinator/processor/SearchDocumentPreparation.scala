@@ -16,8 +16,7 @@ enum SearchDocumentKind(
   case Behaviour extends SearchDocumentKind("behaviour_snapshots", "behaviour_window", "behaviour")
   case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
   case ProxyEvent extends SearchDocumentKind("proxy_events", "proxy_event", "event")
-  case ProxyBlockedHostWindow
-      extends SearchDocumentKind("proxy_events", "proxy_blocked_host_window", "event")
+  case ProxyBlockedHostWindow extends SearchDocumentKind("proxy_events", "proxy_blocked_host_window", "event")
 
 final case class SearchDocumentSource(
   kind: SearchDocumentKind,
@@ -100,8 +99,10 @@ object SearchDocumentPreparation:
         source.blocked.map(value => "blocked" -> value.toString)
       ).flatten.distinct.sortBy(identity)
       val title =
-        List(source.proxyEventType, source.host, source.frameSubtype, source.ssid, source.sourceMac)
-          .flatten.map(_.trim).filter(_.nonEmpty).distinct match
+        List(source.proxyEventType, source.host, source.frameSubtype, source.ssid, source.sourceMac).flatten
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .distinct match
           case Nil => None
           case values => Some(values.mkString(" ").take(512))
 

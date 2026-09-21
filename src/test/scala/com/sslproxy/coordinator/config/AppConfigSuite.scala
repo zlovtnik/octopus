@@ -8,7 +8,10 @@ import scala.jdk.CollectionConverters.*
 class AppConfigSuite extends FunSuite:
   test("embedding preparation only supports nomic MoE"):
     assertEquals(defaults.processors.embeddingModel, "nomic-embed-text-v2-moe")
-    assertEquals(ProcessorConfig(enabled = List.empty, restartBaseDelayMs = 1000L, restartMaxDelayMs = 30000L).embeddingModel, "nomic-embed-text-v2-moe")
+    assertEquals(
+      ProcessorConfig(enabled = List.empty, restartBaseDelayMs = 1000L, restartMaxDelayMs = 30000L).embeddingModel,
+      "nomic-embed-text-v2-moe"
+    )
     List("", "unsupported-model").foreach { model =>
       val config = defaults.copy(processors = defaults.processors.copy(embeddingModel = model))
       assert(validationMessages(config).contains("processors.embedding-model must be nomic-embed-text-v2-moe"))
@@ -17,21 +20,50 @@ class AppConfigSuite extends FunSuite:
   test("sink timeout defaults and millisecond bounds"):
     assertEquals(defaults.postgres.statementTimeoutSecs, 30)
     assertEquals(defaults.postgres.networkTimeoutSecs, 60)
-    for (statement, network) <- List((0, 60), (-1, 60), (30, 0), (30, 30), (60, 30), (Int.MaxValue, Int.MaxValue), (30, Int.MaxValue)) do
-      assert(AppConfig.validate(defaults.copy(postgres = defaults.postgres.copy(
-        statementTimeoutSecs = statement, networkTimeoutSecs = network
-      ))).isLeft)
+    for (statement, network) <- List(
+        (0, 60),
+        (-1, 60),
+        (30, 0),
+        (30, 30),
+        (60, 30),
+        (Int.MaxValue, Int.MaxValue),
+        (30, Int.MaxValue)
+      )
+    do
+      assert(
+        AppConfig
+          .validate(
+            defaults.copy(postgres =
+              defaults.postgres.copy(
+                statementTimeoutSecs = statement,
+                networkTimeoutSecs = network
+              )
+            )
+          )
+          .isLeft
+      )
     val maximum = Int.MaxValue / 1000
-    assert(AppConfig.validate(defaults.copy(postgres = defaults.postgres.copy(
-      statementTimeoutSecs = maximum - 1, networkTimeoutSecs = maximum
-    ))).isRight)
+    assert(
+      AppConfig
+        .validate(
+          defaults.copy(postgres =
+            defaults.postgres.copy(
+              statementTimeoutSecs = maximum - 1,
+              networkTimeoutSecs = maximum
+            )
+          )
+        )
+        .isRight
+    )
 
   test("sink timeout environment bindings and production defaults stay aligned"):
     val reference = java.nio.file.Files.readString(java.nio.file.Path.of("src/main/resources/application.conf"))
-    val deployment = java.nio.file.Files.readString(java.nio.file.Path.of("../../cyber-stack/base/java-coordinator/deployment.yaml"))
-    List("POSTGRES_STATEMENT_TIMEOUT_SECS" -> "30", "POSTGRES_NETWORK_TIMEOUT_SECS" -> "60").foreach { (name, default) =>
-      assert(reference.contains("${?" + name + "}"))
-      assert(deployment.contains(s"- name: $name\n              value: \"$default\""))
+    val deployment =
+      java.nio.file.Files.readString(java.nio.file.Path.of("../../cyber-stack/base/java-coordinator/deployment.yaml"))
+    List("POSTGRES_STATEMENT_TIMEOUT_SECS" -> "30", "POSTGRES_NETWORK_TIMEOUT_SECS" -> "60").foreach {
+      (name, default) =>
+        assert(reference.contains("${?" + name + "}"))
+        assert(deployment.contains(s"- name: $name\n              value: \"$default\""))
     }
 
   test("application defaults keep local runtime lanes disabled"):

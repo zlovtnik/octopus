@@ -295,7 +295,10 @@ python3 scripts/check_coverage.py target/scala-3.3.8/jacoco/report/jacoco.xml
 `target/scala-3.3.8/jacoco/report/html/index.html` and machine-readable XML
 and CSV reports beside it. `coverage-policy.json` records the overall and
 package floors for `config`, `persistence`, `processor`, `postgres`,
-`dispatch`, `http`, and `observability`.
+`dispatch`, `http`, and `observability`. CI runs this coverage task with
+Docker-backed tests required, enforces the committed policy, and retains both
+the JaCoCo report and the Cucumber HTML, JSON, and JUnit reports as the
+`octopus-test-reports` artifact.
 
 Repository-level checks include:
 

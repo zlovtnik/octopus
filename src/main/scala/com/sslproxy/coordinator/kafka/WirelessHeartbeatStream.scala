@@ -67,15 +67,17 @@ object WirelessHeartbeatStream:
         .leftMap(identity[Throwable])
       rawSha = Sha256Utils.sha256Hex(raw.getBytes(StandardCharsets.UTF_8))
       eventId = json.hcursor.get[String]("event_id").toOption.filter(_.nonEmpty).getOrElse(rawSha)
-      enriched = Json.fromJsonObject(
-        obj
-          .add("event_id", Json.fromString(eventId))
-          .add("schema_version", obj("schema_version").getOrElse(Json.fromInt(1)))
-          .add("produced_at", obj("produced_at").getOrElse(Json.fromString(observedAt)))
-          .add("source_identity", obj("source_identity").getOrElse(Json.fromString(sensorId)))
-          .add("correlation_id", obj("correlation_id").getOrElse(Json.fromString(eventId)))
-          .add("causation_id", obj("causation_id").getOrElse(Json.fromString(eventId)))
-      ).noSpaces
+      enriched = Json
+        .fromJsonObject(
+          obj
+            .add("event_id", Json.fromString(eventId))
+            .add("schema_version", obj("schema_version").getOrElse(Json.fromInt(1)))
+            .add("produced_at", obj("produced_at").getOrElse(Json.fromString(observedAt)))
+            .add("source_identity", obj("source_identity").getOrElse(Json.fromString(sensorId)))
+            .add("correlation_id", obj("correlation_id").getOrElse(Json.fromString(eventId)))
+            .add("causation_id", obj("causation_id").getOrElse(Json.fromString(eventId)))
+        )
+        .noSpaces
       source = ScanRequestRecord(raw, rawSha, Topic, eventId, observedAt, s"inline://heartbeat/$eventId")
       resolved <- ResolvedScanRequestRecord.from(source, enriched)
     yield Decoded(resolved)

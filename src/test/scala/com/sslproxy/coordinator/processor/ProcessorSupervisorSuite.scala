@@ -4,8 +4,8 @@ import cats.data.EitherT
 import cats.effect.{IO, Ref}
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.domain.DatabaseError
-import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import fs2.Stream
 import munit.CatsEffectSuite
 

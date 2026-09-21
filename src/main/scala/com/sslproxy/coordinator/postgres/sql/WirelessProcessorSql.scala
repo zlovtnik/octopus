@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment}
 
 object WirelessProcessorSql:
   def normalize(limit: Int): ConnectionIO[Int] =

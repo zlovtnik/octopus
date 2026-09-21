@@ -3,11 +3,11 @@ package com.sslproxy.coordinator.postgres.sql
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.util.Sha256Utils
-import doobie.{ConnectionIO, Update0}
 import doobie.implicits.*
 import doobie.postgres.implicits.*
-import io.circe.{Json, JsonObject}
+import doobie.{ConnectionIO, Update0}
 import io.circe.parser.parse
+import io.circe.{Json, JsonObject}
 
 import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
@@ -265,8 +265,7 @@ object CanonicalIngestionSql:
              updated_at = CURRENT_TIMESTAMP""".update
 
   private def observedMacs(event: WirelessEvent): List[String] =
-    List(event.sourceMac, event.transmitterMac, event.receiverMac, event.bssid, event.destinationBssid)
-      .flatten
+    List(event.sourceMac, event.transmitterMac, event.receiverMac, event.bssid, event.destinationBssid).flatten
       .filterNot(_ == BroadcastMac)
       .distinct
 
@@ -292,10 +291,14 @@ object CanonicalIngestionSql:
     val spec = normalized match
       case value if value.contains("rogue_ap") => Some(("access_point", event.bssid.orElse(event.sourceMac), "high"))
       case value if value.contains("deauth") => Some(("access_point", event.bssid.orElse(event.sourceMac), "high"))
-      case value if value.contains("pmf_attack") => Some(("access_point", event.bssid.orElse(event.sourceMac), "critical"))
-      case value if value.contains("signal_anomaly") => Some(("station", event.sourceMac.orElse(event.transmitterMac), "medium"))
-      case value if value.contains("attack_sequence") => Some(("station", event.sourceMac.orElse(event.transmitterMac), "critical"))
-      case value if value.contains("sequence_alert") => Some(("station", event.sourceMac.orElse(event.transmitterMac), "high"))
+      case value if value.contains("pmf_attack") =>
+        Some(("access_point", event.bssid.orElse(event.sourceMac), "critical"))
+      case value if value.contains("signal_anomaly") =>
+        Some(("station", event.sourceMac.orElse(event.transmitterMac), "medium"))
+      case value if value.contains("attack_sequence") =>
+        Some(("station", event.sourceMac.orElse(event.transmitterMac), "critical"))
+      case value if value.contains("sequence_alert") =>
+        Some(("station", event.sourceMac.orElse(event.transmitterMac), "high"))
       case value if value.contains("handshake") => Some(("access_point", event.bssid.orElse(event.sourceMac), "medium"))
       case _ => None
     spec.flatMap { case (kind, subject, severity) =>
@@ -381,11 +384,15 @@ object CanonicalIngestionSql:
     yield ()
 
   private def persistProxy(record: ResolvedScanRequestRecord, payload: Json, eventId: String): ConnectionIO[Unit] =
-    val eventTimeValue = text(payload, "occurred_at").orElse(text(payload, "event_time")).orElse(text(payload, "observed_at")).getOrElse(record.observedAt)
+    val eventTimeValue = text(payload, "occurred_at")
+      .orElse(text(payload, "event_time"))
+      .orElse(text(payload, "observed_at"))
+      .getOrElse(record.observedAt)
     val eventTime = timestamp(eventTimeValue, "occurred_at")
     val host = text(payload, "host").filter(_.nonEmpty).toRight("proxy event host is required")
     val validated = (eventTime, host).mapN { (time, hostValue) =>
-      val classification = text(payload, "classification").orElse(text(payload, "category"))
+      val classification = text(payload, "classification")
+        .orElse(text(payload, "category"))
         .filter(ProxyClassifications.contains)
         .getOrElse("unknown")
       sql"""INSERT INTO proxy_events (
@@ -433,7 +440,8 @@ object CanonicalIngestionSql:
   private def normalizedMac(json: Json, names: String*): Either[String, Option[String]] =
     val value = names.iterator.flatMap(name => text(json, name)).toList.headOption.map(_.toLowerCase(Locale.ROOT))
     value match
-      case Some(mac) if !MacPattern.matches(mac) => Left(s"${names.headOption.getOrElse("mac")} must be a canonical MAC address")
+      case Some(mac) if !MacPattern.matches(mac) =>
+        Left(s"${names.headOption.getOrElse("mac")} must be a canonical MAC address")
       case other => Right(other)
 
   private def stableUuid(value: String): UUID =

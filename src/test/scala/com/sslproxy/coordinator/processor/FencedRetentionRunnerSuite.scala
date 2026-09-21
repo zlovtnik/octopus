@@ -100,9 +100,11 @@ class FencedRetentionRunnerSuite extends CatsEffectSuite:
       store <- TestMaintenanceStore.create(renewedRows = 0)
       cancelled <- Ref.of[IO, Boolean](false)
       runner = new FencedWorkRunner[IO](store, "worker-1")
-      result <- runner.runOnce(ProcessorId.SyncJobPlanner, 1.second) { _ =>
-        IO.never[Unit].onCancel(cancelled.set(true))
-      }.attempt
+      result <- runner
+        .runOnce(ProcessorId.SyncJobPlanner, 1.second) { _ =>
+          IO.never[Unit].onCancel(cancelled.set(true))
+        }
+        .attempt
       wasCancelled <- cancelled.get
       releases <- store.releases.get
     yield

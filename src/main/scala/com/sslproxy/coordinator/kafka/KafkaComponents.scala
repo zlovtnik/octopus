@@ -2,17 +2,17 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.postgres.{PostgresLoad, PostgresResult}
 import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, CreateTopicsOptions, ListTopicsOptions, NewTopic}
 import org.apache.kafka.common.errors.{InvalidReplicationFactorException, RetriableException, TopicExistsException}
-import com.sslproxy.coordinator.observability.StructuredLogger
 
-import java.util.{Collections, Properties}
 import java.time.Duration as JavaDuration
 import java.util.concurrent.{ExecutionException, TimeUnit}
+import java.util.{Collections, Properties}
 import scala.concurrent.duration.*
 
 final class KafkaComponents(

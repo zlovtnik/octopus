@@ -2,11 +2,11 @@ package com.sslproxy.coordinator.postgres
 
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.PostgresConfig
-import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
-import io.circe.{Json, parser as circeParser}
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.postgres.sql.{BatchSinkSql, SchemaChecksSql}
 import com.sslproxy.coordinator.util.ErrorSanitizer
+import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
+import io.circe.{Json, parser as circeParser}
 
 import java.sql.{BatchUpdateException, Connection, PreparedStatement, SQLException, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime, ZoneOffset}
@@ -73,8 +73,7 @@ final class PostgresTransactor private (
           throw e
       finally
         cleanup {
-          if !conn.isClosed && reusable then
-            previousTimeout.foreach(conn.setNetworkTimeout(networkTimeoutExecutor, _))
+          if !conn.isClosed && reusable then previousTimeout.foreach(conn.setNetworkTimeout(networkTimeoutExecutor, _))
         }
         if !reusable then cleanup(ds.evictConnection(conn))
         cleanup(conn.close())
@@ -93,13 +92,20 @@ final class PostgresTransactor private (
             val retryable = result.left.toOption.exists(PostgresErrorClass.classify(_) == PostgresErrorClass.Retryable)
             val outcome = result match
               case Right(_) => if attempt > 1 then "recovered" else "succeeded"
-              case Left(_) => if retryable && attempt < retryMaxAttempts then "retrying" else if retryable then "exhausted" else "permanent_failure"
+              case Left(_) =>
+                if retryable && attempt < retryMaxAttempts then "retrying"
+                else if retryable then "exhausted"
+                else "permanent_failure"
             val elapsed = finished - attemptStart
             val pool = ds.getHikariPoolMXBean
             val fields = Seq(
-              "operation" -> label, "attempt" -> attempt.toString, "outcome" -> outcome,
-              "acquisition_ms" -> (if acquisitionNanos == 0 then elapsed.toMillis else acquisitionNanos / 1000000).toString,
-              "transaction_ms" -> (if acquisitionNanos == 0 then 0L else (elapsed.toNanos - acquisitionNanos) / 1000000).toString,
+              "operation" -> label,
+              "attempt" -> attempt.toString,
+              "outcome" -> outcome,
+              "acquisition_ms" -> (if acquisitionNanos == 0 then elapsed.toMillis
+                                   else acquisitionNanos / 1000000).toString,
+              "transaction_ms" -> (if acquisitionNanos == 0 then 0L
+                                   else (elapsed.toNanos - acquisitionNanos) / 1000000).toString,
               "elapsed_ms" -> (finished - started).toMillis.toString,
               "error" -> result.left.toOption.map(ErrorSanitizer.message).getOrElse(""),
               "pool_active" -> Option(pool).map(_.getActiveConnections.toString).getOrElse("unknown"),
@@ -114,7 +120,8 @@ final class PostgresTransactor private (
               case Right(value) => IO.pure(value)
               case Left(_) if outcome == "retrying" =>
                 IO.sleep(retryBaseDelay * (1L << (attempt - 1))) *> go(attempt + 1)
-              case Left(error) => IO.raiseError(error))
+              case Left(error) => IO.raiseError(error)
+            )
         yield value
       }
       go(1)
@@ -227,7 +234,7 @@ final class PostgresTransactor private (
           )
         }
         val count = executeBatch(stmt, allRows)
-        doInsertBlockedHostRollups(conn, blockedRows)
+        doInsertBlockedHostRollups(conn, blockedRows): Unit
         count
       finally stmt.close()
     }
@@ -406,7 +413,7 @@ final class PostgresTransactor private (
           )
         )
         val inserted = executeBatch(stmt, params)
-        mergeBandwidthAlerts(conn, batchId, rows)
+        mergeBandwidthAlerts(conn, batchId, rows): Unit
         inserted
       finally stmt.close()
     }

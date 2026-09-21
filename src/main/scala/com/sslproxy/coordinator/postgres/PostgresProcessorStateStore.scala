@@ -7,8 +7,8 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.StructuredLogger
 import com.sslproxy.coordinator.persistence.{DbResultT, ProcessorStateStore}
-import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorLifecycle, ProcessorRunStatus, ProcessorStatus}
 import com.sslproxy.coordinator.postgres.sql.ProcessorStateSql
+import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorLifecycle, ProcessorRunStatus, ProcessorStatus}
 import doobie.*
 import doobie.implicits.*
 

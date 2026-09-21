@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
-import java.time.{OffsetDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
+import java.time.{OffsetDateTime, ZoneOffset}
 
 /** Clock abstraction. */
 object PostgresClock:

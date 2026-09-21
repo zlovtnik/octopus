@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
-import io.circe.Json
 import com.sslproxy.coordinator.observability.StructuredLogger
+import io.circe.Json
 
 class PostgresLoadHandler(
   payloadResolver: PostgresPayloadResolver,
@@ -67,7 +67,13 @@ class PostgresLoadHandler(
         "stream_name" -> load.streamName,
         "error_class" -> errorClass.wireValue
       )
-      PostgresResult.failure(load.jobId, load.batchId, errorClass, com.sslproxy.coordinator.util.ErrorSanitizer.message(err), finishedAt)
+      PostgresResult.failure(
+        load.jobId,
+        load.batchId,
+        errorClass,
+        com.sslproxy.coordinator.util.ErrorSanitizer.message(err),
+        finishedAt
+      )
     }
 
   private def resolveTarget(load: PostgresLoad): IO[PostgresSinkTarget] =
@@ -141,7 +147,13 @@ class PostgresLoadHandler(
       }
 
   private def buildFailureResult(load: PostgresLoad, err: Throwable): PostgresResult =
-    PostgresResult.failure(load.jobId, load.batchId, classifyError(err), com.sslproxy.coordinator.util.ErrorSanitizer.message(err), clock.nowRfc3339)
+    PostgresResult.failure(
+      load.jobId,
+      load.batchId,
+      classifyError(err),
+      com.sslproxy.coordinator.util.ErrorSanitizer.message(err),
+      clock.nowRfc3339
+    )
 
   private def repairPayloadRefIfNeeded(load: PostgresLoad): IO[PostgresLoad] =
     IO(validateLoadMetadata(load)) *>

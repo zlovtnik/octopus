@@ -1,11 +1,10 @@
 package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
-import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing, StructuredLogger}
 import com.sslproxy.coordinator.persistence.OutboxStore
 import com.sslproxy.coordinator.postgres.{OutboxFailureDisposition, OutboxRecord}
 import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
-import com.sslproxy.coordinator.observability.StructuredLogger
 import io.opentelemetry.api.trace.SpanKind
 
 import scala.concurrent.duration.*

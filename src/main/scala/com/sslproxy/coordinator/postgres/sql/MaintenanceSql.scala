@@ -2,11 +2,11 @@ package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
 import com.sslproxy.coordinator.archive.ArchiveReceipt
-import com.sslproxy.coordinator.processor.Lease
 import com.sslproxy.coordinator.postgres.ArchiveCandidate
-import doobie.{ConnectionIO, Query0, Update0}
+import com.sslproxy.coordinator.processor.Lease
 import doobie.free.connection as FC
 import doobie.implicits.*
+import doobie.{ConnectionIO, Query0, Update0}
 
 import java.sql.Timestamp
 import java.time.Instant

@@ -2,8 +2,10 @@ package com.sslproxy.coordinator.postgres
 
 import com.sslproxy.coordinator.util.Sha256Utils
 import io.circe.Json
+
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+
 import JsonFields.*
 
 /** Pure JSON → case class transforms. */
@@ -62,8 +64,9 @@ object PostgresTransformService:
     val eventId = optionalString(row, "event_id") match
       case Some(value) =>
         try UUID.fromString(value).toString
-        catch case _: IllegalArgumentException =>
-          throw new IllegalArgumentException(s"Invalid UUID '$value' for field 'event_id' in proxy.events")
+        catch
+          case _: IllegalArgumentException =>
+            throw new IllegalArgumentException(s"Invalid UUID '$value' for field 'event_id' in proxy.events")
       case None => stableCorrelationId(raw)
     val classification = optionalString(row, "classification")
       .orElse(optionalString(row, "category"))

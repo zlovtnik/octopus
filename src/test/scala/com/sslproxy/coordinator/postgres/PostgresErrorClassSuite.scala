@@ -1,7 +1,8 @@
 package com.sslproxy.coordinator.postgres
 
-import java.sql.{SQLException, SQLRecoverableException, SQLTransientException}
 import munit.*
+
+import java.sql.{SQLException, SQLRecoverableException, SQLTransientException}
 
 class PostgresErrorClassSuite extends FunSuite:
   test("cancellation retries but structured permanent states override timeout text and subclasses"):
@@ -15,7 +16,6 @@ class PostgresErrorClassSuite extends FunSuite:
     batch.setNextException(cancellation)
     cancellation.initCause(batch)
     assertEquals(PostgresErrorClass.classify(RuntimeException("outer", batch)), PostgresErrorClass.Retryable)
-
 
   test("classify null as Permanent"):
     assertEquals(PostgresErrorClass.classify(null), PostgresErrorClass.Permanent)

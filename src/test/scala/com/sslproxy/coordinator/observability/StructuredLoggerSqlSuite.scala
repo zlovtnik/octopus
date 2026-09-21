@@ -2,9 +2,10 @@ package com.sslproxy.coordinator.observability
 
 import ch.qos.logback.classic.{Logger, spi}
 import ch.qos.logback.core.read.ListAppender
-import java.sql.SQLException
 import munit.FunSuite
 import org.slf4j.LoggerFactory
+
+import java.sql.SQLException
 
 class StructuredLoggerSqlSuite extends FunSuite:
   test("throwable logging cannot bypass SQL sanitization through a stack trace"):
@@ -14,7 +15,10 @@ class StructuredLoggerSqlSuite extends FunSuite:
     appender.start()
     logger.addAppender(appender)
     try
-      StructuredLogger(name).error("failed", RuntimeException("outer-secret", SQLException("INSERT synthetic-private", "57014")))
+      StructuredLogger(name).error(
+        "failed",
+        RuntimeException("outer-secret", SQLException("INSERT synthetic-private", "57014"))
+      )
       val event = appender.list.get(0)
       assertEquals(event.getThrowableProxy, null)
       val rendered = event.getArgumentArray.mkString(" ")

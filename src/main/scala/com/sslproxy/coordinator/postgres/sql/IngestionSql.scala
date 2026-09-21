@@ -1,11 +1,10 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, IngestionDisposition, ResolvedScanRequestRecord}
 import com.sslproxy.coordinator.postgres.HydrationCursor
-import doobie.{ConnectionIO, Fragment, Query0, Update0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment, Query0, Update0}
 
 object IngestionSql:
   val ConnectivityQuery: Query0[Int] = sql"SELECT 1".query[Int]

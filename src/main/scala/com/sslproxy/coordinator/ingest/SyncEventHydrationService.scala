@@ -7,9 +7,9 @@ import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLog
 import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.postgres.{
   HydrationCursor,
-  SyncEventHydrationCandidate,
   PostgresPayloadReadException,
-  PostgresPayloadResolver
+  PostgresPayloadResolver,
+  SyncEventHydrationCandidate
 }
 import com.sslproxy.coordinator.util.ErrorSanitizer
 import fs2.Stream

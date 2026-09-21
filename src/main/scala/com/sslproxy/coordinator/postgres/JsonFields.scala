@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
 import io.circe.Json
+
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import scala.util.Try

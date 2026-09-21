@@ -5,6 +5,7 @@ Thumbs.db
 # Editor directories and files
 .vscode/
 .idea/
+.bsp/
 *.suo
 *.user
 *.userosscache

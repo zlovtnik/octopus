@@ -164,6 +164,7 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | `postgres.statement-timeout-secs` | `POSTGRES_STATEMENT_TIMEOUT_SECS` | Optional, default 30; transaction-local PostgreSQL statement timeout for sink transactions only |
 | `postgres.network-timeout-secs` | `POSTGRES_NETWORK_TIMEOUT_SECS` | Optional, default 60; JDBC network timeout for sink attempts, restored before connection reuse |
 | `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition/replication bounds, versioned consumer groups, earliest retained startup for new groups, manual commit after durable processing, and one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
+| `kafka.*-consumers-count` | `SYNC_SCAN_CONSUMERS_COUNT`, `SYNC_LOAD_CONSUMERS_COUNT`, `SYNC_RESULT_CONSUMERS_COUNT` | Optional, default 4; maximum concurrently drained partition streams for each locked topic, not a Kafka client count |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |

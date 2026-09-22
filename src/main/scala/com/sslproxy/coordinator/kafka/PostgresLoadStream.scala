@@ -24,6 +24,7 @@ object PostgresLoadStream:
       cfg,
       cfg.loadConsumer,
       cfg.loadTopic,
+      cfg.loadConsumersCount,
       producer,
       KafkaComponents.deserializeLoad
     ) { lockedRecords =>

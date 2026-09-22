@@ -71,6 +71,9 @@ final case class KafkaCfg(
   resultConsumer: String,
   payloadAuditConsumer: String,
   loadConsumer: String,
+  scanConsumersCount: Int,
+  loadConsumersCount: Int,
+  resultConsumersCount: Int,
   maxPollRecords: Int,
   pollTimeoutMs: Long,
   lockedBatchSize: Int,
@@ -335,6 +338,15 @@ object AppConfig:
       ),
       Option.when(config.maxPollRecords <= 0)(
         "kafka.max-poll-records must be positive"
+      ),
+      Option.when(config.scanConsumersCount <= 0)(
+        "kafka.scan-consumers-count must be positive"
+      ),
+      Option.when(config.loadConsumersCount <= 0)(
+        "kafka.load-consumers-count must be positive"
+      ),
+      Option.when(config.resultConsumersCount <= 0)(
+        "kafka.result-consumers-count must be positive"
       ),
       Option.when(config.pollTimeoutMs <= 0L)(
         "kafka.poll-timeout-ms must be positive"

@@ -28,6 +28,7 @@ object ScanRequestStream:
       cfg,
       cfg.scanConsumer,
       cfg.scanTopic,
+      cfg.scanConsumersCount,
       producer,
       ScanRequestRecord.decodeWire
     ) { lockedRecords =>

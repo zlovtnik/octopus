@@ -21,6 +21,7 @@ object PostgresResultStream:
       cfg,
       cfg.resultConsumer,
       cfg.resultTopic,
+      cfg.resultConsumersCount,
       producer,
       KafkaComponents.deserializeResult
     ) { lockedRecords =>

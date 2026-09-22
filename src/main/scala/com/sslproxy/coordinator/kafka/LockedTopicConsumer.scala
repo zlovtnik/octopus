@@ -42,6 +42,7 @@ private[kafka] object LockedTopicConsumer:
     cfg: KafkaCfg,
     groupId: String,
     topic: String,
+    partitionConcurrency: Int,
     producer: KafkaProducer[IO, String, String],
     decode: String => Either[Throwable, A]
   )(
@@ -71,7 +72,7 @@ private[kafka] object LockedTopicConsumer:
                     process
                   )
                 }
-            }.parJoinUnbounded
+            }.parJoin(partitionConcurrency)
 
             records.concurrently(assignments)
           }

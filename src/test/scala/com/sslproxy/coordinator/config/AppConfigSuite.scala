@@ -74,6 +74,9 @@ class AppConfigSuite extends FunSuite:
     assertEquals(config.postgres.healthcheckReserve, 2)
     assertEquals(config.kafka.lockedBatchSize, 500)
     assertEquals(config.kafka.lockedBatchWindowMs, 250L)
+    assertEquals(config.kafka.scanConsumersCount, 4)
+    assertEquals(config.kafka.loadConsumersCount, 4)
+    assertEquals(config.kafka.resultConsumersCount, 4)
     assertEquals(config.kafka.topicPartitions, 24)
     assertEquals(config.kafka.topicReplicationFactor, 3)
     assertEquals(config.runtime, RuntimeConfig(processorsEnabled = false, consumersEnabled = false))
@@ -195,6 +198,9 @@ class AppConfigSuite extends FunSuite:
         "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
         "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
         "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
+        "SYNC_SCAN_CONSUMERS_COUNT" -> "5",
+        "SYNC_LOAD_CONSUMERS_COUNT" -> "6",
+        "SYNC_RESULT_CONSUMERS_COUNT" -> "7",
         "SYNC_STREAM_NAMES" -> "proxy.events,proxy.payload_audit",
         "COORDINATOR_LOAD_STREAM_NAMES" -> "proxy.events,proxy.payload_audit"
       ).asJava
@@ -209,6 +215,9 @@ class AppConfigSuite extends FunSuite:
     assertEquals(loaded.kafka.loadConsumer, "octopus-load-v7")
     assertEquals(loaded.kafka.resultConsumer, "octopus-result-v7")
     assertEquals(loaded.kafka.payloadAuditConsumer, "octopus-payload-audit-v7")
+    assertEquals(loaded.kafka.scanConsumersCount, 5)
+    assertEquals(loaded.kafka.loadConsumersCount, 6)
+    assertEquals(loaded.kafka.resultConsumersCount, 7)
     assertEquals(loaded.ingest.streamNames, List("proxy.events", "proxy.payload_audit"))
 
   test("processor supervision rejects blanks duplicates unknown IDs and invalid delays"):
@@ -293,6 +302,9 @@ class AppConfigSuite extends FunSuite:
       http = baseline.http.copy(port = 65536),
       kafka = baseline.kafka.copy(
         maxPollRecords = 0,
+        scanConsumersCount = 0,
+        loadConsumersCount = 0,
+        resultConsumersCount = 0,
         lockedBatchSize = baseline.kafka.maxPollRecords + 1,
         lockedBatchWindowMs = 0L
       )
@@ -301,6 +313,9 @@ class AppConfigSuite extends FunSuite:
 
     assert(messages.exists(_.contains("http.port")))
     assert(messages.exists(_.contains("max-poll-records")))
+    assert(messages.exists(_.contains("scan-consumers-count")))
+    assert(messages.exists(_.contains("load-consumers-count")))
+    assert(messages.exists(_.contains("result-consumers-count")))
     assert(messages.exists(_.contains("locked-batch-size")))
     assert(messages.exists(_.contains("locked-batch-window-ms")))
 

@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{IngestConfig, KafkaCfg}
 import com.sslproxy.coordinator.domain.{IngestionDisposition, ScanRequestRecord}
+import com.sslproxy.coordinator.dispatch.BackpressureService
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.IngestionStore
 import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresPayloadReadException, PostgresPayloadResolver}
@@ -21,6 +22,7 @@ object ScanRequestStream:
     store: IngestionStore[IO],
     payloadResolver: PostgresPayloadResolver,
     metrics: CoordinatorMetrics,
+    backpressure: BackpressureService,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     val configuredStreams = configuredStreamNames(ingest.streamNames)
@@ -29,6 +31,7 @@ object ScanRequestStream:
       cfg.scanConsumer,
       cfg.scanTopic,
       cfg.scanConsumersCount,
+      backpressure.awaitConsumerPermit,
       producer,
       ScanRequestRecord.decodeWire
     ) { lockedRecords =>

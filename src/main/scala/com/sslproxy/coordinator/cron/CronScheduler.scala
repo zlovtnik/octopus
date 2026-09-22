@@ -225,47 +225,47 @@ final class CronScheduler private (
       case Right(pendingCount) =>
         val logPending = IO(log.info("ingest_ledger", "status" -> "pending", "count" -> pendingCount.toString))
 
-        if pendingCount >= budget then
-          logPending *>
-            IO(
-              log.info(
-                "backpressure",
-                "status" -> "throttled",
-                "pending_count" -> pendingCount.toString,
-                "budget" -> budget.toString,
-                "ingest_batch_size" -> cfg.ingestBatchSize.toString
-              )
+        val throttleLog = IO.whenA(pendingCount >= budget)(
+          IO(
+            log.info(
+              "backpressure",
+              "status" -> "source_paused_drain_continues",
+              "pending_count" -> pendingCount.toString,
+              "budget" -> budget.toString,
+              "ingest_batch_size" -> cfg.ingestBatchSize.toString
             )
-        else
-          logPending *>
-            ingestionStore
-              .processPending(
-                ingestConfig.streamNames,
-                cfg.scanMaxAttempts,
-                cfg.scanRetryBackoffSeconds,
-                cfg.ingestBatchSize
-              )
-              .value
-              .flatMap {
-                case Left(err) =>
-                  IO(
-                    log.error(
-                      "ingest_ledger",
-                      "status" -> "failed",
-                      "operation" -> err.operation,
-                      "error" -> err.message
-                    )
-                  ) *>
-                    IO(metrics.recordIngestInvocation(false)) *>
-                    IO.raiseError(databaseFailure(err))
+          )
+        )
 
-                case Right(processed) =>
-                  IO(metrics.recordIngestInvocation(true)) *>
-                    IO(metrics.recordIngestProcessed(processed)) *>
-                    IO.whenA(processed > 0)(
-                      IO(log.info("ingest_ledger", "status" -> "processed", "count" -> processed.toString))
-                    )
-              }
+        logPending *> throttleLog *>
+          ingestionStore
+            .processPending(
+              ingestConfig.streamNames,
+              cfg.scanMaxAttempts,
+              cfg.scanRetryBackoffSeconds,
+              cfg.ingestBatchSize
+            )
+            .value
+            .flatMap {
+              case Left(err) =>
+                IO(
+                  log.error(
+                    "ingest_ledger",
+                    "status" -> "failed",
+                    "operation" -> err.operation,
+                    "error" -> err.message
+                  )
+                ) *>
+                  IO(metrics.recordIngestInvocation(false)) *>
+                  IO.raiseError(databaseFailure(err))
+
+              case Right(processed) =>
+                IO(metrics.recordIngestInvocation(true)) *>
+                  IO(metrics.recordIngestProcessed(processed)) *>
+                  IO.whenA(processed > 0)(
+                    IO(log.info("ingest_ledger", "status" -> "processed", "count" -> processed.toString))
+                  )
+            }
     }
 
   private def recoverStaleBatches(): IO[Unit] =

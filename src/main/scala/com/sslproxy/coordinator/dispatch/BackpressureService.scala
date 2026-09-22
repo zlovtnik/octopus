@@ -1,17 +1,17 @@
 package com.sslproxy.coordinator.dispatch
 
 import cats.effect.IO
-import cats.effect.kernel.Ref
 import com.sslproxy.coordinator.config.BackpressureConfig
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
+import fs2.concurrent.SignallingRef
 
 final class BackpressureService private (
   cfg: BackpressureConfig,
   ingestBatchSize: Int,
   pendingLedgerCount: IO[Either[DatabaseError, Long]],
   metrics: CoordinatorMetrics,
-  consumerSuspended: Ref[IO, Boolean]
+  consumerSuspended: SignallingRef[IO, Boolean]
 ):
   import BackpressureService.log
 
@@ -23,6 +23,9 @@ final class BackpressureService private (
 
   def isConsumerSuspended: IO[Boolean] =
     consumerSuspended.get
+
+  def awaitConsumerPermit: IO[Unit] =
+    consumerSuspended.discrete.dropWhile(identity).head.compile.drain
 
   def checkAndAct: IO[Long] =
     pendingLedgerCount.flatMap {
@@ -86,6 +89,6 @@ object BackpressureService:
     pendingLedgerCount: IO[Either[DatabaseError, Long]],
     metrics: CoordinatorMetrics
   ): IO[BackpressureService] =
-    Ref.of[IO, Boolean](false).map { state =>
+    SignallingRef[IO, Boolean](false).map { state =>
       new BackpressureService(cfg, ingestBatchSize, pendingLedgerCount, metrics, state)
     }

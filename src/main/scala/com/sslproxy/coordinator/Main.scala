@@ -138,9 +138,9 @@ object Main extends IOApp.Simple:
                         metrics,
                         preflight.validate()
                       )
-                    yield cronScheduler
+                    yield (cronScheduler, backpressureService)
 
-                    Resource.eval(scheduler).flatMap { cronScheduler =>
+                    Resource.eval(scheduler).flatMap { case (cronScheduler, backpressureService) =>
                       val processorStateStore = new PostgresProcessorStateStore(postgresDoobieTx, Some(dbSemaphore))
                       val maintenanceOwnerId = java.util.UUID.randomUUID().toString
                       val leaseTtlSeconds = ((cfg.archive.maintenanceIntervalMs / 1000L) * 2L)
@@ -214,6 +214,7 @@ object Main extends IOApp.Simple:
                                 ingestionStore,
                                 payloadResolver,
                                 metrics,
+                                backpressureService,
                                 kafka.producer
                               )
                               val loadStream = PostgresLoadStream.run(
@@ -221,11 +222,13 @@ object Main extends IOApp.Simple:
                                 resultStore,
                                 handler,
                                 kafka.producer,
-                                dbSemaphore
+                                dbSemaphore,
+                                backpressureService
                               )
                               val resultStream = PostgresResultStream.run(
                                 cfg.kafka,
                                 resultStore,
+                                backpressureService,
                                 kafka.producer
                               )
                               val heartbeatStream = WirelessHeartbeatStream.run(

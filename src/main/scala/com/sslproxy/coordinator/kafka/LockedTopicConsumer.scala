@@ -43,6 +43,7 @@ private[kafka] object LockedTopicConsumer:
     groupId: String,
     topic: String,
     partitionConcurrency: Int,
+    awaitConsumerPermit: IO[Unit],
     producer: KafkaProducer[IO, String, String],
     decode: String => Either[Throwable, A]
   )(
@@ -61,16 +62,17 @@ private[kafka] object LockedTopicConsumer:
               partitionStream
                 .groupWithin(cfg.lockedBatchSize, cfg.lockedBatchWindowMs.millis)
                 .evalMap { committables =>
-                  processBatch(
-                    contract,
-                    groupId,
-                    topic,
-                    committables.toList,
-                    producer,
-                    cfg.dlqSuffix,
-                    decode,
-                    process
-                  )
+                  awaitConsumerPermit *>
+                    processBatch(
+                      contract,
+                      groupId,
+                      topic,
+                      committables.toList,
+                      producer,
+                      cfg.dlqSuffix,
+                      decode,
+                      process
+                    )
                 }
             }.parJoin(partitionConcurrency)
 

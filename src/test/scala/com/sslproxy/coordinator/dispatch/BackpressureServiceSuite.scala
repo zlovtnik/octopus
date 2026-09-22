@@ -1,11 +1,13 @@
 package com.sslproxy.coordinator.dispatch
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import com.sslproxy.coordinator.config.BackpressureConfig
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
+
+import scala.concurrent.duration.*
 
 class BackpressureServiceSuite extends CatsEffectSuite:
 
@@ -65,3 +67,17 @@ class BackpressureServiceSuite extends CatsEffectSuite:
       assertEquals(count2, 1500L)
       assertEquals(suspended1, true)
       assertEquals(suspended2, false)
+
+  test("consumer permit waits while suspended and completes after recovery"):
+    for
+      countRef <- cats.effect.kernel.Ref[IO].of(Right(5000L): Either[DatabaseError, Long])
+      svc <- service(countRef.get)
+      _ <- svc.checkAndAct
+      completed <- Deferred[IO, Unit]
+      waiting <- (svc.awaitConsumerPermit *> completed.complete(()).void).start
+      _ <- IO.sleep(75.millis)
+      stillWaiting <- completed.tryGet.map(_.isEmpty)
+      _ <- countRef.set(Right(1000L))
+      _ <- svc.checkAndAct
+      _ <- waiting.joinWithNever.timeout(1.second)
+    yield assert(stillWaiting)

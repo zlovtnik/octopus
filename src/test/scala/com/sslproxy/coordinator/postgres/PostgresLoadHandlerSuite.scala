@@ -12,7 +12,9 @@ import org.slf4j.LoggerFactory
 
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
+import java.sql.SQLException
 import java.util.Base64
+import scala.collection.mutable.ListBuffer
 
 class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
@@ -92,13 +94,40 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       }
   }
 
+  test("a later chunk failure rolls back the whole load and remains retryable") {
+    val sink = new FailingSecondChunkSink(SQLException("connection lost", "08006"))
+    val handler = new PostgresLoadHandler(
+      new PostgresPayloadResolver("/tmp"),
+      PostgresTransformService,
+      sink,
+      PostgresClock,
+      _ => IO.pure(None),
+      insertChunkRows = 1
+    )
+    val payload =
+      """[{"type":"tls_scan","host":"first.example","time":"2026-07-20T12:00:00Z","blocked":false},
+        |{"type":"tls_scan","host":"second.example","time":"2026-07-20T12:00:01Z","blocked":false}]""".stripMargin
+
+    handler.handle(proxyEventsLoad(payload)).map { result =>
+      assertEquals(result.status, "failed")
+      assertEquals(result.retryable, true)
+      assertEquals(result.errorClass, PostgresErrorClass.Retryable.wireValue)
+      assertEquals(sink.transactionCount, 1)
+      assertEquals(sink.chunkCount, 2)
+      assertEquals(sink.committedHosts, List.empty)
+    }
+  }
+
   private def proxyEventsLoad: PostgresLoad =
     val payload = """[{"type":"tls_scan","host":"example.com","time":"2026-07-20T12:00:00Z","blocked":false}]"""
+    proxyEventsLoad(payload)
+
+  private def proxyEventsLoad(payload: String): PostgresLoad =
     val payloadRef = "inline://json/" + Base64.getUrlEncoder.withoutPadding
       .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
     PostgresLoad("job-1", "batch-1", None, "proxy.events", payloadRef, "", "", 0)
 
-  private final class FailingProxyEventSink(cause: Throwable) extends PostgresSink:
+  private class FailingProxyEventSink(cause: Throwable) extends PostgresSink:
     override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
       use(new PostgresLoadTransaction:
         override def insertChunk(
@@ -150,3 +179,30 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
     private def unexpected: IO[Long] =
       IO.raiseError(IllegalStateException("unexpected sink target"))
+
+  private final class FailingSecondChunkSink(cause: Throwable) extends FailingProxyEventSink(cause):
+    var transactionCount = 0
+    var chunkCount = 0
+    var committedHosts = List.empty[String]
+
+    override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
+      val stagedHosts = ListBuffer.empty[String]
+      transactionCount += 1
+      val transaction = new PostgresLoadTransaction:
+        override def insertChunk(
+          _batchId: String,
+          _target: PostgresSinkTarget,
+          rows: PostgresRowSet,
+          _rowOffset: Long
+        ): IO[Long] =
+          IO.defer {
+            chunkCount += 1
+            if chunkCount == 2 then IO.raiseError(cause)
+            else
+              IO {
+                stagedHosts ++= rows.proxyEvents.map(_.host)
+                rows.proxyEvents.size.toLong
+              }
+          }
+
+      use(transaction).flatTap(_ => IO { committedHosts = stagedHosts.toList })

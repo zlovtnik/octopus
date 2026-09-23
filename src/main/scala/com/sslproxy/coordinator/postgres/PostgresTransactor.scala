@@ -599,192 +599,194 @@ final class PostgresTransactor private (
   // ── wireless alerts (4 alert types) ────────────────────────────
 
   override def insertWirelessRogueAp(batchId: String, rows: List[WirelessRogueApInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "rogue_ap",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = Some(row.iface),
-          channel = Some(row.channel),
-          primaryMac = Some(row.rogueBssid),
-          secondaryMac = None,
-          ssid = row.ssid,
-          signalDbm = row.signalDbm,
-          detailsJson = PostgresTransactor.jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
-          rawJson = row.rawJson
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "rogue_ap", rogueApAlertRows(rows))
+
+  private def rogueApAlertRows(rows: List[WirelessRogueApInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = Some(row.iface),
+        channel = Some(row.channel),
+        primaryMac = Some(row.rogueBssid),
+        secondaryMac = None,
+        ssid = row.ssid,
+        signalDbm = row.signalDbm,
+        detailsJson = PostgresTransactor.jsonDetails("ssid_impersonation" -> row.ssidImpersonation),
+        rawJson = row.rawJson
+      )
+    }
 
   override def insertWirelessDeauthFlood(batchId: String, rows: List[WirelessDeauthFloodInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "deauth_flood",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = Some(row.iface),
-          channel = Some(row.channel),
-          primaryMac = row.attackerMac,
-          secondaryMac = row.targetBssid,
-          ssid = row.targetSsid,
-          signalDbm = row.signalDbm,
-          detailsJson = PostgresTransactor.jsonDetails(
-            "deauth_count" -> row.deauthCount,
-            "window_secs" -> row.windowSecs,
-            "threshold" -> row.threshold
-          ),
-          rawJson = row.rawJson
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "deauth_flood", deauthFloodAlertRows(rows))
+
+  private def deauthFloodAlertRows(rows: List[WirelessDeauthFloodInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = Some(row.iface),
+        channel = Some(row.channel),
+        primaryMac = row.attackerMac,
+        secondaryMac = row.targetBssid,
+        ssid = row.targetSsid,
+        signalDbm = row.signalDbm,
+        detailsJson = PostgresTransactor.jsonDetails(
+          "deauth_count" -> row.deauthCount,
+          "window_secs" -> row.windowSecs,
+          "threshold" -> row.threshold
+        ),
+        rawJson = row.rawJson
+      )
+    }
 
   override def insertWirelessSignalAnomaly(batchId: String, rows: List[WirelessSignalAnomalyInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "signal_anomaly",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = None,
-          channel = Some(row.channel),
-          primaryMac = Some(row.sourceMac),
-          secondaryMac = row.bssid,
-          ssid = row.ssid,
-          signalDbm = Some(row.observedDbm),
-          detailsJson = PostgresTransactor.jsonDetails(
-            "baseline_dbm" -> row.baselineDbm,
-            "observed_dbm" -> row.observedDbm,
-            "dbm_delta" -> row.dbmDelta,
-            "configured_delta" -> row.configuredDelta
-          ),
-          rawJson = None
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "signal_anomaly", signalAnomalyAlertRows(rows))
+
+  private def signalAnomalyAlertRows(rows: List[WirelessSignalAnomalyInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = None,
+        channel = Some(row.channel),
+        primaryMac = Some(row.sourceMac),
+        secondaryMac = row.bssid,
+        ssid = row.ssid,
+        signalDbm = Some(row.observedDbm),
+        detailsJson = PostgresTransactor.jsonDetails(
+          "baseline_dbm" -> row.baselineDbm,
+          "observed_dbm" -> row.observedDbm,
+          "dbm_delta" -> row.dbmDelta,
+          "configured_delta" -> row.configuredDelta
+        ),
+        rawJson = None
+      )
+    }
 
   override def insertWirelessPmfAttack(batchId: String, rows: List[WirelessPmfAttackInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "pmf_attack",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = None,
-          channel = row.channel,
-          primaryMac = Some(row.targetMac),
-          secondaryMac = row.targetBssid,
-          ssid = row.ssid,
-          signalDbm = None,
-          detailsJson = PostgresTransactor.jsonDetails(
-            "attack_tag" -> row.attackTag,
-            "reconnect_window_ms" -> row.reconnectWindowMs
-          ),
-          rawJson = None
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "pmf_attack", pmfAttackAlertRows(rows))
+
+  private def pmfAttackAlertRows(rows: List[WirelessPmfAttackInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = None,
+        channel = row.channel,
+        primaryMac = Some(row.targetMac),
+        secondaryMac = row.targetBssid,
+        ssid = row.ssid,
+        signalDbm = None,
+        detailsJson = PostgresTransactor.jsonDetails(
+          "attack_tag" -> row.attackTag,
+          "reconnect_window_ms" -> row.reconnectWindowMs
+        ),
+        rawJson = None
+      )
+    }
 
   override def insertWirelessAttackSequence(batchId: String, rows: List[WirelessAttackSequenceInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "attack_sequence",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = None,
-          channel = None,
-          primaryMac = None,
-          secondaryMac = None,
-          ssid = row.ssid,
-          signalDbm = None,
-          detailsJson = PostgresTransactor.jsonDetails(
-            "attack_chain" -> PostgresTransactor.parsedJson(row.attackChain),
-            "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "factor_breakdown" -> PostgresTransactor.parsedJson(row.factorBreakdown),
-            "explanation" -> PostgresTransactor.parsedJson(row.explanation)
-          ),
-          rawJson = row.rawJson
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "attack_sequence", attackSequenceAlertRows(rows))
+
+  private def attackSequenceAlertRows(rows: List[WirelessAttackSequenceInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = None,
+        channel = None,
+        primaryMac = None,
+        secondaryMac = None,
+        ssid = row.ssid,
+        signalDbm = None,
+        detailsJson = PostgresTransactor.jsonDetails(
+          "attack_chain" -> PostgresTransactor.parsedJson(row.attackChain),
+          "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+          "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+          "factor_breakdown" -> PostgresTransactor.parsedJson(row.factorBreakdown),
+          "explanation" -> PostgresTransactor.parsedJson(row.explanation)
+        ),
+        rawJson = row.rawJson
+      )
+    }
 
   override def insertWirelessSequenceAlert(batchId: String, rows: List[WirelessSequenceAlertInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "sequence_alert",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = None,
-          channel = None,
-          primaryMac = row.sourceMac,
-          secondaryMac = row.bssid,
-          ssid = row.ssid,
-          signalDbm = None,
-          detailsJson = PostgresTransactor.jsonDetails(
-            "session_key" -> row.sessionKey,
-            "attack_tag" -> row.attackTag,
-            "sequence" -> PostgresTransactor.parsedJson(row.sequence),
-            "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
-            "factor_breakdown" -> PostgresTransactor.parsedJson(row.factorBreakdown),
-            "explanation" -> PostgresTransactor.parsedJson(row.explanation)
-          ),
-          rawJson = row.rawJson
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "sequence_alert", sequenceAlertRows(rows))
+
+  private def sequenceAlertRows(rows: List[WirelessSequenceAlertInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = None,
+        channel = None,
+        primaryMac = row.sourceMac,
+        secondaryMac = row.bssid,
+        ssid = row.ssid,
+        signalDbm = None,
+        detailsJson = PostgresTransactor.jsonDetails(
+          "session_key" -> row.sessionKey,
+          "attack_tag" -> row.attackTag,
+          "sequence" -> PostgresTransactor.parsedJson(row.sequence),
+          "first_event_at" -> row.firstEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+          "last_event_at" -> row.lastEventAt.withOffsetSameInstant(ZoneOffset.UTC).toString,
+          "factor_breakdown" -> PostgresTransactor.parsedJson(row.factorBreakdown),
+          "explanation" -> PostgresTransactor.parsedJson(row.explanation)
+        ),
+        rawJson = row.rawJson
+      )
+    }
 
   override def insertWirelessHandshakeAlert(batchId: String, rows: List[WirelessHandshakeAlertInsert]): IO[Long] =
-    mergeWirelessAlerts(
-      batchId,
-      "handshake",
-      rows.map { row =>
-        WirelessAlertRow(
-          rowSequence = row.rowSequence,
-          detectedAt = row.detectedAt,
-          sensorId = row.sensorId,
-          locationId = row.locationId,
-          iface = Some(row.iface),
-          channel = None,
-          primaryMac = Some(row.clientMac),
-          secondaryMac = Some(row.bssid),
-          ssid = None,
-          signalDbm = row.signalDbm,
-          detailsJson = PostgresTransactor.jsonDetails("pmkid_sha256" -> row.pmkidSha256),
-          rawJson = None
-        )
-      }
-    )
+    mergeWirelessAlerts(batchId, "handshake", handshakeAlertRows(rows))
+
+  private def handshakeAlertRows(rows: List[WirelessHandshakeAlertInsert]): List[WirelessAlertRow] =
+    rows.map { row =>
+      WirelessAlertRow(
+        rowSequence = row.rowSequence,
+        detectedAt = row.detectedAt,
+        sensorId = row.sensorId,
+        locationId = row.locationId,
+        iface = Some(row.iface),
+        channel = None,
+        primaryMac = Some(row.clientMac),
+        secondaryMac = Some(row.bssid),
+        ssid = None,
+        signalDbm = row.signalDbm,
+        detailsJson = PostgresTransactor.jsonDetails("pmkid_sha256" -> row.pmkidSha256),
+        rawJson = None
+      )
+    }
 
   private def mergeWirelessAlerts(
     batchId: String,
     alertType: String,
     rows: List[WirelessAlertRow]
   ): IO[Long] =
+    withTransactionRetry(s"merge_wireless_$alertType")(conn =>
+      doMergeWirelessAlerts(conn, batchId, alertType, rows)
+    )
+
+  private def doMergeWirelessAlerts(
+    conn: Connection,
+    batchId: String,
+    alertType: String,
+    rows: List[WirelessAlertRow]
+  ): Long =
     val now = Timestamp.from(Instant.now())
-    withTransactionRetry(s"merge_wireless_$alertType") { conn =>
       val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
       try
         val params = rows.map { row =>
@@ -809,7 +811,6 @@ final class PostgresTransactor private (
         }
         executeBatch(stmt, params)
       finally stmt.close()
-    }
 
   private def bandForChannel(channel: Long): String =
     if channel >= 1 && channel <= 14 then "2.4GHz"
@@ -818,7 +819,14 @@ final class PostgresTransactor private (
 
   // ── wireless_client_inventory ─────────────────────────────────
   override def insertWirelessClientInventory(batchId: String, rows: List[WirelessClientInventoryInsert]): IO[Long] =
-    withTransactionRetry("insert_wireless_client_inventory") { conn =>
+    withTransactionRetry("insert_wireless_client_inventory")(conn =>
+      doInsertWirelessClientInventory(conn, rows)
+    )
+
+  private def doInsertWirelessClientInventory(
+    conn: Connection,
+    rows: List[WirelessClientInventoryInsert]
+  ): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessClientInventory)
       try
         val params = rows.map(r =>
@@ -841,11 +849,18 @@ final class PostgresTransactor private (
         )
         executeBatch(stmt, params)
       finally stmt.close()
-    }
 
   // ── wireless_probe_requests ───────────────────────────────────
   override def insertWirelessProbeRequests(batchId: String, rows: List[WirelessProbeRequestInsert]): IO[Long] =
-    withTransactionRetry("insert_wireless_probe_requests") { conn =>
+    withTransactionRetry("insert_wireless_probe_requests")(conn =>
+      doInsertWirelessProbeRequests(conn, batchId, rows)
+    )
+
+  private def doInsertWirelessProbeRequests(
+    conn: Connection,
+    batchId: String,
+    rows: List[WirelessProbeRequestInsert]
+  ): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessProbeRequests)
       try
         val params = rows.map(r =>
@@ -863,7 +878,6 @@ final class PostgresTransactor private (
         )
         executeBatch(stmt, params)
       finally stmt.close()
-    }
 
   def preflightCheck(requiredTables: List[String]): IO[List[String]] =
     if requiredTables.isEmpty then IO.pure(List.empty)

@@ -99,6 +99,16 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
     PostgresLoad("job-1", "batch-1", None, "proxy.events", payloadRef, "", "", 0)
 
   private final class FailingProxyEventSink(cause: Throwable) extends PostgresSink:
+    override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
+      use(new PostgresLoadTransaction:
+        override def insertChunk(
+          _batchId: String,
+          _target: PostgresSinkTarget,
+          _rows: PostgresRowSet,
+          _rowOffset: Long
+        ): IO[Long] = IO.raiseError(cause)
+      )
+
     override def insertProxyEvents(
       _batchId: String,
       _rows: List[ProxyEventInsert],

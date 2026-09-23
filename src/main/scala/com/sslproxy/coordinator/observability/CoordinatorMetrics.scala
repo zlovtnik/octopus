@@ -1,9 +1,11 @@
 package com.sslproxy.coordinator.observability
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.observability.StructuredLogger
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.core.instrument.{Counter, Gauge, MeterRegistry}
+import io.micrometer.core.instrument.binder.jvm.{JvmGcMetrics, JvmMemoryMetrics}
+import org.apache.kafka.common.{Metric, MetricName}
 
 import java.util.concurrent.{ConcurrentHashMap, atomic}
 import scala.jdk.CollectionConverters.*
@@ -12,6 +14,46 @@ import atomic.AtomicLong
 
 class CoordinatorMetrics(private val registry: MeterRegistry):
   import CoordinatorMetrics.{ProcessorLifecycleValues, log}
+
+  private val kafkaGauges = scala.collection.mutable.Map.empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], Gauge)]
+
+  def jvmMetrics: Resource[IO, Unit] =
+    Resource.make(IO {
+      val gc = new JvmGcMetrics()
+      new JvmMemoryMetrics().bindTo(registry)
+      gc.bindTo(registry)
+      gc
+    })(gc => IO { gc.close(); registry.close() }).map(_ => ())
+
+  def recordKafkaMetrics(group: String, values: Map[MetricName, Metric]): Unit = synchronized {
+    val samples = values.iterator.flatMap { case (name, metric) =>
+      val exported = name.name() match
+        case "records-lag" => Some("coordinator.kafka.partition.lag")
+        case "rebalance-total" => Some("coordinator.kafka.rebalances")
+        case _ => None
+      exported.flatMap { metricName =>
+        metric.metricValue() match
+          case number: java.lang.Number if java.lang.Double.isFinite(number.doubleValue()) =>
+            Some((group, metricName, Option(name.tags().get("topic")).getOrElse(""),
+              Option(name.tags().get("partition")).getOrElse("")) -> number.doubleValue())
+          case _ => None
+      }
+    }.toMap
+    kafkaGauges.keysIterator.filter(key => key._1 == group && !samples.contains(key)).toList.foreach { key =>
+      kafkaGauges.remove(key).foreach(value => registry.remove(value._2): Unit)
+    }
+    samples.foreachEntry { (key, sample) =>
+      val (holder, _) = kafkaGauges.getOrElseUpdate(key, {
+        val value = new atomic.AtomicReference[java.lang.Double](sample)
+        val gauge = Gauge.builder(key._2, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+          .tags("group", key._1, "topic", key._3, "partition", key._4).register(registry)
+        (value, gauge)
+      })
+      holder.set(sample)
+    }
+  }
+
+  def clearKafkaMetrics(group: String): Unit = recordKafkaMetrics(group, Map.empty)
 
   private val pendingLedgerGauge: AtomicLong = new AtomicLong(0)
   private val backpressureActiveGauge: AtomicLong = new AtomicLong(0)

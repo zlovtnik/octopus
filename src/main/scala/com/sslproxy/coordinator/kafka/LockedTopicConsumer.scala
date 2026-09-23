@@ -1,10 +1,11 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{BrokerConsumerContract, BrokerRecordMetadata}
-import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing, StructuredLogger}
 import com.sslproxy.coordinator.util.{ErrorSanitizer, Sha256Utils}
 import fs2.Stream
 import fs2.kafka.{
@@ -20,6 +21,7 @@ import io.circe.Json
 import io.opentelemetry.api.trace.SpanKind
 import org.apache.kafka.common.TopicPartition
 
+import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
 
 private[kafka] final case class LockedBrokerRecord[A](
@@ -44,6 +46,7 @@ private[kafka] object LockedTopicConsumer:
     topic: String,
     partitionConcurrency: Int,
     awaitConsumerPermit: IO[Unit],
+    metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String],
     decode: String => Either[Throwable, A]
   )(
@@ -58,12 +61,17 @@ private[kafka] object LockedTopicConsumer:
               .evalMap(partitions => IO.fromEither(validateAssignments(topic, partitions)))
               .drain
 
-            val records = consumer.partitionedStream.map { partitionStream =>
-              partitionStream
-                .groupWithin(cfg.lockedBatchSize, cfg.lockedBatchWindowMs.millis)
+            val records = Stream.eval(Semaphore[IO](partitionConcurrency.toLong)).flatMap { permits =>
+              consumer.partitionedStream.map { partitionStream =>
+                BoundedBatching.groupWithin(
+                  partitionStream.evalTap(_ => awaitConsumerPermit),
+                  cfg.lockedBatchSize,
+                  cfg.lockedBatchMaxBytes,
+                  cfg.lockedBatchWindowMs.millis
+                )(record => record.record.serializedValueSize.getOrElse(utf8Bytes(Option(record.record.value).getOrElse(""))).toLong)
                 .evalMap { committables =>
                   awaitConsumerPermit *>
-                    processBatch(
+                    permits.permit.use(_ => processBatch(
                       contract,
                       groupId,
                       topic,
@@ -71,12 +79,22 @@ private[kafka] object LockedTopicConsumer:
                       producer,
                       cfg.dlqSuffix,
                       decode,
-                      process
-                    )
+                      process,
+                      cfg.lockedBatchMaxBytes
+                    ))
                 }
-            }.parJoin(partitionConcurrency)
+              // Partition streams live until revocation. Capping their join starves
+              // every partition beyond the cap; bound batch work with permits instead.
+              }.parJoinUnbounded
+            }
 
-            records.concurrently(assignments)
+            val lag = Stream.repeatEval(
+              consumer.metrics.flatMap(values => IO(metrics.recordKafkaMetrics(groupId, values)))
+                .timeout(5.seconds)
+                .handleErrorWith(error => IO(log.warn("consumer_metrics", "group" -> groupId,
+                  "error" -> ErrorSanitizer.message(error))))
+            ).metered(10.seconds).onFinalize(IO(metrics.clearKafkaMetrics(groupId)))
+            records.concurrently(assignments).concurrently(lag)
           }
         }
     }
@@ -101,11 +119,27 @@ private[kafka] object LockedTopicConsumer:
     producer: KafkaProducer[IO, String, String],
     dlqSuffix: String,
     decode: String => Either[Throwable, A],
-    process: List[LockedBrokerRecord[A]] => IO[Unit]
+    process: List[LockedBrokerRecord[A]] => IO[Unit],
+    maxBatchBytes: Int
+  ): IO[Unit] =
+    splitByBytes(committables, maxBatchBytes).traverse_(batch =>
+      processBoundedBatch(contract, groupId, expectedTopic, batch, producer, dlqSuffix, decode, process, maxBatchBytes)
+    )
+
+  private def processBoundedBatch[A](
+    contract: BrokerConsumerContract,
+    groupId: String,
+    expectedTopic: String,
+    committables: List[CommittableConsumerRecord[IO, String, String]],
+    producer: KafkaProducer[IO, String, String],
+    dlqSuffix: String,
+    decode: String => Either[Throwable, A],
+    process: List[LockedBrokerRecord[A]] => IO[Unit],
+    maxBatchBytes: Int
   ): IO[Unit] =
     for
       prepared <- committables.traverse { committable =>
-        prepareRecord(contract, groupId, expectedTopic, committable.record, decode).attempt.flatMap {
+        prepareRecord(contract, groupId, expectedTopic, committable.record, decode, maxBatchBytes).attempt.flatMap {
           case Right(locked) => IO.pure(Some(locked))
           case Left(error: LockedTopicInvariantViolation) => IO.raiseError(error)
           case Left(error) =>
@@ -131,12 +165,43 @@ private[kafka] object LockedTopicConsumer:
       }
     yield ()
 
+  private[kafka] def splitByBytes[A](
+    records: List[A],
+    maxBytes: Int,
+    sizeOf: A => Int
+  ): List[List[A]] =
+    require(maxBytes > 0, "maxBytes must be positive")
+    val batches = List.newBuilder[List[A]]
+    val current = List.newBuilder[A]
+    var currentBytes = 0L
+    var currentCount = 0
+    records.foreach { record =>
+      val recordBytes = sizeOf(record).toLong
+      if currentCount > 0 && currentBytes + recordBytes > maxBytes then
+        batches += current.result()
+        current.clear()
+        currentBytes = 0L
+        currentCount = 0
+      current += record
+      currentBytes += recordBytes
+      currentCount += 1
+    }
+    if currentCount > 0 then batches += current.result()
+    batches.result()
+
+  private def splitByBytes(
+    records: List[CommittableConsumerRecord[IO, String, String]],
+    maxBytes: Int
+  ): List[List[CommittableConsumerRecord[IO, String, String]]] =
+    splitByBytes(records, maxBytes, record => utf8Bytes(Option(record.record.value).getOrElse("")))
+
   private def prepareRecord[A](
     contract: BrokerConsumerContract,
     groupId: String,
     expectedTopic: String,
     record: ConsumerRecord[String, String],
-    decode: String => Either[Throwable, A]
+    decode: String => Either[Throwable, A],
+    maxBatchBytes: Int
   ): IO[LockedBrokerRecord[A]] =
     for
       _ <- IO.raiseWhen(record.topic != expectedTopic)(
@@ -148,6 +213,11 @@ private[kafka] object LockedTopicConsumer:
         IllegalArgumentException(
           s"tombstone is not valid for group=$groupId topic=${record.topic} " +
             s"partition=${record.partition} offset=${record.offset}"
+        )
+      )
+      _ <- IO.raiseWhen(utf8Bytes(rawValue) > maxBatchBytes)(
+        IllegalArgumentException(
+          s"record exceeds kafka.locked-batch-max-bytes=$maxBatchBytes"
         )
       )
       decoded <- IO.fromEither(decode(rawValue))
@@ -172,6 +242,9 @@ private[kafka] object LockedTopicConsumer:
         )
       )
     yield LockedBrokerRecord(record, decoded, metadata)
+
+  private def utf8Bytes(value: String): Int =
+    value.getBytes(StandardCharsets.UTF_8).length
 
   private[kafka] def parkNonRetriable(
     producer: KafkaProducer[IO, String, String],

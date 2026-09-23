@@ -2,12 +2,23 @@ package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
 
+trait PostgresLoadTransaction:
+  def insertChunk(
+    batchId: String,
+    target: PostgresSinkTarget,
+    rows: PostgresRowSet,
+    rowOffset: Long
+  ): IO[Long]
+
 /** PostgreSQL sink trait — 10 insert methods. */
 trait PostgresSink:
+  def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A]
+
   def insertProxyEvents(
     batchId: String,
     rows: List[ProxyEventInsert],
-    blockedRows: List[BlockedEventInsert]
+    blockedRows: List[BlockedEventInsert],
+    rowOffset: Long = 0L
   ): IO[Long]
 
   def insertProxyPayloadAudit(batchId: String, rows: List[ProxyPayloadAuditInsert]): IO[Long]

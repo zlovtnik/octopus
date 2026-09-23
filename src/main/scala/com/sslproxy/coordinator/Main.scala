@@ -91,7 +91,8 @@ object Main extends IOApp.Simple:
                         PostgresTransformService,
                         oldTx,
                         PostgresClock,
-                        payloadLookup
+                        payloadLookup,
+                        insertChunkBytes = cfg.postgres.loadChunkMaxBytes
                       )
                     val ingestionStore = new PostgresIngestionStore(postgresRepo)
                     val outboxStore = new PostgresOutboxStore(postgresRepo)
@@ -223,12 +224,12 @@ object Main extends IOApp.Simple:
                                 handler,
                                 kafka.producer,
                                 dbSemaphore,
-                                backpressureService
+                                metrics
                               )
                               val resultStream = PostgresResultStream.run(
                                 cfg.kafka,
                                 resultStore,
-                                backpressureService,
+                                metrics,
                                 kafka.producer
                               )
                               val heartbeatStream = WirelessHeartbeatStream.run(
@@ -381,7 +382,7 @@ object Main extends IOApp.Simple:
         "postgres_database" -> cfg.postgres.database
       )
 
-      appResource.use(_.joinWithNever)
+      metrics.jvmMetrics.use(_ => appResource.use(_.joinWithNever))
 
   private[coordinator] def dbWorkerPermits(poolSize: Int, healthcheckReserve: Int): Long =
     // Schema introspection and health checks use the transactor directly.

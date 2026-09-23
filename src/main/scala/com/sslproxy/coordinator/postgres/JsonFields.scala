@@ -136,11 +136,18 @@ object JsonFields:
     else Some(row.noSpaces)
 
   def rowSequence(index: Int, context: String): Long =
+    rowSequence(index, 0L, context)
+
+  def rowSequence(index: Int, rowOffset: Long, context: String): Long =
     if index < 0 then
       throw new IllegalArgumentException(
         s"Negative row sequence index $index in $context"
       )
-    index.toLong
+    if rowOffset < 0 then
+      throw new IllegalArgumentException(
+        s"Negative row sequence offset $rowOffset in $context"
+      )
+    Math.addExact(rowOffset, index.toLong)
 
   private def parseTimestamp(value: String): Option[OffsetDateTime] =
     Try(OffsetDateTime.parse(value, timestampParser)).toOption

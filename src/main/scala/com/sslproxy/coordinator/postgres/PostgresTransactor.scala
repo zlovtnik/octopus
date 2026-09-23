@@ -26,6 +26,7 @@ final class PostgresTransactor private (
   private val retryMaxAttempts: Int = 3
   private val retryBaseDelay: FiniteDuration = 200.millis
   private val networkTimeoutExecutor: java.util.concurrent.Executor = command => command.run()
+  private final case class TransactionConnection(connection: Connection, previousNetworkTimeout: Int)
 
   private def withConnection[A](f: Connection => A): IO[A] =
     IO.blocking {
@@ -36,6 +37,75 @@ final class PostgresTransactor private (
 
   private[postgres] def withTransaction[A](f: Connection => A): IO[A] =
     transactionAttempt(_ => ())(f)
+
+  override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
+    withTransactionIO { conn =>
+      use(new PostgresLoadTransaction:
+        override def insertChunk(
+          batchId: String,
+          target: PostgresSinkTarget,
+          rows: PostgresRowSet,
+          rowOffset: Long
+        ): IO[Long] = IO.blocking(doInsertChunk(conn, batchId, target, rows, rowOffset))
+      )
+    }
+
+  private def withTransactionIO[A](use: Connection => IO[A]): IO[A] =
+    acquireTransactionConnection.bracketCase(state => use(state.connection)) {
+      case (state, cats.effect.kernel.Outcome.Succeeded(_)) =>
+        IO.blocking(state.connection.commit()).attempt.flatMap {
+          case Right(_) => closeTransactionConnection(state)
+          case Left(error) =>
+            suppressCleanup(error)(state.connection.rollback()) *>
+              suppressClose(error)(state) *>
+              IO.raiseError(error)
+        }
+      case (state, cats.effect.kernel.Outcome.Errored(error)) =>
+        suppressCleanup(error)(state.connection.rollback()) *> suppressClose(error)(state)
+      case (state, cats.effect.kernel.Outcome.Canceled()) =>
+        IO.blocking(state.connection.rollback()).attempt.void *> closeTransactionConnection(state).attempt.void
+    }
+
+  private def acquireTransactionConnection: IO[TransactionConnection] =
+    IO.blocking {
+      val conn = ds.getConnection
+      try
+        val previousTimeout = conn.getNetworkTimeout
+        conn.setNetworkTimeout(networkTimeoutExecutor, config.networkTimeoutSecs * 1000)
+        conn.setAutoCommit(false)
+        scala.util.Using.resource(conn.prepareStatement(BatchSinkSql.SetLocalSearchPath)) { setting =>
+          setting.executeQuery().close()
+        }
+        scala.util.Using.resource(conn.prepareStatement(BatchSinkSql.SetLocalStatementTimeout)) { setting =>
+          setting.setString(1, s"${config.statementTimeoutSecs * 1000}ms")
+          setting.executeQuery().close()
+        }
+        TransactionConnection(conn, previousTimeout)
+      catch
+        case scala.util.control.NonFatal(error) =>
+          try conn.close()
+          catch case scala.util.control.NonFatal(closeError) => error.addSuppressed(closeError)
+          throw error
+    }
+
+  private def closeTransactionConnection(state: TransactionConnection): IO[Unit] =
+    IO.blocking {
+      if !state.connection.isClosed then
+        state.connection.setNetworkTimeout(networkTimeoutExecutor, state.previousNetworkTimeout)
+      state.connection.close()
+    }
+
+  private def suppressCleanup(error: Throwable)(cleanup: => Unit): IO[Unit] =
+    IO.blocking {
+      try cleanup
+      catch
+        case scala.util.control.NonFatal(cleanupError) if cleanupError ne error => error.addSuppressed(cleanupError)
+    }
+
+  private def suppressClose(error: Throwable)(state: TransactionConnection): IO[Unit] =
+    closeTransactionConnection(state).handleError(cleanupError =>
+      if cleanupError ne error then error.addSuppressed(cleanupError)
+    )
 
   private def transactionAttempt[A](acquired: Long => Unit)(f: Connection => A): IO[A] =
     IO.blocking {
@@ -165,9 +235,13 @@ final class PostgresTransactor private (
       for (value, idx) <- row.zipWithIndex do setParam(stmt, idx + 1, value)
       stmt.addBatch()
       count += 1
-      if count % batchSize == 0 then PostgresTransactor.validateBatchResults(stmt.executeBatch())
+      if count % batchSize == 0 then
+        PostgresTransactor.validateBatchResults(stmt.executeBatch())
+        stmt.clearBatch()
     val remainder = (count % batchSize).toInt
-    if remainder != 0 then PostgresTransactor.validateBatchResults(stmt.executeBatch())
+    if remainder != 0 then
+      PostgresTransactor.validateBatchResults(stmt.executeBatch())
+      stmt.clearBatch()
     rows.size.toLong
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
@@ -192,13 +266,59 @@ final class PostgresTransactor private (
   private def optStr(v: Option[String]): String = v.orNull
   private def optDbl(v: Option[Double]): java.lang.Double = v.map(java.lang.Double.valueOf).orNull
 
+  private def doInsertChunk(
+    conn: Connection,
+    batchId: String,
+    target: PostgresSinkTarget,
+    rows: PostgresRowSet,
+    rowOffset: Long
+  ): Long =
+    target match
+      case PostgresSinkTarget.ProxyEvents =>
+        doInsertProxyEvents(conn, batchId, rows.proxyEvents, rows.blockedEvents, rowOffset)
+      case PostgresSinkTarget.ProxyPayloadAudit =>
+        doInsertProxyPayloadAudit(conn, rows.proxyPayloadAudit)
+      case PostgresSinkTarget.WirelessAuditFrames =>
+        doInsertWirelessAuditFrames(conn, batchId, rows.wirelessAuditFrames)
+      case PostgresSinkTarget.WirelessBandwidth =>
+        doInsertWirelessBandwidth(conn, batchId, rows.wirelessBandwidth)
+      case PostgresSinkTarget.WirelessRogueAp =>
+        doMergeWirelessAlerts(conn, batchId, "rogue_ap", rogueApAlertRows(rows.wirelessRogueAp))
+      case PostgresSinkTarget.WirelessDeauthFlood =>
+        doMergeWirelessAlerts(conn, batchId, "deauth_flood", deauthFloodAlertRows(rows.wirelessDeauthFlood))
+      case PostgresSinkTarget.WirelessSignalAnomaly =>
+        doMergeWirelessAlerts(conn, batchId, "signal_anomaly", signalAnomalyAlertRows(rows.wirelessSignalAnomaly))
+      case PostgresSinkTarget.WirelessPmfAttack =>
+        doMergeWirelessAlerts(conn, batchId, "pmf_attack", pmfAttackAlertRows(rows.wirelessPmfAttack))
+      case PostgresSinkTarget.WirelessClientInventory =>
+        doInsertWirelessClientInventory(conn, rows.wirelessClientInventory)
+      case PostgresSinkTarget.WirelessProbeRequests =>
+        doInsertWirelessProbeRequests(conn, batchId, rows.wirelessProbeRequests)
+      case PostgresSinkTarget.WirelessAttackSequence =>
+        doMergeWirelessAlerts(conn, batchId, "attack_sequence", attackSequenceAlertRows(rows.wirelessAttackSequence))
+      case PostgresSinkTarget.WirelessSequenceAlert =>
+        doMergeWirelessAlerts(conn, batchId, "sequence_alert", sequenceAlertRows(rows.wirelessSequenceAlert))
+      case PostgresSinkTarget.WirelessHandshakeAlert =>
+        doMergeWirelessAlerts(conn, batchId, "handshake", handshakeAlertRows(rows.wirelessHandshakeAlert))
+
   // ── proxy_events ──────────────────────────────────────────────
   override def insertProxyEvents(
     batchId: String,
     rows: List[ProxyEventInsert],
-    blockedRows: List[BlockedEventInsert]
+    blockedRows: List[BlockedEventInsert],
+    rowOffset: Long
   ): IO[Long] =
-    withTransactionRetry("insert_proxy_events") { conn =>
+    withTransactionRetry("insert_proxy_events")(conn =>
+      doInsertProxyEvents(conn, batchId, rows, blockedRows, rowOffset)
+    )
+
+  private def doInsertProxyEvents(
+    conn: Connection,
+    batchId: String,
+    rows: List[ProxyEventInsert],
+    blockedRows: List[BlockedEventInsert],
+    rowOffset: Long
+  ): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
       try
         val allRows = rows.zipWithIndex.map { case (r, idx) =>
@@ -219,7 +339,7 @@ final class PostgresTransactor private (
             optStr(r.parentEventId),
             r.rawJson,
             batchId,
-            idx + 1L,
+            rowOffset + idx + 1L,
             ts(r.eventTime),
             optStr(r.wgPubkey),
             optStr(r.deviceId),
@@ -237,7 +357,6 @@ final class PostgresTransactor private (
         doInsertBlockedHostRollups(conn, blockedRows): Unit
         count
       finally stmt.close()
-    }
 
   // ── proxy_blocked_host_rollups ────────────────────────────────
   private def doInsertBlockedHostRollups(conn: Connection, rows: List[BlockedEventInsert]): Long =
@@ -273,7 +392,9 @@ final class PostgresTransactor private (
 
   // ── proxy_payload_audit ───────────────────────────────────────
   override def insertProxyPayloadAudit(batchId: String, rows: List[ProxyPayloadAuditInsert]): IO[Long] =
-    withTransactionRetry("insert_proxy_payload_audit") { conn =>
+    withTransactionRetry("insert_proxy_payload_audit")(conn => doInsertProxyPayloadAudit(conn, rows))
+
+  private def doInsertProxyPayloadAudit(conn: Connection, rows: List[ProxyPayloadAuditInsert]): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyPayloadAudit)
       try
         val params = rows.map(r =>
@@ -296,14 +417,19 @@ final class PostgresTransactor private (
         )
         executeBatch(stmt, params)
       finally stmt.close()
-    }
 
   // ── wireless_audit_frames + sensor upsert ─────────────────────
   override def insertWirelessAuditFrames(batchId: String, rows: List[WirelessAuditFrameInsert]): IO[Long] =
     if rows.isEmpty then IO.pure(0L)
-    else
-      withTransactionRetry("insert_wireless_audit_frames") { conn =>
+    else withTransactionRetry("insert_wireless_audit_frames")(conn => doInsertWirelessAuditFrames(conn, batchId, rows))
 
+  private def doInsertWirelessAuditFrames(
+    conn: Connection,
+    batchId: String,
+    rows: List[WirelessAuditFrameInsert]
+  ): Long =
+    if rows.isEmpty then 0L
+    else
         upsertWirelessSensors(conn, rows)
 
         val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessAuditFrames)
@@ -349,7 +475,6 @@ final class PostgresTransactor private (
           )
           executeBatch(stmt, params)
         finally stmt.close()
-      }
 
   private def upsertWirelessSensors(conn: Connection, rows: List[WirelessAuditFrameInsert]): Unit =
     val sensors = rows.foldLeft(Map.empty[String, WirelessAuditFrameInsert]) { (acc, row) =>
@@ -376,7 +501,13 @@ final class PostgresTransactor private (
 
   // ── wireless_bandwidth_windows + alert merge ──────────────────
   override def insertWirelessBandwidth(batchId: String, rows: List[WirelessBandwidthInsert]): IO[Long] =
-    withTransactionRetry("insert_wireless_bandwidth") { conn =>
+    withTransactionRetry("insert_wireless_bandwidth")(conn => doInsertWirelessBandwidth(conn, batchId, rows))
+
+  private def doInsertWirelessBandwidth(
+    conn: Connection,
+    batchId: String,
+    rows: List[WirelessBandwidthInsert]
+  ): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessBandwidthWindows)
       try
         val params = rows.map(r =>
@@ -416,7 +547,6 @@ final class PostgresTransactor private (
         mergeBandwidthAlerts(conn, batchId, rows): Unit
         inserted
       finally stmt.close()
-    }
 
   private def mergeBandwidthAlerts(conn: Connection, batchId: String, rows: List[WirelessBandwidthInsert]): Long =
     val exceeded = rows.filter(_.thresholdExceeded)

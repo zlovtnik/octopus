@@ -151,8 +151,11 @@ object KafkaComponents:
       .withEnableAutoCommit(false)
       .withIsolationLevel(IsolationLevel.ReadCommitted)
       .withMaxPollRecords(cfg.maxPollRecords)
+      .withMaxPrefetchBatches(1)
       .withProperties(
         "allow.auto.create.topics" -> "false",
+        "fetch.max.bytes" -> cfg.lockedBatchMaxBytes.toString,
+        "max.partition.fetch.bytes" -> (1024 * 1024).min(cfg.lockedBatchMaxBytes).toString,
         "session.timeout.ms" -> "30000",
         "heartbeat.interval.ms" -> "3000"
       )

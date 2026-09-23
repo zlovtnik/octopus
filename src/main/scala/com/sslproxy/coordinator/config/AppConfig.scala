@@ -57,7 +57,8 @@ final case class PostgresConfig(
   sslClientKeyStoreType: String = "PKCS12",
   localDevAllowPublicKeyRetrieval: Boolean = false,
   manifestSha256: String = "",
-  networkTimeoutSecs: Int = 60
+  networkTimeoutSecs: Int = 60,
+  loadChunkMaxBytes: Int = 4 * 1024 * 1024
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -79,7 +80,8 @@ final case class KafkaCfg(
   lockedBatchSize: Int,
   lockedBatchWindowMs: Long,
   topicPartitions: Int,
-  topicReplicationFactor: Int
+  topicReplicationFactor: Int,
+  lockedBatchMaxBytes: Int = 8 * 1024 * 1024
 ) derives ConfigReader
 
 final case class CronConfig(
@@ -363,6 +365,9 @@ object AppConfig:
       Option.when(config.lockedBatchWindowMs <= 0L)(
         "kafka.locked-batch-window-ms must be positive"
       ),
+      Option.when(config.lockedBatchMaxBytes <= 0)(
+        "kafka.locked-batch-max-bytes must be positive"
+      ),
       Option.when(
         config.topicReplicationFactor < 1 || config.topicReplicationFactor > Short.MaxValue
       )(
@@ -443,6 +448,9 @@ object AppConfig:
       ),
       Option.when(config.networkTimeoutSecs <= config.statementTimeoutSecs)(
         "postgres.network-timeout-secs must exceed postgres.statement-timeout-secs"
+      ),
+      Option.when(config.loadChunkMaxBytes <= 0)(
+        "postgres.load-chunk-max-bytes must be positive"
       )
     ).flatten
 

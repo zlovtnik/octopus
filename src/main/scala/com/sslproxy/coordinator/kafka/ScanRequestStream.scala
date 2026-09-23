@@ -32,6 +32,7 @@ object ScanRequestStream:
       cfg.scanTopic,
       cfg.scanConsumersCount,
       backpressure.awaitConsumerPermit,
+      metrics,
       producer,
       ScanRequestRecord.decodeWire
     ) { lockedRecords =>

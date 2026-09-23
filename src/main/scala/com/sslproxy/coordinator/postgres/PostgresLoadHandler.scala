@@ -2,16 +2,23 @@ package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
 import com.sslproxy.coordinator.observability.StructuredLogger
+import fs2.{Chunk, Stream}
 import io.circe.Json
+
+import java.nio.charset.StandardCharsets
+import scala.collection.BufferedIterator
 
 class PostgresLoadHandler(
   payloadResolver: PostgresPayloadResolver,
   transformService: PostgresTransformService.type,
   sink: PostgresSink,
   clock: PostgresClock.type,
-  payloadLookup: String => IO[Option[String]]
+  payloadLookup: String => IO[Option[String]],
+  insertChunkRows: Int = 500,
+  insertChunkBytes: Int = 4 * 1024 * 1024
 ):
   import PostgresLoadHandler.log
+  require(insertChunkRows > 0 && insertChunkBytes > 0, "insert chunk bounds must be positive")
 
   def handle(load: PostgresLoad): IO[PostgresResult] =
     val finishedAt = clock.nowRfc3339
@@ -20,17 +27,15 @@ class PostgresLoadHandler(
       _ <- validateLoad(resolved)
       target <- resolveTarget(resolved)
       payload <- resolvePayload(resolved)
-      rows <- parseRows(target, payload)
       _ <- IO(
         log.info(
           "postgres_load",
-          "status" -> "parsed",
+          "status" -> "streaming",
           "batch_id" -> load.batchId,
-          "stream_name" -> load.streamName,
-          "input_rows" -> rows.length.toString
+          "stream_name" -> load.streamName
         )
       )
-      result <- transformAndInsert(resolved, target, rows)
+      result <- transformAndInsert(resolved, target, payload)
       _ <- result match
         case Right(rowCount) =>
           IO(
@@ -92,59 +97,75 @@ class PostgresLoadHandler(
       }
     else IO.blocking(payloadResolver.resolvePayload(ref))
 
-  private def parseRows(target: PostgresSinkTarget, payload: String): IO[List[Json]] =
-    IO.blocking(payloadResolver.payloadRows(target, payload))
-
   private def transformAndInsert(
     load: PostgresLoad,
     target: PostgresSinkTarget,
-    rows: List[Json]
+    payload: String
   ): IO[Either[PostgresResult, Long]] =
-    val transformed = transformService.transform(target, rows)
-    val rowCount = transformed.inputRowCount(target)
-    if rowCount == 0 then IO.pure(Right(0L))
-    else
-      val insertIO: IO[Long] = target match
-        case PostgresSinkTarget.ProxyEvents =>
-          sink.insertProxyEvents(load.batchId, transformed.proxyEvents, transformed.blockedEvents)
-        case PostgresSinkTarget.ProxyPayloadAudit =>
-          sink.insertProxyPayloadAudit(load.batchId, transformed.proxyPayloadAudit)
-        case PostgresSinkTarget.WirelessAuditFrames =>
-          sink.insertWirelessAuditFrames(load.batchId, transformed.wirelessAuditFrames)
-        case PostgresSinkTarget.WirelessBandwidth =>
-          sink.insertWirelessBandwidth(load.batchId, transformed.wirelessBandwidth)
-        case PostgresSinkTarget.WirelessRogueAp =>
-          sink.insertWirelessRogueAp(load.batchId, transformed.wirelessRogueAp)
-        case PostgresSinkTarget.WirelessDeauthFlood =>
-          sink.insertWirelessDeauthFlood(load.batchId, transformed.wirelessDeauthFlood)
-        case PostgresSinkTarget.WirelessSignalAnomaly =>
-          sink.insertWirelessSignalAnomaly(load.batchId, transformed.wirelessSignalAnomaly)
-        case PostgresSinkTarget.WirelessPmfAttack =>
-          sink.insertWirelessPmfAttack(load.batchId, transformed.wirelessPmfAttack)
-        case PostgresSinkTarget.WirelessClientInventory =>
-          sink.insertWirelessClientInventory(load.batchId, transformed.wirelessClientInventory)
-        case PostgresSinkTarget.WirelessProbeRequests =>
-          sink.insertWirelessProbeRequests(load.batchId, transformed.wirelessProbeRequests)
-        case PostgresSinkTarget.WirelessAttackSequence =>
-          sink.insertWirelessAttackSequence(load.batchId, transformed.wirelessAttackSequence)
-        case PostgresSinkTarget.WirelessSequenceAlert =>
-          sink.insertWirelessSequenceAlert(load.batchId, transformed.wirelessSequenceAlert)
-        case PostgresSinkTarget.WirelessHandshakeAlert =>
-          sink.insertWirelessHandshakeAlert(load.batchId, transformed.wirelessHandshakeAlert)
+    val insertIO = sink.withLoadTransaction { transaction =>
+      Stream
+        .bracket(IO.blocking(StreamingPayloadRows.open(target, payload, insertChunkBytes)))(rows =>
+          IO.blocking(rows.close())
+        )
+        .flatMap(rows => rowChunks(rows.buffered))
+        .evalMapAccumulate(0L) { case (rowOffset, chunk) =>
+          val rows = chunk.toList
+          insertChunk(transaction, load, target, rows, rowOffset)
+            .map(inserted => (rowOffset + rows.size, inserted))
+        }
+        .map(_._2)
+        .compile
+        .fold(0L)(_ + _)
+    }
 
-      insertIO.attempt.map {
-        case Right(count) => Right(count)
-        case Left(err) =>
-          log.error(
-            "postgres_load",
-            err,
-            "status" -> "insert_failed",
-            "batch_id" -> load.batchId,
-            "stream_name" -> load.streamName,
-            "error_class" -> classifyError(err).wireValue
-          )
-          Left(buildFailureResult(load, err))
+    insertIO.attempt.map {
+      case Right(count) => Right(count)
+      case Left(err) =>
+        log.error(
+          "postgres_load",
+          err,
+          "status" -> "insert_failed",
+          "batch_id" -> load.batchId,
+          "stream_name" -> load.streamName,
+          "error_class" -> classifyError(err).wireValue
+        )
+        Left(buildFailureResult(load, err))
+    }
+
+  private def insertChunk(
+    transaction: PostgresLoadTransaction,
+    load: PostgresLoad,
+    target: PostgresSinkTarget,
+    rows: List[Json],
+    rowOffset: Long
+  ): IO[Long] =
+    val transformed = transformService.transform(target, rows, rowOffset)
+    transaction.insertChunk(load.batchId, target, transformed, rowOffset)
+
+  private def rowChunks(rows: BufferedIterator[Json]): Stream[IO, Chunk[Json]] =
+    Stream.unfoldEval(rows) { iterator =>
+      IO.blocking {
+        if !iterator.hasNext then None
+        else
+          val builder = Vector.newBuilder[Json]
+          var count = 0
+          var bytes = 0L
+          var full = false
+          while iterator.hasNext && count < insertChunkRows && !full do
+            val row = iterator.head
+            val rowBytes = row.noSpaces.getBytes(StandardCharsets.UTF_8).length
+            if rowBytes > insertChunkBytes then
+              throw IllegalArgumentException(
+                s"single PostgreSQL row is $rowBytes bytes; limit is $insertChunkBytes"
+              )
+            if count > 0 && bytes + rowBytes > insertChunkBytes then full = true
+            else
+              builder += iterator.next()
+              count += 1
+              bytes += rowBytes
+          Some((Chunk.from(builder.result()), iterator))
       }
+    }
 
   private def buildFailureResult(load: PostgresLoad, err: Throwable): PostgresResult =
     PostgresResult.failure(

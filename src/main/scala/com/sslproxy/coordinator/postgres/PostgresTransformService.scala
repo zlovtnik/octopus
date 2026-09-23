@@ -17,40 +17,41 @@ object PostgresTransformService:
   private val MaxRollupRiskScore = 999999.9999d
   private val ProxyClassifications = Set("ads_tracker", "analytics", "cdn", "essential_api", "auth", "unknown")
 
-  def transform(target: PostgresSinkTarget, rows: List[Json]): PostgresRowSet =
+  def transform(target: PostgresSinkTarget, rows: List[Json], rowOffset: Long = 0L): PostgresRowSet =
     target match
-      case PostgresSinkTarget.ProxyEvents => transformProxyRows(rows)
+      case PostgresSinkTarget.ProxyEvents => transformProxyRows(rows, rowOffset)
       case PostgresSinkTarget.ProxyPayloadAudit =>
         PostgresRowSet.empty.copy(proxyPayloadAudit = transformProxyPayloadAudit(rows))
       case PostgresSinkTarget.WirelessAuditFrames =>
-        PostgresRowSet.empty.copy(wirelessAuditFrames = transformWirelessAudit(rows))
+        PostgresRowSet.empty.copy(wirelessAuditFrames = transformWirelessAudit(rows, rowOffset))
       case PostgresSinkTarget.WirelessBandwidth =>
-        PostgresRowSet.empty.copy(wirelessBandwidth = transformWirelessBandwidth(rows))
-      case PostgresSinkTarget.WirelessRogueAp => PostgresRowSet.empty.copy(wirelessRogueAp = transformRogueAp(rows))
+        PostgresRowSet.empty.copy(wirelessBandwidth = transformWirelessBandwidth(rows, rowOffset))
+      case PostgresSinkTarget.WirelessRogueAp =>
+        PostgresRowSet.empty.copy(wirelessRogueAp = transformRogueAp(rows, rowOffset))
       case PostgresSinkTarget.WirelessDeauthFlood =>
-        PostgresRowSet.empty.copy(wirelessDeauthFlood = transformDeauthFlood(rows))
+        PostgresRowSet.empty.copy(wirelessDeauthFlood = transformDeauthFlood(rows, rowOffset))
       case PostgresSinkTarget.WirelessSignalAnomaly =>
-        PostgresRowSet.empty.copy(wirelessSignalAnomaly = transformSignalAnomaly(rows))
+        PostgresRowSet.empty.copy(wirelessSignalAnomaly = transformSignalAnomaly(rows, rowOffset))
       case PostgresSinkTarget.WirelessPmfAttack =>
-        PostgresRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows))
+        PostgresRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows, rowOffset))
       case PostgresSinkTarget.WirelessClientInventory =>
         PostgresRowSet.empty.copy(wirelessClientInventory = transformClientInventory(rows))
       case PostgresSinkTarget.WirelessProbeRequests =>
-        PostgresRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows))
+        PostgresRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows, rowOffset))
       case PostgresSinkTarget.WirelessAttackSequence =>
-        PostgresRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows))
+        PostgresRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows, rowOffset))
       case PostgresSinkTarget.WirelessSequenceAlert =>
-        PostgresRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows))
+        PostgresRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows, rowOffset))
       case PostgresSinkTarget.WirelessHandshakeAlert =>
-        PostgresRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows))
+        PostgresRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows, rowOffset))
 
-  private def transformProxyRows(rows: List[Json]): PostgresRowSet =
+  private def transformProxyRows(rows: List[Json], rowOffset: Long): PostgresRowSet =
     val proxyRows = List.newBuilder[ProxyEventInsert]
     val blockedRows = List.newBuilder[BlockedEventInsert]
     rows.zipWithIndex.foreach { case (row, index) =>
       val proxyRow = proxyEvent(row)
       proxyRows += proxyRow
-      blockedEvent(index, row, proxyRow).foreach(blockedRows += _)
+      blockedEvent(index, rowOffset, row, proxyRow).foreach(blockedRows += _)
     }
     PostgresRowSet.empty.copy(
       proxyEvents = proxyRows.result(),
@@ -118,7 +119,7 @@ object PostgresTransformService:
       )
     }
 
-  private def blockedEvent(index: Int, row: Json, proxyRow: ProxyEventInsert): Option[BlockedEventInsert] =
+  private def blockedEvent(index: Int, rowOffset: Long, row: Json, proxyRow: ProxyEventInsert): Option[BlockedEventInsert] =
     if boolFlag(row, "blocked") == 0L then None
     else
       val blockedBytes = optionalLong(row, "blocked_bytes")
@@ -129,7 +130,7 @@ object PostgresTransformService:
       val fingerprint = row.hcursor.downField("fingerprint").focus
       Some(
         BlockedEventInsert(
-          rowSequence = rowSequence(index, "proxy blocked rollup"),
+          rowSequence = rowSequence(index, rowOffset, "proxy blocked rollup"),
           host = proxyRow.host,
           blockedBytes = blockedBytes,
           frequencyHz = optionalDouble(row, "frequency_hz").orElse(nestedDouble(row, "metrics", "frequency_hz")),
@@ -156,10 +157,10 @@ object PostgresTransformService:
   private def boundedRollupRiskScore(score: Option[Double]): Option[Double] =
     score.map(value => Math.max(MinRollupRiskScore, Math.min(MaxRollupRiskScore, value)))
 
-  private def transformWirelessAudit(rows: List[Json]): List[WirelessAuditFrameInsert] =
+  private def transformWirelessAudit(rows: List[Json], rowOffset: Long): List[WirelessAuditFrameInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessAuditFrameInsert(
-        rowSequence = rowSequence(index, "wireless.audit"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.audit"),
         eventType = requiredString(row, "event_type", "wireless.audit"),
         observedAt = requiredTimestamp(row, "observed_at", "wireless.audit"),
         sensorId = requiredString(row, "sensor_id", "wireless.audit"),
@@ -196,10 +197,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformWirelessBandwidth(rows: List[Json]): List[WirelessBandwidthInsert] =
+  private def transformWirelessBandwidth(rows: List[Json], rowOffset: Long): List[WirelessBandwidthInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessBandwidthInsert(
-        rowSequence = rowSequence(index, "audit.wireless.bandwidth"),
+        rowSequence = rowSequence(index, rowOffset, "audit.wireless.bandwidth"),
         schemaVersion = optionalLong(row, "schema_version").getOrElse(1L),
         windowStart = requiredTimestamp(row, "window_start", "audit.wireless.bandwidth"),
         windowEnd = requiredTimestamp(row, "window_end", "audit.wireless.bandwidth"),
@@ -229,12 +230,12 @@ object PostgresTransformService:
       )
     }
 
-  private def transformRogueAp(rows: List[Json]): List[WirelessRogueApInsert] =
+  private def transformRogueAp(rows: List[Json], rowOffset: Long): List[WirelessRogueApInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       val ssidImpersonation =
         boolFlag(row, "ssid_impersonation") | reasonFlag(row, "ssid_impersonation", "bssid_spoofing")
       WirelessRogueApInsert(
-        rowSequence = rowSequence(index, "wireless.alert.rogue_ap"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.rogue_ap"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.rogue_ap"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.rogue_ap"),
         locationId = requiredString(row, "location_id", "wireless.alert.rogue_ap"),
@@ -248,10 +249,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformDeauthFlood(rows: List[Json]): List[WirelessDeauthFloodInsert] =
+  private def transformDeauthFlood(rows: List[Json], rowOffset: Long): List[WirelessDeauthFloodInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessDeauthFloodInsert(
-        rowSequence = rowSequence(index, "wireless.alert.deauth_flood"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.deauth_flood"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.deauth_flood"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.deauth_flood"),
         locationId = requiredString(row, "location_id", "wireless.alert.deauth_flood"),
@@ -268,10 +269,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformSignalAnomaly(rows: List[Json]): List[WirelessSignalAnomalyInsert] =
+  private def transformSignalAnomaly(rows: List[Json], rowOffset: Long): List[WirelessSignalAnomalyInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessSignalAnomalyInsert(
-        rowSequence = rowSequence(index, "wireless.alert.signal_anomaly"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.signal_anomaly"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.signal_anomaly"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.signal_anomaly"),
         locationId = requiredString(row, "location_id", "wireless.alert.signal_anomaly"),
@@ -286,10 +287,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformPmfAttack(rows: List[Json]): List[WirelessPmfAttackInsert] =
+  private def transformPmfAttack(rows: List[Json], rowOffset: Long): List[WirelessPmfAttackInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessPmfAttackInsert(
-        rowSequence = rowSequence(index, "wireless.alert.pmf_attack"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.pmf_attack"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.pmf_attack"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.pmf_attack"),
         locationId = requiredString(row, "location_id", "wireless.alert.pmf_attack"),
@@ -321,10 +322,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformProbeRequests(rows: List[Json]): List[WirelessProbeRequestInsert] =
+  private def transformProbeRequests(rows: List[Json], rowOffset: Long): List[WirelessProbeRequestInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessProbeRequestInsert(
-        rowSequence = rowSequence(index, "wireless.probe.flush"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.probe.flush"),
         clientMac = requiredString(row, "client_mac", "wireless.probe.flush"),
         ssid = requiredString(row, "ssid", "wireless.probe.flush"),
         knownBssid = optionalString(row, "known_bssid"),
@@ -334,10 +335,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformAttackSequence(rows: List[Json]): List[WirelessAttackSequenceInsert] =
+  private def transformAttackSequence(rows: List[Json], rowOffset: Long): List[WirelessAttackSequenceInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessAttackSequenceInsert(
-        rowSequence = rowSequence(index, "wireless.alert.attack_sequence"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.attack_sequence"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.attack_sequence"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.attack_sequence"),
         locationId = requiredString(row, "location_id", "wireless.alert.attack_sequence"),
@@ -351,10 +352,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformSequenceAlert(rows: List[Json]): List[WirelessSequenceAlertInsert] =
+  private def transformSequenceAlert(rows: List[Json], rowOffset: Long): List[WirelessSequenceAlertInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessSequenceAlertInsert(
-        rowSequence = rowSequence(index, "wireless.alert.sequence"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.sequence"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.sequence"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.sequence"),
         locationId = requiredString(row, "location_id", "wireless.alert.sequence"),
@@ -372,10 +373,10 @@ object PostgresTransformService:
       )
     }
 
-  private def transformHandshakeAlert(rows: List[Json]): List[WirelessHandshakeAlertInsert] =
+  private def transformHandshakeAlert(rows: List[Json], rowOffset: Long): List[WirelessHandshakeAlertInsert] =
     rows.zipWithIndex.map { case (row, index) =>
       WirelessHandshakeAlertInsert(
-        rowSequence = rowSequence(index, "wireless.alert.handshake"),
+        rowSequence = rowSequence(index, rowOffset, "wireless.alert.handshake"),
         detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.handshake"),
         sensorId = requiredString(row, "sensor_id", "wireless.alert.handshake"),
         locationId = requiredString(row, "location_id", "wireless.alert.handshake"),

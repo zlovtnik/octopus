@@ -28,7 +28,7 @@ object WirelessHeartbeatStream:
     metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, ConsumerGroup, Topic, 1, IO.unit, producer, decode) { lockedRecords =>
+    LockedTopicConsumer.stream(cfg, ConsumerGroup, Topic, 1, IO.unit, metrics, producer, decode) { lockedRecords =>
       lockedRecords.traverse_ { locked =>
         store.recordScanRequestWithEvidence(locked.decoded.record, locked.metadata).value.flatMap {
           case Right(decision) =>

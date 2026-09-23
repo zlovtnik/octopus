@@ -3,8 +3,7 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.dispatch.BackpressureService
-import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.ResultStore
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import fs2.Stream
@@ -16,7 +15,7 @@ object PostgresResultStream:
   def run(
     cfg: KafkaCfg,
     resultStore: ResultStore[IO],
-    backpressure: BackpressureService,
+    metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(
@@ -24,7 +23,8 @@ object PostgresResultStream:
       cfg.resultConsumer,
       cfg.resultTopic,
       cfg.resultConsumersCount,
-      backpressure.awaitConsumerPermit,
+      IO.unit, // Results release the backlog that suspends scan admission.
+      metrics,
       producer,
       KafkaComponents.deserializeResult
     ) { lockedRecords =>

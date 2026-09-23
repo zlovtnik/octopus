@@ -4,8 +4,7 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.dispatch.BackpressureService
-import com.sslproxy.coordinator.observability.StructuredLogger
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.ResultStore
 import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresLoadHandler}
 import fs2.Stream
@@ -20,14 +19,15 @@ object PostgresLoadStream:
     handler: PostgresLoadHandler,
     producer: KafkaProducer[IO, String, String],
     dbSemaphore: Semaphore[IO],
-    backpressure: BackpressureService
+    metrics: CoordinatorMetrics
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(
       cfg,
       cfg.loadConsumer,
       cfg.loadTopic,
       cfg.loadConsumersCount,
-      backpressure.awaitConsumerPermit,
+      IO.unit, // Drain outstanding work even while scan admission is suspended.
+      metrics,
       producer,
       KafkaComponents.deserializeLoad
     ) { lockedRecords =>

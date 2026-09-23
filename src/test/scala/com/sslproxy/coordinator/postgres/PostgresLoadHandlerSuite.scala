@@ -102,7 +102,8 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
     override def insertProxyEvents(
       _batchId: String,
       _rows: List[ProxyEventInsert],
-      _blockedRows: List[BlockedEventInsert]
+      _blockedRows: List[BlockedEventInsert],
+      _rowOffset: Long
     ): IO[Long] = IO.raiseError(cause)
 
     override def insertProxyPayloadAudit(_batchId: String, _rows: List[ProxyPayloadAuditInsert]): IO[Long] = unexpected

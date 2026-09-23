@@ -164,7 +164,9 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | `postgres.statement-timeout-secs` | `POSTGRES_STATEMENT_TIMEOUT_SECS` | Optional, default 30; transaction-local PostgreSQL statement timeout for sink transactions only |
 | `postgres.network-timeout-secs` | `POSTGRES_NETWORK_TIMEOUT_SECS` | Optional, default 60; JDBC network timeout for sink attempts, restored before connection reuse |
 | `kafka` | `SYNC_*`, legacy `COORDINATOR_*` aliases | Positive polling/batch/partition/replication bounds, versioned consumer groups, earliest retained startup for new groups, manual commit after durable processing, and one shared `SYNC_DLQ_SUFFIX` for locked and wireless consumers |
-| `kafka.*-consumers-count` | `SYNC_SCAN_CONSUMERS_COUNT`, `SYNC_LOAD_CONSUMERS_COUNT`, `SYNC_RESULT_CONSUMERS_COUNT` | Optional, default 4; maximum concurrently drained partition streams for each locked topic, not a Kafka client count |
+| `kafka.*-consumers-count` | `SYNC_SCAN_CONSUMERS_COUNT`, `SYNC_LOAD_CONSUMERS_COUNT`, `SYNC_RESULT_CONSUMERS_COUNT` | Optional, default 4; maximum concurrently processed batches per locked topic. Every assigned partition remains drainable; this is not a Kafka client count |
+| `kafka.locked-batch-max-bytes` | `COORDINATOR_LOCKED_BATCH_MAX_BYTES` | Optional, default 8388608; positive cumulative serialized-value byte limit, alongside count/time limits; oversized records are parked in the existing DLQ before offset commit |
+| `postgres.load-chunk-max-bytes` | `POSTGRES_LOAD_CHUNK_MAX_BYTES` | Optional, default 4194304; positive cumulative JSON-row byte limit alongside 500 rows; oversized individual rows fail the load permanently |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |
@@ -178,6 +180,24 @@ five-second timeout. Each sink attempt uses parameterized transaction-local
 `set_config('statement_timeout', ?, true)` before business SQL. Repository
 transactions retain their existing timeout behavior. Sink retries use three
 total attempts with 200/400 ms backoff after releasing each connection.
+
+Scan admission pauses at the pending-ledger high watermark and resumes at half
+that watermark. Load/result consumers keep draining because completing their
+work releases the backlog. They pull bounded batches only as database processing
+completes. Partition-local processing preserves offset order; a shared permit
+caps active batch work. Kafka prefetch is one batch per partition, fetch max is
+the configured batch byte limit, and partition fetch max is at most 1 MiB.
+Kafka may exceed fetch limits for its first oversized record batch, so these are
+not hard broker-allocation limits.
+
+The metrics endpoint exports Micrometer JVM memory (heap/non-heap including
+metaspace), buffer pool memory (`id="direct"`), and GC pause timers. Timer
+series appear after a collection. Consumer metrics are sampled every 10 seconds
+with a 5-second timeout: `coordinator_kafka_partition_lag_value` reports native
+Kafka fetch-position lag, tagged by group/topic/partition, and
+`coordinator_kafka_rebalances_value` reports the client rebalance total.
+Fetch-position lag is not durable committed-offset lag. Revoked-partition
+series are removed on the next sample; stopping the consumer removes its series.
 
 ### Read-only timeout incident procedure
 

@@ -49,7 +49,9 @@ The currently wired binary provides:
 - fenced search-document retention, stale worker cleanup, and scheduled
   wireless projection reconciliation with durable findings;
 - deterministic RF-alert projection with PostgreSQL projection writers;
-- wireless inventory and identity projection maintenance;
+- wireless inventory and identity projection maintenance, with device-vector
+  similarity scans producing merge candidates for operator review; approved
+  decisions become identity clusters;
 - `/live`, `/ready`, `/metrics`, `/health`, `/actuator/health`, and
   `/actuator/prometheus` HTTP routes;
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,

@@ -113,14 +113,20 @@ final class CronScheduler private (
       maintenanceStore.reconcileWirelessProjections(batchSize).value
     }
 
-  def identityProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+  def identityProjectorStream(
+    batchSize: Int,
+    interval: FiniteDuration,
+    minimumSimilarity: Double
+  ): Stream[IO, Unit] =
     projectionStream(
       ProcessorId.WirelessIdentityProjector,
       interval,
       (for
+        similarities <- projectionStore.projectDeviceSimilarities(batchSize, minimumSimilarity)
+        candidates <- projectionStore.projectClusterCandidates(batchSize, minimumSimilarity)
         identities <- projectionStore.projectApprovedIdentities(batchSize)
         graphNodes <- projectionStore.projectInfrastructureGraph(batchSize)
-      yield identities + graphNodes).value
+      yield similarities + candidates + identities + graphNodes).value
     )
 
   private def projectionStream(

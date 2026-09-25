@@ -18,6 +18,8 @@ object IntelligenceSql:
   enum VectorKind(val table: String, val index: String, val embeddingKind: String, val pairKind: String):
     case Event
         extends VectorKind("search_vectors_event", "search_vectors_event_embedding_hnsw_idx", "event", "event_event")
+    case Device
+        extends VectorKind("search_vectors_device", "search_vectors_device_embedding_hnsw_idx", "device", "device_device")
     case Behaviour
         extends VectorKind(
           "search_vectors_behaviour",
@@ -175,13 +177,60 @@ object IntelligenceSql:
   def similarityAnchors(
     kind: VectorKind,
     limit: Int
-  ): Query0[(Long, String, String, String)] =
-    val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
+  ): Query0[(Long, String, String, String, java.sql.Timestamp)] =
+    val vectorTable = Fragment.const(s" atheros_search.${kind.table} vector ")
+    val embeddingKind = kind.embeddingKind
     val batchLimit = limit.max(1)
-    (fr"""SELECT vector_id, document_id, embedding_model, embedding::text
+    (fr"""SELECT vector.vector_id, vector.document_id, vector.embedding_model,
+                  vector.embedding::text, vector.embedded_at
            FROM""" ++ vectorTable ++ fr"""
-           ORDER BY vector_id DESC
-           LIMIT $batchLimit""").query[(Long, String, String, String)]
+           JOIN atheros_search.search_documents document
+             ON document.document_id = vector.document_id
+            AND document.status = 'active'
+           LEFT JOIN atheros_search.similarity_scan_state scanned
+             ON scanned.embedding_kind = $embeddingKind
+            AND scanned.vector_id = vector.vector_id
+           WHERE scanned.vector_id IS NULL
+              OR scanned.embedded_at < vector.embedded_at
+              OR scanned.completed_at IS NULL
+           ORDER BY vector.vector_id
+           LIMIT $batchLimit""").query[(Long, String, String, String, java.sql.Timestamp)]
+
+  def beginSimilarityAnchor(
+    kind: VectorKind,
+    vectorId: Long,
+    documentId: String,
+    embeddingModel: String,
+    embeddedAt: java.sql.Timestamp
+  ): ConnectionIO[Unit] =
+    val embeddingKind = kind.embeddingKind
+    val pairKind = kind.pairKind
+    sql"""INSERT INTO atheros_search.similarity_scan_state (
+             embedding_kind, vector_id, embedded_at, scan_started_at, completed_at
+           ) VALUES ($embeddingKind, $vectorId, $embeddedAt, CURRENT_TIMESTAMP, NULL)
+           ON CONFLICT (embedding_kind, vector_id) DO UPDATE SET
+             embedded_at = EXCLUDED.embedded_at,
+             scan_started_at = CURRENT_TIMESTAMP,
+             completed_at = NULL
+           WHERE similarity_scan_state.embedded_at IS DISTINCT FROM EXCLUDED.embedded_at"""
+      .update.run.flatMap { restarted =>
+        if restarted == 0 then ().pure[ConnectionIO]
+        else
+          sql"""DELETE FROM atheros_search.similarity_pairs
+                 WHERE pair_kind = $pairKind
+                   AND embedding_model = $embeddingModel
+                   AND (left_document_id = CAST($documentId AS uuid)
+                     OR right_document_id = CAST($documentId AS uuid))""".update.run.void
+      }
+
+  def markSimilarityAnchor(kind: VectorKind, vectorId: Long, embeddedAt: java.sql.Timestamp): ConnectionIO[Int] =
+    val embeddingKind = kind.embeddingKind
+    sql"""UPDATE atheros_search.similarity_scan_state
+           SET completed_at = CURRENT_TIMESTAMP
+           WHERE embedding_kind = $embeddingKind
+             AND vector_id = $vectorId
+             AND embedded_at = $embeddedAt
+             AND completed_at IS NULL""".update.run
 
   def similarityCandidatesForAnchor(
     kind: VectorKind,
@@ -209,28 +258,33 @@ object IntelligenceSql:
                     candidate.embedding_model,
                     candidate.embedding <=> CAST($anchorEmbedding AS public.vector) AS cosine_distance
            FROM""" ++ vectorTable ++ fr"""candidate
-             WHERE candidate.document_id <> $anchorDocumentId
+             JOIN atheros_search.search_documents candidate_document
+               ON candidate_document.document_id = candidate.document_id
+              AND candidate_document.status = 'active'
+             WHERE candidate.document_id <> CAST($anchorDocumentId AS uuid)
                AND candidate.embedding_model = $anchorEmbeddingModel
+               AND NOT EXISTS (
+                 SELECT 1 FROM atheros_search.similarity_pairs pair
+                 WHERE pair.pair_kind = $pairKind
+                   AND pair.embedding_model = $anchorEmbeddingModel
+                   AND (
+                     (pair.left_document_id = CAST($anchorDocumentId AS uuid)
+                       AND pair.right_document_id = candidate.document_id)
+                     OR
+                     (pair.left_document_id = candidate.document_id
+                       AND pair.right_document_id = CAST($anchorDocumentId AS uuid))
+                   )
+               )
              ORDER BY candidate.embedding <=> CAST($anchorEmbedding AS public.vector) ASC
              LIMIT $topK
            ) right_vector
            JOIN atheros_search.search_documents left_document
-             ON left_document.document_id = $anchorDocumentId
+             ON left_document.document_id = CAST($anchorDocumentId AS uuid)
+            AND left_document.status = 'active'
            JOIN atheros_search.search_documents right_document
              ON right_document.document_id = right_vector.document_id
+            AND right_document.status = 'active'
            WHERE right_vector.cosine_distance <= $distance
-             AND NOT EXISTS (
-               SELECT 1 FROM atheros_search.similarity_pairs pair
-               WHERE pair.pair_kind = $pairKind
-                 AND pair.embedding_model = $anchorEmbeddingModel
-                 AND (
-                   (pair.left_document_id = $anchorDocumentId
-                 AND pair.right_document_id = right_vector.document_id)
-                   OR
-                   (pair.left_document_id = right_vector.document_id
-                     AND pair.right_document_id = $anchorDocumentId)
-                 )
-             )
            ORDER BY right_vector.cosine_distance, right_vector.vector_id
            LIMIT $batchLimit""").query[SimilarityCandidate]
 

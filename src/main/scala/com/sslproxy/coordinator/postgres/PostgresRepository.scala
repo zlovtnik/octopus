@@ -733,12 +733,29 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     behaviorSimilarityThreshold: Double,
     sequenceDistanceThreshold: Double
   ): IO[Either[DatabaseError, Int]] =
-    runDb("postgres.project_similarities") {
-      val candidates = List(
+    projectSimilarityKinds(
+      "postgres.project_similarities",
+      limit,
+      List(
         IntelligenceSql.VectorKind.Event -> eventDuplicateDistance,
         IntelligenceSql.VectorKind.Behaviour -> (1.0d - behaviorSimilarityThreshold),
         IntelligenceSql.VectorKind.Sequence -> sequenceDistanceThreshold
       )
+    )
+
+  def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): IO[Either[DatabaseError, Int]] =
+    projectSimilarityKinds(
+      "postgres.project_device_similarities",
+      limit,
+      List(IntelligenceSql.VectorKind.Device -> (1.0d - minimumSimilarity))
+    )
+
+  private def projectSimilarityKinds(
+    operation: String,
+    limit: Int,
+    candidates: List[(IntelligenceSql.VectorKind, Double)]
+  ): IO[Either[DatabaseError, Int]] =
+    runDb(operation) {
       candidates
         .traverse { case (kind, distance) =>
           IntelligenceSql.annReady(kind).unique.flatMap {
@@ -746,24 +763,30 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
             case true =>
               IntelligenceSql.similarityAnchors(kind, limit).to[List].flatMap { anchors =>
                 anchors
-                  .foldM((0, limit.max(1))) { case ((written, remaining), (_, documentId, model, embedding)) =>
+                  .foldM((0, limit.max(1))) { case ((written, remaining), (vectorId, documentId, model, embedding, embeddedAt)) =>
                     if remaining <= 0 then (written, remaining).pure[ConnectionIO]
                     else
-                      IntelligenceSql
-                        .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining)
-                        .to[List]
-                        .flatMap { values =>
-                          values
-                            .traverse { candidate =>
-                              IntelligencePreparation
-                                .similarity(candidate)
-                                .fold(
-                                  error => FC.raiseError[Int](IllegalArgumentException(error)),
-                                  IntelligenceSql.persistSimilarity
-                                )
-                            }
-                            .map(counts => (written + counts.sum, remaining - values.size))
-                        }
+                      IntelligenceSql.beginSimilarityAnchor(kind, vectorId, documentId, model, embeddedAt) *>
+                        IntelligenceSql
+                          .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining)
+                          .to[List]
+                          .flatMap { values =>
+                            values
+                              .traverse { candidate =>
+                                IntelligencePreparation
+                                  .similarity(candidate)
+                                  .fold(
+                                    error => FC.raiseError[Int](IllegalArgumentException(error)),
+                                    IntelligenceSql.persistSimilarity
+                                  )
+                              }
+                              .flatMap { counts =>
+                                val progress = (written + counts.sum, remaining - values.size)
+                                if PostgresRepository.similarityAnchorExhausted(values.size, remaining) then
+                                  IntelligenceSql.markSimilarityAnchor(kind, vectorId, embeddedAt).as(progress)
+                                else progress.pure[ConnectionIO]
+                              }
+                          }
                   }
                   .map(_._1)
               }
@@ -1171,6 +1194,9 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
         catch case _: Exception => None
 
 object PostgresRepository:
+  private[postgres] def similarityAnchorExhausted(pageSize: Int, remaining: Int): Boolean =
+    pageSize < remaining.min(64)
+
   private val log = StructuredLogger(getClass)
   private val MacPattern = "(?i)^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$".r
   private val transactionRetryMaxAttempts = 5

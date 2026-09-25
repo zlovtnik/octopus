@@ -272,7 +272,8 @@ object Main extends IOApp.Simple:
                                   ProcessorId.WirelessIdentityProjector,
                                   cronScheduler.identityProjectorStream(
                                     cfg.processors.batchSize,
-                                    cfg.processors.intervalSeconds.seconds
+                                    cfg.processors.intervalSeconds.seconds,
+                                    cfg.processors.behaviorSimilarityThreshold
                                   )
                                 ),
                                 ProcessorWorkload(

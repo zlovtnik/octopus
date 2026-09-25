@@ -50,6 +50,9 @@ final class PostgresProjectionStore(repository: PostgresRepository) extends Proj
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[IO, Int] =
     EitherT(repository.projectClusterCandidates(limit, minimumSimilarity))
 
+  def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): DbResultT[IO, Int] =
+    EitherT(repository.projectDeviceSimilarities(limit, minimumSimilarity))
+
   def projectApprovedIdentities(limit: Int): DbResultT[IO, Int] =
     EitherT(repository.projectApprovedIdentities(limit))
 

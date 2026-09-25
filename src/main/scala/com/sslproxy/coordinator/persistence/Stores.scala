@@ -101,6 +101,7 @@ trait ProjectionStore[F[_]]:
     behaviorSimilarityThreshold: Double,
     sequenceDistanceThreshold: Double
   ): DbResultT[F, Int]
+  def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
   def projectApprovedIdentities(limit: Int): DbResultT[F, Int]
   def projectInfrastructureGraph(limit: Int): DbResultT[F, Int]

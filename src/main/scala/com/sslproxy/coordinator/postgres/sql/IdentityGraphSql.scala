@@ -8,12 +8,25 @@ import doobie.implicits.*
 object IdentityGraphSql:
   def similarityEdges(minimumSimilarity: Double, limit: Int): doobie.Query0[(String, String, Double)] =
     sql"""SELECT left_source_mac, right_source_mac, cosine_similarity
-           FROM atheros_search.similarity_pairs
-           WHERE left_source_mac IS NOT NULL
-             AND right_source_mac IS NOT NULL
-             AND left_source_mac <> right_source_mac
-             AND cosine_similarity >= ${minimumSimilarity.max(-1.0d).min(1.0d)}
-           ORDER BY computed_at, pair_id
+           FROM atheros_search.similarity_pairs pair
+           JOIN atheros_search.search_documents left_document
+             ON left_document.document_id = pair.left_document_id
+            AND left_document.status = 'active'
+           JOIN atheros_search.search_documents right_document
+             ON right_document.document_id = pair.right_document_id
+            AND right_document.status = 'active'
+           WHERE pair.pair_kind = 'device_device'
+             AND pair.left_source_mac IS NOT NULL
+             AND pair.right_source_mac IS NOT NULL
+             AND pair.left_source_mac <> pair.right_source_mac
+             AND pair.cosine_similarity >= ${minimumSimilarity.max(-1.0d).min(1.0d)}
+             AND NOT EXISTS (
+               SELECT 1 FROM atheros_search.merge_candidates candidate
+               WHERE candidate.mac_a = LEAST(pair.left_source_mac, pair.right_source_mac)
+                 AND candidate.mac_b = GREATEST(pair.left_source_mac, pair.right_source_mac)
+                 AND candidate.confidence >= pair.cosine_similarity
+             )
+           ORDER BY pair.computed_at, pair.pair_id
            LIMIT ${limit.max(1)}""".query[(String, String, Double)]
 
   def approvedIdentityEdges(limit: Int): doobie.Query0[(String, String, Double)] =

@@ -217,43 +217,178 @@ object IdentityGraphSql:
                       ),
                       updated_at = CURRENT_TIMESTAMP""".update.run
       edges <- sql"""INSERT INTO atheros_search.graph_edges (
-                      edge_id, source_node_id, target_node_id, edge_kind,
-                      weight, label, evidence, observed_at, projection_run_id
-                    )
-                    SELECT CONCAT('observed:', frame.source_mac, ':', frame.bssid),
-                           CONCAT('device:', frame.source_mac), CONCAT('ap:', frame.bssid),
-                           'observed_at', COUNT(*), 'wireless observation',
-                           jsonb_build_object('frame_count', COUNT(*)), MAX(frame.observed_at), $projectionRunId
-                    FROM wireless_frames frame
-                    WHERE frame.source_mac IS NOT NULL AND frame.bssid IS NOT NULL
-                    GROUP BY frame.source_mac, frame.bssid
-                    ORDER BY MAX(frame.observed_at) DESC, frame.source_mac, frame.bssid
-                    LIMIT $batchLimit
-                    ON CONFLICT (edge_id) DO UPDATE SET
-                      weight = EXCLUDED.weight,
-                      evidence = EXCLUDED.evidence,
-                      observed_at = GREATEST(
-                        COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
-                        COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
-                      ),
-                      updated_at = CURRENT_TIMESTAMP""".update.run
+                       edge_id, source_node_id, target_node_id, edge_kind,
+                       weight, weight_basis, label, evidence, observed_at, projection_run_id
+                     )
+                     SELECT CONCAT('observed:', frame.source_mac, ':', frame.bssid),
+                            CONCAT('device:', frame.source_mac), CONCAT('ap:', frame.bssid),
+                            'observed_at', COUNT(*), 'frame_count', 'wireless observation',
+                            jsonb_build_object('frame_count', COUNT(*)), MAX(frame.observed_at), $projectionRunId
+                     FROM wireless_frames frame
+                     WHERE frame.source_mac IS NOT NULL AND frame.bssid IS NOT NULL
+                     GROUP BY frame.source_mac, frame.bssid
+                     ORDER BY MAX(frame.observed_at) DESC, frame.source_mac, frame.bssid
+                     LIMIT $batchLimit
+                     ON CONFLICT (edge_id) DO UPDATE SET
+                       weight = EXCLUDED.weight,
+                       weight_basis = EXCLUDED.weight_basis,
+                       evidence = EXCLUDED.evidence,
+                       observed_at = GREATEST(
+                         COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                         COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                       ),
+                       updated_at = CURRENT_TIMESTAMP""".update.run
       identityEdges <- sql"""INSERT INTO atheros_search.graph_edges (
+                               edge_id, source_node_id, target_node_id, edge_kind,
+                               weight, weight_basis, label, evidence, observed_at, projection_run_id
+                             )
+                             SELECT CONCAT('identity-member:', member.cluster_id, ':', member.mac),
+                                    CONCAT('device:', member.mac), CONCAT('identity:', member.cluster_id),
+                                    'identity_member', member.confidence, 'cluster_confidence',
+                                    'approved identity membership',
+                                    member.evidence, member.last_seen, $projectionRunId
+                             FROM atheros_search.identity_cluster_members member
+                             ORDER BY member.last_seen DESC, member.cluster_id, member.mac
+                             LIMIT $batchLimit
+                             ON CONFLICT (edge_id) DO UPDATE SET
+                               weight = EXCLUDED.weight,
+                               weight_basis = EXCLUDED.weight_basis,
+                               evidence = EXCLUDED.evidence,
+                               observed_at = GREATEST(
+                                 COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                                 COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                               ),
+                               updated_at = CURRENT_TIMESTAMP""".update.run
+      roamingEdges <- sql"""INSERT INTO atheros_search.graph_edges (
                               edge_id, source_node_id, target_node_id, edge_kind,
-                              weight, label, evidence, observed_at, projection_run_id
+                              weight, weight_basis, label, evidence, observed_at, projection_run_id
                             )
-                            SELECT CONCAT('identity-member:', member.cluster_id, ':', member.mac),
-                                   CONCAT('device:', member.mac), CONCAT('identity:', member.cluster_id),
-                                   'identity_member', member.confidence, 'approved identity membership',
-                                   member.evidence, member.last_seen, $projectionRunId
-                            FROM atheros_search.identity_cluster_members member
-                            ORDER BY member.last_seen DESC, member.cluster_id, member.mac
+                            SELECT CONCAT('roaming:', pair.left_mac, ':', pair.right_mac),
+                                   CONCAT('device:', LEAST(pair.left_mac, pair.right_mac)),
+                                   CONCAT('device:', GREATEST(pair.left_mac, pair.right_mac)),
+                                   'roaming', pair.shared_aps::double precision, 'time_overlap_windows',
+                                   'devices observed on the same access points',
+                                   jsonb_build_object('shared_bssids', pair.shared_aps, 'bssids', pair.bssid_list),
+                                   pair.last_observed, $projectionRunId
+                            FROM (
+                              SELECT LEAST(left_frame.source_mac, right_frame.source_mac) AS left_mac,
+                                     GREATEST(left_frame.source_mac, right_frame.source_mac) AS right_mac,
+                                     COUNT(DISTINCT left_frame.bssid) AS shared_aps,
+                                     string_agg(DISTINCT left_frame.bssid, ',' ORDER BY left_frame.bssid) AS bssid_list,
+                                     MAX(left_frame.observed_at) AS last_observed
+                              FROM wireless_frames left_frame
+                              JOIN wireless_frames right_frame
+                                ON right_frame.bssid = left_frame.bssid
+                               AND right_frame.source_mac IS NOT NULL
+                               AND right_frame.source_mac <> left_frame.source_mac
+                               AND right_frame.observed_at >= left_frame.observed_at - INTERVAL '10 minutes'
+                               AND right_frame.observed_at <= left_frame.observed_at + INTERVAL '10 minutes'
+                              WHERE left_frame.source_mac IS NOT NULL
+                                AND left_frame.bssid IS NOT NULL
+                              GROUP BY LEAST(left_frame.source_mac, right_frame.source_mac),
+                                       GREATEST(left_frame.source_mac, right_frame.source_mac)
+                            ) pair
+                            ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
                             LIMIT $batchLimit
                             ON CONFLICT (edge_id) DO UPDATE SET
                               weight = EXCLUDED.weight,
+                              weight_basis = EXCLUDED.weight_basis,
                               evidence = EXCLUDED.evidence,
                               observed_at = GREATEST(
                                 COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
                                 COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
                               ),
                               updated_at = CURRENT_TIMESTAMP""".update.run
-    yield deviceNodes + apNodes + clusterNodes + edges + identityEdges
+      sameChannelEdges <- sql"""INSERT INTO atheros_search.graph_edges (
+                                  edge_id, source_node_id, target_node_id, edge_kind,
+                                  weight, weight_basis, label, evidence, observed_at, projection_run_id
+                                )
+                                SELECT CONCAT('same-channel:', pair.left_mac, ':', pair.right_mac),
+                                       CONCAT('device:', LEAST(pair.left_mac, pair.right_mac)),
+                                       CONCAT('device:', GREATEST(pair.left_mac, pair.right_mac)),
+                                       'same_channel', pair.shared_channels::double precision, 'channel_overlap',
+                                       'devices observed on the same channel',
+                                       jsonb_build_object('channels', pair.channel_list),
+                                       pair.last_observed, $projectionRunId
+                                FROM (
+                                  SELECT LEAST(left_frame.source_mac, right_frame.source_mac) AS left_mac,
+                                         GREATEST(left_frame.source_mac, right_frame.source_mac) AS right_mac,
+                                          COUNT(DISTINCT radio.channel_number) AS shared_channels,
+                                          string_agg(DISTINCT radio.channel_number::text, ',' ORDER BY radio.channel_number::text) AS channel_list,
+                                          MAX(left_frame.observed_at) AS last_observed
+                                   FROM wireless_frames left_frame
+                                   JOIN wireless_frames right_frame
+                                     ON right_frame.source_mac IS NOT NULL
+                                    AND right_frame.source_mac <> left_frame.source_mac
+                                    AND right_frame.observed_at >= left_frame.observed_at - INTERVAL '10 minutes'
+                                    AND right_frame.observed_at <= left_frame.observed_at + INTERVAL '10 minutes'
+                                   JOIN wireless_frame_radio radio
+                                     ON radio.dedupe_key = left_frame.dedupe_key
+                                    AND radio.channel_number IS NOT NULL
+                                   JOIN wireless_frame_radio right_radio
+                                     ON right_radio.dedupe_key = right_frame.dedupe_key
+                                    AND right_radio.channel_number = radio.channel_number
+                                  WHERE left_frame.source_mac IS NOT NULL
+                                  GROUP BY LEAST(left_frame.source_mac, right_frame.source_mac),
+                                           GREATEST(left_frame.source_mac, right_frame.source_mac)
+                                ) pair
+                                WHERE pair.shared_channels >= 1
+                                ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
+                                LIMIT $batchLimit
+                                ON CONFLICT (edge_id) DO UPDATE SET
+                                  weight = EXCLUDED.weight,
+                                  weight_basis = EXCLUDED.weight_basis,
+                                  evidence = EXCLUDED.evidence,
+                                  observed_at = GREATEST(
+                                    COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                                    COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                                  ),
+                                  updated_at = CURRENT_TIMESTAMP""".update.run
+      vendorLinkEdges <- sql"""INSERT INTO atheros_search.graph_edges (
+                                 edge_id, source_node_id, target_node_id, edge_kind,
+                                 weight, weight_basis, label, evidence, observed_at, projection_run_id
+                               )
+                               SELECT CONCAT('vendor-link:', pair.left_mac, ':', pair.right_mac),
+                                      CONCAT('device:', pair.left_mac),
+                                      CONCAT('device:', pair.right_mac),
+                                      'vendor_link', pair.shared_ouis::double precision, 'vendor_match',
+                                      'devices observed with the same OUI vendor prefixes',
+                                      jsonb_build_object('shared_ouis', pair.shared_ouis),
+                                      pair.last_observed, $projectionRunId
+                               FROM (
+                                 SELECT LEAST(left_oui.source_mac, right_oui.source_mac) AS left_mac,
+                                        GREATEST(left_oui.source_mac, right_oui.source_mac) AS right_mac,
+                                        COUNT(DISTINCT left_oui.bssid_oui) AS shared_ouis,
+                                        MAX(left_oui.last_observed) AS last_observed
+                                 FROM (
+                                   SELECT frame.source_mac, frame.bssid_oui,
+                                          MAX(frame.observed_at) AS last_observed
+                                   FROM wireless_frames frame
+                                   WHERE frame.source_mac IS NOT NULL
+                                     AND frame.bssid_oui IS NOT NULL
+                                   GROUP BY frame.source_mac, frame.bssid_oui
+                                 ) left_oui
+                                 JOIN (
+                                   SELECT frame.source_mac, frame.bssid_oui
+                                   FROM wireless_frames frame
+                                   WHERE frame.source_mac IS NOT NULL
+                                     AND frame.bssid_oui IS NOT NULL
+                                   GROUP BY frame.source_mac, frame.bssid_oui
+                                 ) right_oui
+                                   ON right_oui.bssid_oui = left_oui.bssid_oui
+                                  AND right_oui.source_mac > left_oui.source_mac
+                                 GROUP BY LEAST(left_oui.source_mac, right_oui.source_mac),
+                                          GREATEST(left_oui.source_mac, right_oui.source_mac)
+                               ) pair
+                               ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
+                               LIMIT $batchLimit
+                               ON CONFLICT (edge_id) DO UPDATE SET
+                                 weight = EXCLUDED.weight,
+                                 weight_basis = EXCLUDED.weight_basis,
+                                 evidence = EXCLUDED.evidence,
+                                 observed_at = GREATEST(
+                                   COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
+                                   COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
+                                 ),
+                                 updated_at = CURRENT_TIMESTAMP""".update.run
+    yield deviceNodes + apNodes + clusterNodes + edges + identityEdges + roamingEdges + sameChannelEdges + vendorLinkEdges

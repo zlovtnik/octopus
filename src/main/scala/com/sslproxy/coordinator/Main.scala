@@ -277,6 +277,51 @@ object Main extends IOApp.Simple:
                                   )
                                 ),
                                 ProcessorWorkload(
+                                  ProcessorId.WirelessBehaviorProjector,
+                                  cronScheduler.behaviorProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessTimingProjector,
+                                  cronScheduler.timingProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessSequenceProjector,
+                                  cronScheduler.sequenceProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessBaselineProjector,
+                                  cronScheduler.baselineProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.WirelessSimilarityProjector,
+                                  cronScheduler.similarityProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds,
+                                    cfg.processors.eventDuplicateDistance,
+                                    cfg.processors.behaviorSimilarityThreshold,
+                                    cfg.processors.sequenceDistanceThreshold
+                                  )
+                                ),
+                                ProcessorWorkload(
+                                  ProcessorId.ThreatRiskProjector,
+                                  cronScheduler.threatRiskProjectorStream(
+                                    cfg.processors.batchSize,
+                                    cfg.processors.intervalSeconds.seconds
+                                  )
+                                ),
+                                ProcessorWorkload(
                                   ProcessorId.EmbeddingTextBuilder,
                                   cronScheduler.searchDocumentBuilderStream(
                                     cfg.processors.batchSize,

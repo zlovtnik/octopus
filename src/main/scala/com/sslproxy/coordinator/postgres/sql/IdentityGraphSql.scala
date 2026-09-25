@@ -119,10 +119,19 @@ object IdentityGraphSql:
                             normalized_mac, is_threat, observed_at, projection_run_id
                           )
                           SELECT CONCAT('device:', device.mac_id), 'device', device.display_name,
-                                 jsonb_build_object('mac', device.mac_id), NULL, device.mac_id, FALSE,
+                                 jsonb_build_object(
+                                   'mac', device.mac_id,
+                                   'explain_source_key', device.mac_id,
+                                   'explain_kind', 'device',
+                                   'username', registered.username,
+                                   'hostname', registered.hostname,
+                                   'os_hint', registered.os_hint
+                                 ), NULL, device.mac_id, FALSE,
                                  device.last_seen,
                                  $projectionRunId
                           FROM devices device
+                          LEFT JOIN octopus_core.registered_devices registered
+                            ON registered.mac = device.mac_id
                           ORDER BY device.last_seen DESC, device.mac_id
                           LIMIT $batchLimit
                     ON CONFLICT (node_id) DO UPDATE SET
@@ -138,23 +147,46 @@ object IdentityGraphSql:
                         normalized_mac, normalized_ssid, is_threat, observed_at, projection_run_id
                       )
                       SELECT CONCAT('ap:', frame.bssid), 'access_point', MAX(frame.ssid),
-                             jsonb_build_object('bssid', frame.bssid), MAX(frame.location_id), MAX(frame.sensor_id),
-                             frame.bssid, MAX(frame.ssid), FALSE, MAX(frame.observed_at), $projectionRunId
+                             jsonb_build_object(
+                               'bssid', frame.bssid,
+                               'risk_score', risk.composite_risk,
+                               'alert_type', alert.alert_type,
+                               'alert_severity', alert.severity,
+                               'alert_evidence', alert.evidence,
+                               'resolved_at', alert.resolved_at
+                             ), MAX(frame.location_id), MAX(frame.sensor_id),
+                             frame.bssid, MAX(frame.ssid), COALESCE(alert.severity IN ('high', 'critical'), FALSE), MAX(frame.observed_at), $projectionRunId
                       FROM wireless_frames frame
+                      LEFT JOIN atheros_search.ap_risk_scores risk
+                        ON risk.bssid = frame.bssid
+                      LEFT JOIN LATERAL (
+                        SELECT wireless_alerts.alert_type,
+                               wireless_alerts.severity,
+                               wireless_alerts.resolved_at,
+                               wireless_alerts.evidence
+                        FROM octopus_core.wireless_alerts
+                        WHERE wireless_alerts.subject_kind = 'access_point'
+                          AND wireless_alerts.subject_id = frame.bssid
+                          AND wireless_alerts.resolved_at IS NULL
+                        ORDER BY wireless_alerts.detected_at DESC
+                        LIMIT 1
+                      ) alert ON TRUE
                       WHERE frame.bssid IS NOT NULL
-                      GROUP BY frame.bssid
+                      GROUP BY frame.bssid, risk.composite_risk, alert.alert_type, alert.severity,
+                               alert.resolved_at, alert.evidence
                       ORDER BY MAX(frame.observed_at) DESC, frame.bssid
                       LIMIT $batchLimit
-                      ON CONFLICT (node_id) DO UPDATE SET
-                        label = COALESCE(EXCLUDED.label, graph_nodes.label),
-                        node_payload = EXCLUDED.node_payload,
-                        location_id = COALESCE(EXCLUDED.location_id, graph_nodes.location_id),
-                        sensor_id = COALESCE(EXCLUDED.sensor_id, graph_nodes.sensor_id),
-                        observed_at = GREATEST(
-                          COALESCE(graph_nodes.observed_at, EXCLUDED.observed_at),
-                          COALESCE(EXCLUDED.observed_at, graph_nodes.observed_at)
-                        ),
-                        updated_at = CURRENT_TIMESTAMP""".update.run
+                    ON CONFLICT (node_id) DO UPDATE SET
+                      label = COALESCE(EXCLUDED.label, graph_nodes.label),
+                      node_payload = EXCLUDED.node_payload,
+                      location_id = COALESCE(EXCLUDED.location_id, graph_nodes.location_id),
+                      sensor_id = COALESCE(EXCLUDED.sensor_id, graph_nodes.sensor_id),
+                      is_threat = EXCLUDED.is_threat,
+                      observed_at = GREATEST(
+                        COALESCE(graph_nodes.observed_at, EXCLUDED.observed_at),
+                        COALESCE(EXCLUDED.observed_at, graph_nodes.observed_at)
+                      ),
+                      updated_at = CURRENT_TIMESTAMP""".update.run
       clusterNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                              node_id, node_kind, label, node_payload,
                              is_threat, observed_at, projection_run_id

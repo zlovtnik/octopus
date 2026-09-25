@@ -35,6 +35,18 @@ enum ProcessorId(
       extends ProcessorId("wireless-inventory-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessIdentityProjector
       extends ProcessorId("wireless-identity-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBehaviorProjector
+      extends ProcessorId("wireless-behavior-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessTimingProjector
+      extends ProcessorId("wireless-timing-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessSequenceProjector
+      extends ProcessorId("wireless-sequence-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessBaselineProjector
+      extends ProcessorId("wireless-baseline-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessSimilarityProjector
+      extends ProcessorId("wireless-similarity-projector", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case ThreatRiskProjector
+      extends ProcessorId("threat-risk-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
   case EmbeddingPreparer extends ProcessorId("embedding-preparer", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
   case EmbeddingCompleter
       extends ProcessorId("embedding-completer", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
@@ -64,6 +76,12 @@ object ProcessorId:
     ProcessorId.WirelessFrameNormalizer,
     ProcessorId.WirelessInventoryProjector,
     ProcessorId.WirelessIdentityProjector,
+    ProcessorId.WirelessBehaviorProjector,
+    ProcessorId.WirelessTimingProjector,
+    ProcessorId.WirelessSequenceProjector,
+    ProcessorId.WirelessBaselineProjector,
+    ProcessorId.WirelessSimilarityProjector,
+    ProcessorId.ThreatRiskProjector,
     ProcessorId.EmbeddingPreparer,
     ProcessorId.EmbeddingCompleter,
     ProcessorId.EmbeddingLeaseRecovery,
@@ -215,6 +233,66 @@ object ProcessorCatalog:
       "identity key",
       "record reconciliation finding",
       "identity rebuild"
+    ),
+    periodic(
+      ProcessorId.WirelessBehaviorProjector,
+      List("wireless normalized tables"),
+      List("behaviour_snapshots"),
+      List(ProcessorId.WirelessFrameNormalizer),
+      "mac/window",
+      "behaviour window",
+      "record reconciliation finding",
+      "behaviour rebuild"
+    ),
+    periodic(
+      ProcessorId.WirelessTimingProjector,
+      List("wireless normalized tables"),
+      List("timing_profiles"),
+      List(ProcessorId.WirelessFrameNormalizer),
+      "mac/session",
+      "timing window",
+      "record reconciliation finding",
+      "timing rebuild"
+    ),
+    periodic(
+      ProcessorId.WirelessSequenceProjector,
+      List("wireless normalized tables"),
+      List("frame_sequences", "sequence_transitions"),
+      List(ProcessorId.WirelessFrameNormalizer),
+      "session/token",
+      "sequence session",
+      "record reconciliation finding",
+      "sequence rebuild"
+    ),
+    periodic(
+      ProcessorId.WirelessBaselineProjector,
+      List("wireless normalized tables"),
+      List("baseline_profiles"),
+      List(ProcessorId.WirelessFrameNormalizer),
+      "bssid/window",
+      "baseline window",
+      "record reconciliation finding",
+      "baseline rebuild"
+    ),
+    periodic(
+      ProcessorId.WirelessSimilarityProjector,
+      List("search_vectors"),
+      List("similarity_pairs"),
+      List(ProcessorId.EmbeddingLeaseRecovery),
+      "kind/anchor/candidate",
+      "similarity anchor",
+      "record reconciliation finding",
+      "similarity rescan"
+    ),
+    periodic(
+      ProcessorId.ThreatRiskProjector,
+      List("wireless alerts", "similarity_pairs"),
+      List("threat_signals", "ap_risk_scores"),
+      List(ProcessorId.WirelessSimilarityProjector),
+      "signal/subject/window",
+      "risk subject",
+      "record reconciliation finding",
+      "risk rescan"
     ),
     periodic(
       ProcessorId.EmbeddingPreparer,

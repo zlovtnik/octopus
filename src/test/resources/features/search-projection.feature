@@ -1,4 +1,4 @@
-@processor-rf-alert-projector
+@processor-rf-alert-projector @processor-threat-risk-projector
 Feature: Search projection processor contracts
 
   Scenario Outline: An Octopus search projection processor has its declared durable contract
@@ -9,3 +9,4 @@ Feature: Search projection processor contracts
     Examples:
       | processor          | input           |
       | rf-alert-projector | wireless events |
+      | threat-risk-projector | wireless alerts |

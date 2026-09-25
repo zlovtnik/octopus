@@ -57,7 +57,7 @@ The currently wired binary provides:
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
   and every PostgreSQL durable operation, with error recording and bounded SDK shutdown.
 
-All 18 Octopus-owned processor IDs have exactly one workload declaration and
+All 24 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
 
 ## Components
@@ -93,7 +93,7 @@ state. All 20 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 18 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 24 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
 There is no Rails/console processor family. The `integration_console` database
@@ -270,7 +270,7 @@ The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
 processor catalog lists the 14 periodic/locked-load processors; the remaining
 four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
 is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
-is all 18 Octopus-owned processors.
+is all 24 Octopus-owned processors.
 
 A new consumer group replays every retained record; an existing group resumes
 from its committed Kafka offsets. Rollback must preserve consumer offsets,

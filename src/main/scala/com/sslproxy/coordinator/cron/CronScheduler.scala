@@ -129,6 +129,64 @@ final class CronScheduler private (
       yield similarities + candidates + identities + graphNodes).value
     )
 
+  def behaviorProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.WirelessBehaviorProjector,
+      interval,
+      projectionStore.projectBehavior(batchSize).value
+    )
+
+  def timingProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.WirelessTimingProjector,
+      interval,
+      projectionStore.projectTiming(batchSize).value
+    )
+
+  def sequenceProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.WirelessSequenceProjector,
+      interval,
+      projectionStore.projectSequences(batchSize).value
+    )
+
+  def baselineProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.WirelessBaselineProjector,
+      interval,
+      projectionStore.projectBaselines(batchSize).value
+    )
+
+  def similarityProjectorStream(
+    batchSize: Int,
+    interval: FiniteDuration,
+    eventDuplicateDistance: Double,
+    behaviorSimilarityThreshold: Double,
+    sequenceDistanceThreshold: Double
+  ): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.WirelessSimilarityProjector,
+      interval,
+      projectionStore
+        .projectSimilarities(
+          batchSize,
+          eventDuplicateDistance,
+          behaviorSimilarityThreshold,
+          sequenceDistanceThreshold
+        )
+        .value
+    )
+
+  def threatRiskProjectorStream(batchSize: Int, interval: FiniteDuration): Stream[IO, Unit] =
+    projectionStream(
+      ProcessorId.ThreatRiskProjector,
+      interval,
+      (for
+        threats <- projectionStore.projectDnsThreats(batchSize)
+        risks <- projectionStore.projectRisk(batchSize)
+      yield threats + risks).value
+    )
+
   private def projectionStream(
     processorId: ProcessorId,
     interval: FiniteDuration,

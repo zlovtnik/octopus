@@ -117,7 +117,10 @@ final class CronScheduler private (
     projectionStream(
       ProcessorId.WirelessIdentityProjector,
       interval,
-      projectionStore.projectApprovedIdentities(batchSize).value
+      (for
+        identities <- projectionStore.projectApprovedIdentities(batchSize)
+        graphNodes <- projectionStore.projectInfrastructureGraph(batchSize)
+      yield identities + graphNodes).value
     )
 
   private def projectionStream(

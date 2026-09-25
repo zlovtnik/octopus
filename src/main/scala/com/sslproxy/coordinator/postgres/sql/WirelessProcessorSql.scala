@@ -195,6 +195,28 @@ object WirelessProcessorSql:
                location_id = COALESCE(EXCLUDED.location_id, wireless_clients.location_id),
                updated_at = CURRENT_TIMESTAMP""").update.run
 
+    val searchDevices =
+      sql"""INSERT INTO atheros_search.devices (
+               mac, display_name, first_seen, last_seen, known_macs, updated_at
+             )
+             SELECT device.mac_id, device.display_name, device.first_seen,
+                    device.last_seen, jsonb_build_array(device.mac_id), CURRENT_TIMESTAMP
+             FROM devices device
+             LEFT JOIN atheros_search.devices projected ON projected.mac = device.mac_id
+             WHERE device.mac_id ~ '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$$'
+               AND (projected.mac IS NULL
+                 OR device.first_seen < projected.first_seen
+                 OR device.last_seen > projected.last_seen
+                 OR (device.display_name IS NOT NULL
+                   AND device.display_name IS DISTINCT FROM projected.display_name))
+             ORDER BY device.last_seen, device.mac_id
+             LIMIT $batchLimit
+             ON CONFLICT (mac) DO UPDATE SET
+               display_name = COALESCE(EXCLUDED.display_name, devices.display_name),
+               first_seen = LEAST(devices.first_seen, EXCLUDED.first_seen),
+               last_seen = GREATEST(devices.last_seen, EXCLUDED.last_seen),
+               updated_at = CURRENT_TIMESTAMP""".update.run
+
     val markInputs =
       (fr"""INSERT INTO wireless_inventory_projection_inputs (dedupe_key, projected_at)
              SELECT candidate.dedupe_key, CURRENT_TIMESTAMP
@@ -204,8 +226,9 @@ object WirelessProcessorSql:
     for
       deviceCount <- devices
       clientCount <- clients
+      searchDeviceCount <- searchDevices
       _ <- markInputs
-    yield deviceCount + clientCount
+    yield deviceCount + clientCount + searchDeviceCount
 
   private def inventoryCandidates(batchLimit: Int): Fragment =
     fr"""SELECT candidate.dedupe_key

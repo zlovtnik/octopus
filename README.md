@@ -89,7 +89,7 @@ The machine-readable source of truth is
 [`sql/postgres/contracts/processors.json`](../../sql/postgres/contracts/processors.json).
 Every entry declares its owner, family, mode, inputs, outputs, dependencies,
 dedupe key, lease scope, terminal behavior, reconciliation policy, and default
-state. All 20 entries default to disabled.
+state. All 26 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
@@ -267,7 +267,7 @@ warn-only schema validation, and invalid consumer-group contracts.
 
 The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
 `OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
-processor catalog lists the 14 periodic/locked-load processors; the remaining
+processor catalog lists the 20 non-Kafka processor IDs; the remaining
 four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
 is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
 is all 24 Octopus-owned processors.

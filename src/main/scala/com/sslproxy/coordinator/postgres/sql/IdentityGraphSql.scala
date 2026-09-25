@@ -168,7 +168,16 @@ object IdentityGraphSql:
                         WHERE wireless_alerts.subject_kind = 'access_point'
                           AND wireless_alerts.subject_id = frame.bssid
                           AND wireless_alerts.resolved_at IS NULL
-                        ORDER BY wireless_alerts.detected_at DESC
+                        ORDER BY wireless_alerts.detected_at DESC,
+                                 CASE wireless_alerts.severity
+                                   WHEN 'critical' THEN 1
+                                   WHEN 'high' THEN 2
+                                   WHEN 'medium' THEN 3
+                                   WHEN 'low' THEN 4
+                                   WHEN 'info' THEN 5
+                                   ELSE 6
+                                 END,
+                                 wireless_alerts.alert_id
                         LIMIT 1
                       ) alert ON TRUE
                       WHERE frame.bssid IS NOT NULL

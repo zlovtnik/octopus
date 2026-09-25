@@ -288,7 +288,7 @@ object ProcessorCatalog:
       ProcessorId.ThreatRiskProjector,
       List("wireless alerts", "similarity_pairs"),
       List("threat_signals", "ap_risk_scores"),
-      List(ProcessorId.WirelessSimilarityProjector),
+      List(ProcessorId.WirelessSimilarityProjector, ProcessorId.RfAlertProjector),
       "signal/subject/window",
       "risk subject",
       "record reconciliation finding",

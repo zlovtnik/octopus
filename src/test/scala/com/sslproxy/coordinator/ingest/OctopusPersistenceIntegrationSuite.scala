@@ -283,7 +283,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
                VALUES ($candidateId, $decision, 'identity-test')""".update.run.void.transact(xa)
       }
-      projected <- repository.projectApprovedIdentities()
+      projected <- repository.projectApprovedIdentities(0)
       _ = requireRight(projected)
       graphed <- repository.projectInfrastructureGraph(100)
       _ = requireRight(graphed)
@@ -317,9 +317,30 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
           "identity-conflict" -> ("conflict" -> None)
         )
       )
+      skipped <- repository.projectApprovedIdentities(0)
+      _ = assertEquals(skipped, Right(0))
+      skippedProjection <- sql"""SELECT COUNT(*), MIN(confidence)
+                                 FROM atheros_search.identity_cluster_members
+                                 WHERE mac IN (${macs(0)}, ${macs(1)})"""
+        .query[(Long, Option[Double])]
+        .unique
+        .transact(xa)
+      _ = assertEquals(skippedProjection, (2L, Some(0.98d)))
+      _ <- sql"""UPDATE atheros_search.merge_candidates
+                  SET confidence = 0.99
+                  WHERE candidate_id = 'identity-auto'""".update.run.void.transact(xa)
+      recomputed <- repository.projectApprovedIdentities(1)
+      _ = requireRight(recomputed)
+      refreshedProjection <- sql"""SELECT COUNT(*), MIN(confidence)
+                                   FROM atheros_search.identity_cluster_members
+                                   WHERE mac IN (${macs(0)}, ${macs(1)})"""
+        .query[(Long, Option[Double])]
+        .unique
+        .transact(xa)
+      _ = assertEquals(refreshedProjection, (2L, Some(0.99d)))
       _ <- sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
                   VALUES ('identity-auto', 'conflict', 'identity-test')""".update.run.void.transact(xa)
-      reprojected <- repository.projectApprovedIdentities()
+      reprojected <- repository.projectApprovedIdentities(0)
       _ = requireRight(reprojected)
       regraphed <- repository.projectInfrastructureGraph(100)
       _ = requireRight(regraphed)

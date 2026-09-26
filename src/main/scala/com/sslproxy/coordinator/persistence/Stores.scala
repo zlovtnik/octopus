@@ -103,7 +103,7 @@ trait ProjectionStore[F[_]]:
   ): DbResultT[F, Int]
   def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
-  def projectApprovedIdentities(): DbResultT[F, Int]
+  def projectApprovedIdentities(candidateChanges: Int): DbResultT[F, Int]
   def projectInfrastructureGraph(limit: Int): DbResultT[F, Int]
   def projectDnsThreats(limit: Int): DbResultT[F, Int]
   def projectRisk(limit: Int): DbResultT[F, Int]

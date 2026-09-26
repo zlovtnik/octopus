@@ -811,10 +811,14 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       }
     }
 
-  def projectApprovedIdentities(): IO[Either[DatabaseError, Int]] =
+  def projectApprovedIdentities(candidateChanges: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_approved_identities") {
-      IdentityGraphSql.reconcileMergeConfirmations *> IdentityGraphSql.approvedIdentityEdges.to[List].flatMap { edges =>
-        IdentityGraphSql.replaceClusters(IntelligencePreparation.identityClusters(edges).toList)
+      IdentityGraphSql.reconcileMergeConfirmations.flatMap { reconciled =>
+        if reconciled == 0 && candidateChanges <= 0 then 0.pure[ConnectionIO]
+        else
+          IdentityGraphSql.approvedIdentityEdges.to[List].flatMap { edges =>
+            IdentityGraphSql.replaceClusters(IntelligencePreparation.identityClusters(edges).toList)
+          }
       }
     }
 

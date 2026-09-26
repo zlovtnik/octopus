@@ -17,3 +17,7 @@ Feature: Wireless processor contracts
       | wireless-sequence-projector   | wireless normalized tables|
       | wireless-baseline-projector   | wireless normalized tables|
       | wireless-similarity-projector | search_vectors            |
+
+  Scenario: Identity projection exposes only confirmed device relationships
+    Given processor "wireless-identity-projector" belongs to "wireless"
+    Then the processor declares "confirmed identity clusters and same_device edges" as an output

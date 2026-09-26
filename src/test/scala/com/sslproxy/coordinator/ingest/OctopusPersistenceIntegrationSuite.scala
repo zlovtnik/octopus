@@ -12,10 +12,11 @@ import com.sslproxy.coordinator.domain.{
   ResolvedScanRequestRecord,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.postgres.sql.{MaintenanceSql, ProjectionSql}
+import com.sslproxy.coordinator.postgres.sql.{IdentityGraphSql, MaintenanceSql, ProjectionSql, ResultSql}
 import com.sslproxy.coordinator.postgres.{
   PostgresPayloadResolver,
   PostgresRepository,
+  PostgresResult,
   PostgresSchemaPreflight,
   PostgresTransactor
 }
@@ -244,6 +245,96 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(projection.get[Double]("risk_score"), Right(0.6))
       assertEquals(projection.get[String]("identity_source"), Right("observed_identity"))
       assert(projection.get[String]("wireless_search_text").toOption.exists(_.contains("sensor-projection")))
+
+  test("automatic identity confirmation requires the hard guard and yields to human decisions"):
+    requireDocker()
+    val trustedIdentity = "11111111-1111-1111-1111-111111111111"
+    val macs = (1 to 10).toList.map(index => f"02:00:00:00:00:$index%02x")
+    val candidates = List(
+      ("identity-auto", macs(0), macs(1), 0.98d),
+      ("identity-low", macs(2), macs(3), 0.979d),
+      ("identity-not-match", macs(4), macs(5), 1.0d),
+      ("identity-more-data", macs(6), macs(7), 1.0d),
+      ("identity-conflict", macs(8), macs(9), 1.0d)
+    )
+
+    for
+      _ <- macs.traverse_ { mac =>
+        sql"""INSERT INTO atheros_search.devices (
+                 mac, registered_device_id, first_seen, last_seen, registered
+               ) VALUES (
+                 $mac, CAST($trustedIdentity AS uuid), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, TRUE
+               )""".update.run.void.transact(xa)
+      }
+      _ <- macs.traverse_ { mac =>
+        sql"""INSERT INTO octopus_core.devices (mac_id, mac_hint)
+               VALUES ($mac, $mac)""".update.run.void.transact(xa)
+      }
+      _ <- candidates.traverse_ { case (candidateId, left, right, confidence) =>
+        sql"""INSERT INTO atheros_search.merge_candidates (
+                 candidate_id, mac_a, mac_b, confidence, projection_run_id
+               ) VALUES ($candidateId, $left, $right, $confidence, $candidateId)""".update.run.void.transact(xa)
+      }
+      _ <- List(
+        "identity-not-match" -> "not_match",
+        "identity-more-data" -> "needs_more_data",
+        "identity-conflict" -> "conflict"
+      ).traverse_ { case (candidateId, decision) =>
+        sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
+               VALUES ($candidateId, $decision, 'identity-test')""".update.run.void.transact(xa)
+      }
+      projected <- repository.projectApprovedIdentities()
+      _ = requireRight(projected)
+      graphed <- repository.projectInfrastructureGraph(100)
+      _ = requireRight(graphed)
+      approved <- IdentityGraphSql.approvedIdentityEdges.to[List].transact(xa)
+      states <- sql"""SELECT candidate_id, status, confirmation_source
+                       FROM atheros_search.merge_candidates
+                       WHERE candidate_id LIKE 'identity-%'"""
+        .query[(String, String, Option[String])]
+        .to[List]
+        .transact(xa)
+      confirmedProjection <- sql"""SELECT
+          (SELECT COUNT(*) FROM atheros_search.identity_cluster_members
+           WHERE mac IN (${macs(0)}, ${macs(1)})),
+          (SELECT COUNT(*) FROM atheros_search.graph_edges
+           WHERE edge_id = 'same-device:identity-auto')"""
+        .query[(Long, Long)]
+        .unique
+        .transact(xa)
+      stateByCandidate = states.map { case (candidateId, status, source) =>
+        candidateId -> (status -> source)
+      }.toMap
+      _ = assertEquals(approved, List((macs(0), macs(1), 0.98d)))
+      _ = assertEquals(confirmedProjection, (2L, 1L))
+      _ = assertEquals(
+        stateByCandidate,
+        Map(
+          "identity-auto" -> ("confirmed" -> Some("automatic")),
+          "identity-low" -> ("pending" -> None),
+          "identity-not-match" -> ("not_match" -> None),
+          "identity-more-data" -> ("needs_more_data" -> None),
+          "identity-conflict" -> ("conflict" -> None)
+        )
+      )
+      _ <- sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
+                  VALUES ('identity-auto', 'conflict', 'identity-test')""".update.run.void.transact(xa)
+      reprojected <- repository.projectApprovedIdentities()
+      _ = requireRight(reprojected)
+      regraphed <- repository.projectInfrastructureGraph(100)
+      _ = requireRight(regraphed)
+      blocked <- IdentityGraphSql.approvedIdentityEdges.to[List].transact(xa)
+      blockedProjection <- sql"""SELECT
+          (SELECT COUNT(*) FROM atheros_search.identity_cluster_members
+           WHERE mac IN (${macs(0)}, ${macs(1)})),
+          (SELECT COUNT(*) FROM atheros_search.graph_edges
+           WHERE edge_id = 'same-device:identity-auto')"""
+        .query[(Long, Long)]
+        .unique
+        .transact(xa)
+      _ = assertEquals(blocked, Nil)
+      _ = assertEquals(blockedProjection, (0L, 0L))
+    yield ()
 
   test("historical hydration normalizes null-like projections without changing durable payloads"):
     requireDocker()
@@ -667,6 +758,102 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(state._4, "pending")
       assertEquals(state._5, "pending")
       assertEquals(state._6, 1L)
+
+  test("outbox enqueue keeps published messages closed and reopens failed ones"):
+    requireDocker()
+    val record = translatedAudit(
+      """{"observed_at":"2026-07-25T20:01:30Z","host":"idempotent-outbox.example"}""",
+      offset = 90L
+    )
+    val resultBatchId = "22222222-2222-2222-2222-222222222222"
+    val firstResult = PostgresResult.success(
+      jobId = "33333333-3333-3333-3333-333333333333",
+      batchId = resultBatchId,
+      rowCount = 1,
+      checksum = "first",
+      finishedAt = "2026-07-25T20:01:30Z"
+    )
+
+    for
+      _ <- parkPendingLoadOutboxes()
+      decision <- persist(record, offset = 90L)
+      _ <- sql"""UPDATE outbox_events
+                  SET status = 'published', published_at = CURRENT_TIMESTAMP
+                  WHERE destination_topic = 'sync.oracle.load'
+                    AND source_id = ${decision.batchId}""".update.run.void.transact(xa)
+      retriedLoad <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+      _ = requireRight(retriedLoad)
+      loadState <- sql"""SELECT status, published_at IS NOT NULL, COUNT(*) OVER ()
+                          FROM outbox_events
+                          WHERE destination_topic = 'sync.oracle.load'
+                            AND source_id = ${decision.batchId}"""
+        .query[(String, Boolean, Long)]
+        .unique
+        .transact(xa)
+      _ <- ResultSql
+        .enqueue(firstResult, attempt = 1, outboxId = "44444444-4444-4444-4444-444444444444")
+        .transact(xa)
+      _ <- sql"""UPDATE outbox_events
+                  SET status = 'published', published_at = CURRENT_TIMESTAMP
+                  WHERE destination_topic = 'sync.oracle.result'
+                    AND message_key = ${s"$resultBatchId:1"}""".update.run.void.transact(xa)
+      _ <- ResultSql
+        .enqueue(
+          firstResult.copy(rowCount = 2, checksum = "retry"),
+          attempt = 1,
+          outboxId = "55555555-5555-5555-5555-555555555555"
+        )
+        .transact(xa)
+      resultState <- sql"""SELECT status, published_at IS NOT NULL,
+                                   payload ->> 'row_count', outbox_id
+                            FROM outbox_events
+                            WHERE destination_topic = 'sync.oracle.result'
+                              AND message_key = ${s"$resultBatchId:1"}"""
+        .query[(String, Boolean, String, String)]
+        .unique
+        .transact(xa)
+      _ <- sql"""UPDATE sync_batches SET status = 'pending'
+                  WHERE batch_id = ${decision.batchId}""".update.run.void.transact(xa)
+      _ <- sql"""UPDATE outbox_events
+                  SET status = 'failed', last_error = 'publish attempts exhausted'
+                  WHERE destination_topic IN ('sync.oracle.load', 'sync.oracle.result')
+                    AND (source_id = ${decision.batchId}
+                         OR message_key = ${s"$resultBatchId:1"})""".update.run.void.transact(xa)
+      reopenedLoad <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+      _ = requireRight(reopenedLoad)
+      _ <- ResultSql
+        .enqueue(
+          firstResult.copy(rowCount = 3, checksum = "recovered"),
+          attempt = 1,
+          outboxId = "66666666-6666-6666-6666-666666666666"
+        )
+        .transact(xa)
+      reopened <- sql"""SELECT
+          l.status, l.attempt_count, l.published_at IS NULL,
+          (SELECT COUNT(*) FROM outbox_events
+           WHERE destination_topic = 'sync.oracle.load'
+             AND source_id = ${decision.batchId}),
+          r.status, r.attempt_count, r.payload ->> 'row_count',
+          (SELECT COUNT(*) FROM outbox_events
+           WHERE destination_topic = 'sync.oracle.result'
+             AND message_key = ${s"$resultBatchId:1"})
+        FROM outbox_events l
+        JOIN outbox_events r
+          ON r.destination_topic = 'sync.oracle.result'
+         AND r.message_key = ${s"$resultBatchId:1"}
+        WHERE l.destination_topic = 'sync.oracle.load'
+          AND l.source_id = ${decision.batchId}"""
+        .query[(String, Int, Boolean, Long, String, Int, String, Long)]
+        .unique
+        .transact(xa)
+      _ <- parkPendingLoadOutboxes()
+    yield
+      assertEquals(loadState, ("published", true, 1L))
+      assertEquals(
+        resultState,
+        ("published", true, "1", "44444444-4444-4444-4444-444444444444")
+      )
+      assertEquals(reopened, ("pending", 0, true, 1L, "pending", 0, "3", 1L))
 
   test("maximum accepted payload audit persists a compact payload_ref and stores full payload in payload column"):
     requireDocker()

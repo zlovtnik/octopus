@@ -31,16 +31,17 @@ object ResultSql:
              0, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
            ) ON CONFLICT (destination_topic, message_key) DO UPDATE SET
              payload = EXCLUDED.payload,
-             attempt_count = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN 0 ELSE outbox_events.attempt_count END,
+             attempt_count = 0,
              max_attempts = EXCLUDED.max_attempts,
-             next_attempt_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN CURRENT_TIMESTAMP ELSE outbox_events.next_attempt_at END,
-             owner_id = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.owner_id END,
-             lease_token = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.lease_token END,
-             lease_expires_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.lease_expires_at END,
-             published_at = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.published_at END,
-             last_error = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN NULL ELSE outbox_events.last_error END,
-             status = CASE WHEN outbox_events.status IN ('published', 'failed', 'cancelled') THEN 'pending' ELSE outbox_events.status END,
-             updated_at = CURRENT_TIMESTAMP""".update.run.void
+             next_attempt_at = CURRENT_TIMESTAMP,
+             status = 'pending',
+             owner_id = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             published_at = NULL,
+             last_error = NULL,
+             updated_at = CURRENT_TIMESTAMP
+           WHERE outbox_events.status IN ('failed', 'cancelled')""".update.run.void
 
   def batchForUpdate(batchId: String): Query0[BatchState] =
     sql"""SELECT b.job_id, b.stream_name, b.payload_ref,

@@ -18,8 +18,14 @@ class JobBatchSqlSuite extends FunSuite:
     assert(statement.sql.contains("INSERT INTO outbox_events"))
     assert(statement.sql.contains("destination_topic"))
     assert(statement.sql.contains("LIMIT ?"))
-    assert(statement.sql.contains("status = CASE WHEN outbox_events.status IN"))
-    assert(statement.sql.contains("attempt_count = CASE WHEN outbox_events.status IN"))
-    assert(statement.sql.contains("lease_expires_at = CASE WHEN outbox_events.status IN"))
+    assert(
+      statement.sql.contains(
+        "ON CONFLICT (destination_topic, message_key) DO UPDATE SET"
+      )
+    )
+    assert(statement.sql.contains("WHERE outbox_events.status IN ('failed', 'cancelled')"))
+    assert(statement.sql.contains("status = 'pending'"))
+    assert(!statement.sql.contains("DO NOTHING"))
+    assert(!statement.sql.contains("status = CASE WHEN outbox_events.status IN"))
     assert(!statement.sql.contains("proxy.events"))
     assert(!statement.sql.contains("wireless.audit"))

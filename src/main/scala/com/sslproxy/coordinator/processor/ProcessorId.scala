@@ -227,7 +227,7 @@ object ProcessorCatalog:
     periodic(
       ProcessorId.WirelessIdentityProjector,
       List("inventory"),
-      List("identity projections"),
+      List("confirmed identity clusters and same_device edges"),
       List(ProcessorId.WirelessInventoryProjector),
       "identity/source",
       "identity key",

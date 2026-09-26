@@ -6,6 +6,8 @@ import doobie.ConnectionIO
 import doobie.implicits.*
 
 object IdentityGraphSql:
+  val AutomaticMergeSimilarity = 0.98d
+
   def similarityEdges(minimumSimilarity: Double, limit: Int): doobie.Query0[(String, String, Double)] =
     sql"""SELECT left_source_mac, right_source_mac, cosine_similarity
            FROM atheros_search.similarity_pairs pair
@@ -29,14 +31,101 @@ object IdentityGraphSql:
            ORDER BY pair.computed_at, pair.pair_id
            LIMIT ${limit.max(1)}""".query[(String, String, Double)]
 
-  def approvedIdentityEdges(limit: Int): doobie.Query0[(String, String, Double)] =
+  def approvedIdentityEdges: doobie.Query0[(String, String, Double)] =
     sql"""SELECT candidate.mac_a, candidate.mac_b, candidate.confidence
            FROM atheros_search.merge_candidates candidate
-           JOIN atheros_search.merge_decisions decision
-             ON decision.candidate_id = candidate.candidate_id
-           WHERE decision.decision = 'merge'
-           ORDER BY decision.decided_at, candidate.candidate_id
-           LIMIT ${limit.max(1)}""".query[(String, String, Double)]
+           WHERE candidate.status = 'confirmed'
+             AND (
+               (candidate.confirmation_source = 'human' AND EXISTS (
+                 SELECT 1
+                 FROM atheros_search.merge_decisions decision
+                 WHERE decision.candidate_id = candidate.candidate_id
+                   AND decision.decision = 'merge'
+               ))
+               OR
+               (candidate.confirmation_source = 'automatic'
+                 AND candidate.confidence >= $AutomaticMergeSimilarity
+                 AND candidate.trusted_registered_device_id IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM atheros_search.merge_decisions decision
+                   WHERE decision.candidate_id = candidate.candidate_id
+                 )
+                 AND EXISTS (
+                   SELECT 1
+                   FROM atheros_search.devices left_device
+                   JOIN atheros_search.devices right_device
+                     ON right_device.mac = candidate.mac_b
+                    AND right_device.registered
+                    AND right_device.registered_device_id = left_device.registered_device_id
+                   WHERE left_device.mac = candidate.mac_a
+                     AND left_device.registered
+                     AND left_device.registered_device_id IS NOT NULL
+                     AND left_device.registered_device_id = candidate.trusted_registered_device_id
+                 ))
+             )
+           ORDER BY candidate.confirmed_at, candidate.candidate_id""".query[(String, String, Double)]
+
+  def reconcileMergeConfirmations: ConnectionIO[Int] =
+    sql"""WITH classified AS (
+             SELECT candidate.candidate_id,
+                    CASE
+                      WHEN decision.decision = 'merge' THEN 'confirmed'
+                      WHEN decision.candidate_id IS NOT NULL THEN decision.decision
+                      WHEN candidate.confidence >= $AutomaticMergeSimilarity
+                       AND left_device.registered
+                       AND right_device.registered
+                       AND left_device.registered_device_id IS NOT NULL
+                       AND left_device.registered_device_id = right_device.registered_device_id
+                      THEN 'confirmed'
+                      ELSE 'pending'
+                    END AS next_status,
+                    CASE
+                      WHEN decision.decision = 'merge' THEN 'human'
+                      WHEN decision.candidate_id IS NULL
+                       AND candidate.confidence >= $AutomaticMergeSimilarity
+                       AND left_device.registered
+                       AND right_device.registered
+                       AND left_device.registered_device_id IS NOT NULL
+                       AND left_device.registered_device_id = right_device.registered_device_id
+                      THEN 'automatic'
+                      ELSE NULL
+                    END AS next_source,
+                    CASE
+                      WHEN decision.candidate_id IS NULL
+                       AND candidate.confidence >= $AutomaticMergeSimilarity
+                       AND left_device.registered
+                       AND right_device.registered
+                       AND left_device.registered_device_id IS NOT NULL
+                       AND left_device.registered_device_id = right_device.registered_device_id
+                      THEN left_device.registered_device_id
+                      ELSE NULL
+                    END AS next_registered_device_id
+             FROM atheros_search.merge_candidates candidate
+             LEFT JOIN atheros_search.merge_decisions decision
+               ON decision.candidate_id = candidate.candidate_id
+             LEFT JOIN atheros_search.devices left_device
+               ON left_device.mac = candidate.mac_a
+             LEFT JOIN atheros_search.devices right_device
+               ON right_device.mac = candidate.mac_b
+           )
+           UPDATE atheros_search.merge_candidates candidate
+              SET status = classified.next_status,
+                  confirmation_source = classified.next_source,
+                  trusted_registered_device_id = classified.next_registered_device_id,
+                  confirmed_at = CASE
+                    WHEN classified.next_status = 'confirmed'
+                    THEN COALESCE(candidate.confirmed_at, CURRENT_TIMESTAMP)
+                    ELSE NULL
+                  END,
+                  updated_at = CURRENT_TIMESTAMP
+             FROM classified
+            WHERE classified.candidate_id = candidate.candidate_id
+              AND (candidate.status, candidate.confirmation_source,
+                   candidate.trusted_registered_device_id)
+                  IS DISTINCT FROM
+                  (classified.next_status, classified.next_source,
+                   classified.next_registered_device_id)""".update.run
 
   def persistMergeCandidate(left: String, right: String, confidence: Double): ConnectionIO[Int] =
     val ordered = Vector(left, right).sorted
@@ -79,8 +168,14 @@ object IdentityGraphSql:
                             'active', ${value.projectionRunId}
                           ) ON CONFLICT (cluster_id) DO UPDATE SET
                             cluster_size = EXCLUDED.cluster_size,
-                            first_seen = LEAST(first_seen, EXCLUDED.first_seen),
-                            last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
+                            first_seen = LEAST(
+                              atheros_search.identity_clusters.first_seen,
+                              EXCLUDED.first_seen
+                            ),
+                            last_seen = GREATEST(
+                              atheros_search.identity_clusters.last_seen,
+                              EXCLUDED.last_seen
+                            ),
                             status = 'active',
                             projection_run_id = EXCLUDED.projection_run_id,
                             updated_at = CURRENT_TIMESTAMP""".update.run
@@ -89,7 +184,7 @@ object IdentityGraphSql:
                    cluster_id, mac, confidence, evidence, first_seen, last_seen
                  )
                  SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
-                        jsonb_build_object('source', 'approved_merge_decision'),
+                         jsonb_build_object('source', 'confirmed_identity_edge'),
                         device.first_seen, device.last_seen
                  FROM devices device
                  WHERE device.mac_id = $mac
@@ -97,8 +192,14 @@ object IdentityGraphSql:
                    cluster_id = EXCLUDED.cluster_id,
                    confidence = EXCLUDED.confidence,
                    evidence = EXCLUDED.evidence,
-                   first_seen = LEAST(first_seen, EXCLUDED.first_seen),
-                   last_seen = GREATEST(last_seen, EXCLUDED.last_seen),
+                   first_seen = LEAST(
+                     atheros_search.identity_cluster_members.first_seen,
+                     EXCLUDED.first_seen
+                   ),
+                   last_seen = GREATEST(
+                     atheros_search.identity_cluster_members.last_seen,
+                     EXCLUDED.last_seen
+                   ),
                    updated_at = CURRENT_TIMESTAMP""".update.run
             }
           yield cluster + members.sum
@@ -111,9 +212,70 @@ object IdentityGraphSql:
       }
     }
 
+  def replaceClusters(values: List[IdentityClusterProjection]): ConnectionIO[Int] =
+    for
+      deactivated <- sql"""UPDATE atheros_search.identity_clusters
+                            SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
+                            WHERE status = 'active'""".update.run
+      removedMembers <- sql"""DELETE FROM atheros_search.identity_cluster_members""".update.run
+      persisted <- values.traverse(persistCluster).map(_.sum)
+    yield deactivated + removedMembers + persisted
+
   def projectGraph(limit: Int, projectionRunId: String): ConnectionIO[Int] =
     val batchLimit = limit.max(1)
     for
+      removedSameDeviceEdges <- sql"""DELETE FROM atheros_search.graph_edges edge
+                                       WHERE edge.edge_kind = 'same_device'
+                                         AND NOT EXISTS (
+                                           SELECT 1
+                                           FROM atheros_search.merge_candidates candidate
+                                           WHERE edge.edge_id = CONCAT('same-device:', candidate.candidate_id)
+                                             AND candidate.status = 'confirmed'
+                                             AND (
+                                               (candidate.confirmation_source = 'human' AND EXISTS (
+                                                 SELECT 1 FROM atheros_search.merge_decisions decision
+                                                 WHERE decision.candidate_id = candidate.candidate_id
+                                                   AND decision.decision = 'merge'
+                                               ))
+                                               OR
+                                               (candidate.confirmation_source = 'automatic'
+                                                 AND candidate.confidence >= $AutomaticMergeSimilarity
+                                                 AND candidate.trusted_registered_device_id IS NOT NULL
+                                                 AND NOT EXISTS (
+                                                   SELECT 1 FROM atheros_search.merge_decisions decision
+                                                   WHERE decision.candidate_id = candidate.candidate_id
+                                                 )
+                                                 AND EXISTS (
+                                                   SELECT 1
+                                                   FROM atheros_search.devices left_device
+                                                   JOIN atheros_search.devices right_device
+                                                     ON right_device.mac = candidate.mac_b
+                                                    AND right_device.registered
+                                                    AND right_device.registered_device_id = left_device.registered_device_id
+                                                   WHERE left_device.mac = candidate.mac_a
+                                                     AND left_device.registered
+                                                     AND left_device.registered_device_id IS NOT NULL
+                                                     AND left_device.registered_device_id = candidate.trusted_registered_device_id
+                                                 ))
+                                             )
+                                          )""".update.run
+      removedIdentityMemberEdges <- sql"""DELETE FROM atheros_search.graph_edges edge
+                                           WHERE edge.edge_kind = 'identity_member'
+                                             AND NOT EXISTS (
+                                               SELECT 1
+                                               FROM atheros_search.identity_cluster_members member
+                                               WHERE edge.edge_id = CONCAT(
+                                                 'identity-member:', member.cluster_id, ':', member.mac
+                                               )
+                                             )""".update.run
+      removedIdentityNodes <- sql"""DELETE FROM atheros_search.graph_nodes node
+                                     WHERE node.node_kind = 'identity_cluster'
+                                       AND NOT EXISTS (
+                                         SELECT 1
+                                         FROM atheros_search.identity_clusters cluster
+                                         WHERE node.node_id = CONCAT('identity:', cluster.cluster_id)
+                                           AND cluster.status = 'active'
+                                       )""".update.run
       deviceNodes <- sql"""INSERT INTO atheros_search.graph_nodes (
                             node_id, node_kind, label, node_payload, location_id,
                             normalized_mac, is_threat, observed_at, projection_run_id
@@ -125,7 +287,7 @@ object IdentityGraphSql:
                                    'explain_kind', 'device',
                                    'username', registered.username,
                                    'hostname', registered.hostname,
-                                   'os_hint', registered.os_hint
+                                   'os_hint', device.os_hint
                                  ), NULL, device.mac_id, FALSE,
                                  device.last_seen,
                                  $projectionRunId
@@ -258,7 +420,57 @@ object IdentityGraphSql:
                                  COALESCE(graph_edges.observed_at, EXCLUDED.observed_at),
                                  COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
                                ),
-                               updated_at = CURRENT_TIMESTAMP""".update.run
+                                updated_at = CURRENT_TIMESTAMP""".update.run
+      sameDeviceEdges <- sql"""INSERT INTO atheros_search.graph_edges (
+                                  edge_id, source_node_id, target_node_id, edge_kind,
+                                  weight, weight_basis, label, evidence, observed_at, projection_run_id
+                                )
+                                SELECT CONCAT('same-device:', candidate.candidate_id),
+                                       CONCAT('device:', candidate.mac_a), CONCAT('device:', candidate.mac_b),
+                                       'same_device', candidate.confidence, 'cosine_similarity',
+                                       'confirmed same device',
+                                       jsonb_build_object(
+                                         'candidate_id', candidate.candidate_id,
+                                         'confirmation_source', candidate.confirmation_source
+                                       ), candidate.confirmed_at, $projectionRunId
+                                FROM atheros_search.merge_candidates candidate
+                                WHERE candidate.status = 'confirmed'
+                                  AND (
+                                    (candidate.confirmation_source = 'human' AND EXISTS (
+                                      SELECT 1 FROM atheros_search.merge_decisions decision
+                                      WHERE decision.candidate_id = candidate.candidate_id
+                                        AND decision.decision = 'merge'
+                                    ))
+                                    OR
+                                    (candidate.confirmation_source = 'automatic'
+                                      AND candidate.confidence >= $AutomaticMergeSimilarity
+                                      AND candidate.trusted_registered_device_id IS NOT NULL
+                                      AND NOT EXISTS (
+                                        SELECT 1 FROM atheros_search.merge_decisions decision
+                                        WHERE decision.candidate_id = candidate.candidate_id
+                                      )
+                                      AND EXISTS (
+                                        SELECT 1
+                                        FROM atheros_search.devices left_device
+                                        JOIN atheros_search.devices right_device
+                                          ON right_device.mac = candidate.mac_b
+                                         AND right_device.registered
+                                         AND right_device.registered_device_id = left_device.registered_device_id
+                                        WHERE left_device.mac = candidate.mac_a
+                                          AND left_device.registered
+                                          AND left_device.registered_device_id IS NOT NULL
+                                          AND left_device.registered_device_id = candidate.trusted_registered_device_id
+                                      ))
+                                  )
+                                ORDER BY candidate.confirmed_at, candidate.candidate_id
+                                LIMIT $batchLimit
+                                ON CONFLICT (edge_id) DO UPDATE SET
+                                  weight = EXCLUDED.weight,
+                                  weight_basis = EXCLUDED.weight_basis,
+                                  evidence = EXCLUDED.evidence,
+                                  observed_at = EXCLUDED.observed_at,
+                                  projection_run_id = EXCLUDED.projection_run_id,
+                                  updated_at = CURRENT_TIMESTAMP""".update.run
       roamingEdges <- sql"""INSERT INTO atheros_search.graph_edges (
                               edge_id, source_node_id, target_node_id, edge_kind,
                               weight, weight_basis, label, evidence, observed_at, projection_run_id
@@ -391,4 +603,4 @@ object IdentityGraphSql:
                                    COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
                                  ),
                                  updated_at = CURRENT_TIMESTAMP""".update.run
-    yield deviceNodes + apNodes + clusterNodes + edges + identityEdges + roamingEdges + sameChannelEdges + vendorLinkEdges
+    yield removedSameDeviceEdges + removedIdentityMemberEdges + removedIdentityNodes + deviceNodes + apNodes + clusterNodes + edges + identityEdges + sameDeviceEdges + roamingEdges + sameChannelEdges + vendorLinkEdges

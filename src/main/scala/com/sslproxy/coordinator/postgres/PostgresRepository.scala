@@ -763,30 +763,31 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
             case true =>
               IntelligenceSql.similarityAnchors(kind, limit).to[List].flatMap { anchors =>
                 anchors
-                  .foldM((0, limit.max(1))) { case ((written, remaining), (vectorId, documentId, model, embedding, embeddedAt)) =>
-                    if remaining <= 0 then (written, remaining).pure[ConnectionIO]
-                    else
-                      IntelligenceSql.beginSimilarityAnchor(kind, vectorId, documentId, model, embeddedAt) *>
-                        IntelligenceSql
-                          .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining)
-                          .to[List]
-                          .flatMap { values =>
-                            values
-                              .traverse { candidate =>
-                                IntelligencePreparation
-                                  .similarity(candidate)
-                                  .fold(
-                                    error => FC.raiseError[Int](IllegalArgumentException(error)),
-                                    IntelligenceSql.persistSimilarity
-                                  )
-                              }
-                              .flatMap { counts =>
-                                val progress = (written + counts.sum, remaining - values.size)
-                                if PostgresRepository.similarityAnchorExhausted(values.size, remaining) then
-                                  IntelligenceSql.markSimilarityAnchor(kind, vectorId, embeddedAt).as(progress)
-                                else progress.pure[ConnectionIO]
-                              }
-                          }
+                  .foldM((0, limit.max(1))) {
+                    case ((written, remaining), (vectorId, documentId, model, embedding, embeddedAt)) =>
+                      if remaining <= 0 then (written, remaining).pure[ConnectionIO]
+                      else
+                        IntelligenceSql.beginSimilarityAnchor(kind, vectorId, documentId, model, embeddedAt) *>
+                          IntelligenceSql
+                            .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining)
+                            .to[List]
+                            .flatMap { values =>
+                              values
+                                .traverse { candidate =>
+                                  IntelligencePreparation
+                                    .similarity(candidate)
+                                    .fold(
+                                      error => FC.raiseError[Int](IllegalArgumentException(error)),
+                                      IntelligenceSql.persistSimilarity
+                                    )
+                                }
+                                .flatMap { counts =>
+                                  val progress = (written + counts.sum, remaining - values.size)
+                                  if PostgresRepository.similarityAnchorExhausted(values.size, remaining) then
+                                    IntelligenceSql.markSimilarityAnchor(kind, vectorId, embeddedAt).as(progress)
+                                  else progress.pure[ConnectionIO]
+                                }
+                            }
                   }
                   .map(_._1)
               }
@@ -810,14 +811,10 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       }
     }
 
-  def projectApprovedIdentities(limit: Int): IO[Either[DatabaseError, Int]] =
+  def projectApprovedIdentities(): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_approved_identities") {
-      IdentityGraphSql.approvedIdentityEdges(limit).to[List].flatMap { edges =>
-        IntelligencePreparation
-          .identityClusters(edges)
-          .toList
-          .traverse(IdentityGraphSql.persistCluster)
-          .map(_.sum)
+      IdentityGraphSql.reconcileMergeConfirmations *> IdentityGraphSql.approvedIdentityEdges.to[List].flatMap { edges =>
+        IdentityGraphSql.replaceClusters(IntelligencePreparation.identityClusters(edges).toList)
       }
     }
 

@@ -124,7 +124,7 @@ final class CronScheduler private (
       (for
         similarities <- projectionStore.projectDeviceSimilarities(batchSize, minimumSimilarity)
         candidates <- projectionStore.projectClusterCandidates(batchSize, minimumSimilarity)
-        identities <- projectionStore.projectApprovedIdentities(batchSize)
+        identities <- projectionStore.projectApprovedIdentities()
         graphNodes <- projectionStore.projectInfrastructureGraph(batchSize)
       yield similarities + candidates + identities + graphNodes).value
     )

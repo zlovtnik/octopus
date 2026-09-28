@@ -646,8 +646,10 @@ object IdentityGraphSql:
                                         COALESCE(existing.projected_at, TIMESTAMPTZ 'epoch') AS projected_at
                                  FROM (
                                    SELECT date_trunc('hour', frame.observed_at)
-                                            + floor(EXTRACT(minute FROM frame.observed_at) / 5) * INTERVAL '5 minutes',
-                                          COALESCE(frame.sensor_id, 'unknown'), frame.bssid, frame.source_mac,
+                                            + floor(EXTRACT(minute FROM frame.observed_at) / 5) * INTERVAL '5 minutes'
+                                            AS window_start,
+                                          COALESCE(frame.sensor_id, 'unknown') AS sensor_id,
+                                          frame.bssid AS bssid, frame.source_mac AS source_mac,
                                           MAX(frame.updated_at) AS bucket_updated_at
                                    FROM wireless_frames frame
                                    WHERE frame.source_mac IS NOT NULL

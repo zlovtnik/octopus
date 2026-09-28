@@ -333,7 +333,8 @@ object Main extends IOApp.Simple:
                                   cronScheduler.embeddingJobPreparerStream(
                                     cfg.processors.batchSize,
                                     cfg.processors.intervalSeconds.seconds,
-                                    cfg.processors.embeddingModel
+                                    cfg.processors.embeddingModel,
+                                    cfg.processors.embeddingPendingHighWater
                                   )
                                 ),
                                 ProcessorWorkload(

@@ -17,6 +17,15 @@ class AppConfigSuite extends FunSuite:
       assert(validationMessages(config).contains("processors.embedding-model must be nomic-embed-text-v2-moe"))
     }
 
+  test("embedding pending high water guards an unconsumed queue"):
+    assertEquals(defaults.processors.embeddingPendingHighWater, 1000000)
+    val negative =
+      defaults.copy(processors = defaults.processors.copy(embeddingPendingHighWater = -1))
+    assert(
+      validationMessages(negative)
+        .contains("processors.embedding-pending-high-water must not be negative")
+    )
+
   test("sink timeout defaults and millisecond bounds"):
     assertEquals(defaults.postgres.statementTimeoutSecs, 30)
     assertEquals(defaults.postgres.networkTimeoutSecs, 60)

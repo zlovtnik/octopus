@@ -651,6 +651,11 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
         .map(_.sum)
     }
 
+  def pendingEmbeddingJobCount: IO[Either[DatabaseError, Long]] =
+    runDb("postgres.pending_embedding_job_count") {
+      SearchPreparationSql.pendingEmbeddingJobCount.unique
+    }
+
   def prepareEmbeddingJobs(
     limit: Int,
     embeddingModel: String

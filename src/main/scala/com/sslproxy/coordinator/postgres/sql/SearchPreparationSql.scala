@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.postgres.sql
 import cats.syntax.all.*
 import com.sslproxy.coordinator.processor.{PreparedSearchDocument, SearchDocumentKind, SearchDocumentSource}
 import doobie.implicits.*
-import doobie.{ConnectionIO, Query0, Update}
+import doobie.{ConnectionIO, Query0, Update, Update0}
 import io.circe.Json
 import io.circe.syntax.*
 
@@ -440,12 +440,14 @@ object SearchPreparationSql:
       .noSpaces
 
     for
-      _ <- sql"""UPDATE atheros_search.search_documents
-                   SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
-                   WHERE source_table = $sourceTable
-                     AND source_key = ${document.sourceKey}
-                     AND document_id <> ${document.documentId}
-                     AND status = 'active'""".update.run
+      supersededIds <- sql"""UPDATE atheros_search.search_documents
+                              SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
+                              WHERE source_table = $sourceTable
+                                AND source_key = ${document.sourceKey}
+                                AND document_id <> ${document.documentId}
+                                AND status = 'active'
+                              RETURNING document_id""".query[String].to[List]
+      _ <- cancelSupersededEmbeddingJobs(supersededIds)
       _ <- sql"""INSERT INTO atheros_search.search_documents (
                    document_id, source_id, source_key, source_table, source_kind, source_version,
                    source_mac, location_id, sensor_id, observed_at, bssid, ssid,
@@ -508,6 +510,31 @@ object SearchPreparationSql:
         })
         .void
     yield ()
+
+  // A document superseded before its embedding job ran is dead work: the
+  // vector would describe content the search index no longer serves, and the
+  // queue cannot drain while it waits. The replacement document gets its own
+  // job from documentsMissingEmbeddingJobs, so only the superseded rows go.
+  private[sql] def cancelSupersededEmbeddingJobs(documentIds: List[String]): ConnectionIO[Unit] =
+    if documentIds.isEmpty then ().pure[ConnectionIO]
+    else cancelSupersededEmbeddingJobsUpdate(documentIds).run.void
+
+  private[sql] def cancelSupersededEmbeddingJobsUpdate(documentIds: List[String]): Update0 =
+    val idClause = documentIds.map(id => fr0"$id").intercalate(fr",")
+    (fr"""UPDATE atheros_search.embedding_jobs
+            SET status = 'cancelled',
+                owner_id = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                next_attempt_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE status IN ('pending', 'leased')
+            AND document_id IN (""" ++ idClause ++ fr")").update
+
+  // The preparer consults this before enqueueing so an unconsumed queue stops
+  // growing instead of running away while the worker pool is behind.
+  def pendingEmbeddingJobCount: Query0[Long] =
+    sql"SELECT COUNT(*) FROM atheros_search.embedding_jobs WHERE status = 'pending'".query[Long]
 
   def documentsMissingEmbeddingJobs(
     kind: SearchDocumentKind,

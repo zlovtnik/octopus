@@ -20,6 +20,9 @@ final class PostgresProjectionStore(repository: PostgresRepository) extends Proj
   def prepareEmbeddingJobs(limit: Int, embeddingModel: String): DbResultT[IO, Int] =
     EitherT(repository.prepareEmbeddingJobs(limit, embeddingModel))
 
+  def pendingEmbeddingJobCount: DbResultT[IO, Long] =
+    EitherT(repository.pendingEmbeddingJobCount)
+
   def projectBehavior(limit: Int): DbResultT[IO, Int] =
     EitherT(repository.projectBehavior(limit))
 

@@ -133,6 +133,7 @@ final case class ProcessorConfig(
   batchSize: Int = 250,
   intervalSeconds: Int = 10,
   embeddingModel: String = "nomic-embed-text-v2-moe",
+  embeddingPendingHighWater: Int = 1000000,
   eventDuplicateDistance: Double = 0.05d,
   behaviorSimilarityThreshold: Double = 0.88d,
   sequenceDistanceThreshold: Double = 0.10d
@@ -290,6 +291,9 @@ object AppConfig:
       ),
       Option.when(config.embeddingModel != "nomic-embed-text-v2-moe")(
         "processors.embedding-model must be nomic-embed-text-v2-moe"
+      ),
+      Option.when(config.embeddingPendingHighWater < 0)(
+        "processors.embedding-pending-high-water must not be negative"
       ),
       Option.when(
         !config.eventDuplicateDistance.isFinite || config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d

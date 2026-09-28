@@ -39,3 +39,10 @@ class SearchPreparationSqlSuite extends FunSuite:
       assert(statement.contains("document.source_kind = ?"))
       assert(statement.contains("job.embedding_kind = ?"))
     }
+
+  test("superseded documents cancel only their own unfinished embedding jobs"):
+    val statement = SearchPreparationSql.cancelSupersededEmbeddingJobsUpdate(List("doc-1", "doc-2")).sql
+    assert(statement.contains("status = 'cancelled'"))
+    assert(statement.contains("status IN ('pending', 'leased')"))
+    assert(statement.contains("owner_id = NULL"))
+    assert(statement.contains("document_id"))

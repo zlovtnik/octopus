@@ -91,10 +91,21 @@ final class CronScheduler private (
   def embeddingJobPreparerStream(
     batchSize: Int,
     interval: FiniteDuration,
-    embeddingModel: String
+    embeddingModel: String,
+    pendingHighWater: Int
   ): Stream[IO, Unit] =
     periodicDatabaseStream(ProcessorId.EmbeddingPreparer, interval) {
-      projectionStore.prepareEmbeddingJobs(batchSize, embeddingModel).value
+      projectionStore.pendingEmbeddingJobCount.value.flatMap {
+        case Left(error) => IO.pure(Left(error))
+        case Right(pending) if pendingHighWater > 0 && pending >= pendingHighWater =>
+          log.warn(
+            "embedding_preparer_high_water",
+            "pending_embedding_jobs" -> pending.toString,
+            "embedding_pending_high_water" -> pendingHighWater.toString
+          )
+          IO.pure(Right(0))
+        case Right(_) => projectionStore.prepareEmbeddingJobs(batchSize, embeddingModel).value
+      }
     }
 
   def staleWorkerCleanupStream(

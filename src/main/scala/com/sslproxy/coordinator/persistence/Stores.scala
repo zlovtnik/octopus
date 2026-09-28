@@ -91,6 +91,7 @@ trait ProjectionStore[F[_]]:
   def projectWirelessInventory(limit: Int): DbResultT[F, Int]
   def buildSearchDocuments(limit: Int): DbResultT[F, Int]
   def prepareEmbeddingJobs(limit: Int, embeddingModel: String): DbResultT[F, Int]
+  def pendingEmbeddingJobCount: DbResultT[F, Long]
   def projectBehavior(limit: Int): DbResultT[F, Int]
   def projectTiming(limit: Int): DbResultT[F, Int]
   def projectSequences(limit: Int): DbResultT[F, Int]

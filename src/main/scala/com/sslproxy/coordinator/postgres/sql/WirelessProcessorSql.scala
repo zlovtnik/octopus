@@ -37,10 +37,9 @@ object WirelessProcessorSql:
                     e.ssid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
              FROM sync_events e
              LEFT JOIN wireless_frames frame ON frame.dedupe_key = e.dedupe_key
-             WHERE e.stream_name = 'wireless.audit'
-               AND e.payload_archived = false
-               AND e.payload IS NOT NULL
-               AND frame.dedupe_key IS NULL
+              WHERE e.stream_name = 'wireless.audit'
+                AND (e.payload IS NOT NULL OR e.payload_archived = true)
+                AND frame.dedupe_key IS NULL
              ORDER BY e.observed_at, e.dedupe_key
              LIMIT $batchLimit
              ON CONFLICT (dedupe_key) DO UPDATE SET updated_at = EXCLUDED.updated_at""".update.run

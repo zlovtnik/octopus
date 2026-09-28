@@ -603,4 +603,169 @@ object IdentityGraphSql:
                                    COALESCE(EXCLUDED.observed_at, graph_edges.observed_at)
                                  ),
                                  updated_at = CURRENT_TIMESTAMP""".update.run
-    yield removedSameDeviceEdges + removedIdentityMemberEdges + removedIdentityNodes + deviceNodes + apNodes + clusterNodes + edges + identityEdges + sameDeviceEdges + roamingEdges + sameChannelEdges + vendorLinkEdges
+      // The investigation API reads this compact, replay-safe projection rather
+      // than asking browsers to reconstruct an RF graph from raw frames.
+      //
+      // AP catalog covers every retained BSSID and only mirrors the
+      // non-secret authorized-network label; psk_ciphertext and notes never
+      // leave octopus_core.
+      apCatalog <- sql"""INSERT INTO atheros_search.ap_catalog (
+                           bssid, authorized, authorized_label, first_observed_at,
+                           last_observed_at, last_sensor_id, updated_at
+                         )
+                         SELECT frame.bssid,
+                                COALESCE(BOOL_OR(network.enabled), FALSE),
+                                MAX(network.label) FILTER (WHERE network.enabled),
+                                MIN(frame.observed_at), MAX(frame.observed_at),
+                                MAX(frame.sensor_id), CURRENT_TIMESTAMP
+                         FROM wireless_frames frame
+                         LEFT JOIN octopus_core.wireless_authorized_networks network
+                           ON network.bssid = frame.bssid
+                         WHERE frame.bssid IS NOT NULL
+                         GROUP BY frame.bssid
+                         ORDER BY MAX(frame.observed_at) DESC, frame.bssid
+                         LIMIT $batchLimit
+                         ON CONFLICT (bssid) DO UPDATE SET
+                           authorized = EXCLUDED.authorized,
+                           authorized_label = EXCLUDED.authorized_label,
+                           first_observed_at = LEAST(ap_catalog.first_observed_at, EXCLUDED.first_observed_at),
+                           last_observed_at = GREATEST(ap_catalog.last_observed_at, EXCLUDED.last_observed_at),
+                           last_sensor_id = EXCLUDED.last_sensor_id,
+                           updated_at = CURRENT_TIMESTAMP""".update.run
+      // Five-minute signal summaries.  The candidate scan is bounded to
+      // frames written in the evidence horizon, so a frame that arrives late
+      // still selects its (old) bucket because updated_at is the insert time.
+      // Candidates are ordered by how stale their stored aggregate is, so a
+      // full batch round-robins instead of starving the tail, and each
+      // selected bucket is recomputed from every retained frame for that key:
+      // replay and late arrivals replace the aggregate instead of
+      // accumulating into it.
+      signalSummaries <- sql"""WITH candidates AS MATERIALIZED (
+                                 SELECT bucket.window_start, bucket.sensor_id, bucket.bssid,
+                                        bucket.source_mac, bucket.bucket_updated_at,
+                                        COALESCE(existing.projected_at, TIMESTAMPTZ 'epoch') AS projected_at
+                                 FROM (
+                                   SELECT date_trunc('hour', frame.observed_at)
+                                            + floor(EXTRACT(minute FROM frame.observed_at) / 5) * INTERVAL '5 minutes',
+                                          COALESCE(frame.sensor_id, 'unknown'), frame.bssid, frame.source_mac,
+                                          MAX(frame.updated_at) AS bucket_updated_at
+                                   FROM wireless_frames frame
+                                   WHERE frame.source_mac IS NOT NULL
+                                     AND frame.bssid IS NOT NULL
+                                     AND frame.source_mac <> frame.bssid
+                                     AND frame.source_mac NOT IN ('ff:ff:ff:ff:ff:ff', '00:00:00:00:00:00')
+                                     AND frame.bssid NOT IN ('ff:ff:ff:ff:ff:ff', '00:00:00:00:00:00')
+                                     AND GREATEST(frame.observed_at, frame.updated_at)
+                                           >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                                   GROUP BY 1, 2, 3, 4
+                                 ) bucket
+                                 LEFT JOIN atheros_search.wireless_signal_summaries existing
+                                   ON existing.window_start = bucket.window_start
+                                  AND existing.sensor_id = bucket.sensor_id
+                                  AND existing.bssid = bucket.bssid
+                                  AND existing.source_mac = bucket.source_mac
+                                 ORDER BY COALESCE(existing.projected_at, TIMESTAMPTZ 'epoch') ASC,
+                                          bucket.bucket_updated_at DESC
+                                 LIMIT $batchLimit
+                               )
+                               INSERT INTO atheros_search.wireless_signal_summaries (
+                                 window_start, sensor_id, location_id, bssid, source_mac,
+                                 frame_count, rssi_sample_count, rssi_min_dbm, rssi_max_dbm,
+                                 rssi_avg_dbm, first_observed_at, last_observed_at, projected_at
+                               )
+                               SELECT candidate.window_start, candidate.sensor_id,
+                                      MAX(frame.location_id), candidate.bssid, candidate.source_mac,
+                                      COUNT(*),
+                                      COUNT(radio.signal_dbm), MIN(radio.signal_dbm), MAX(radio.signal_dbm),
+                                      AVG(radio.signal_dbm)::double precision,
+                                      MIN(frame.observed_at), MAX(frame.observed_at), CURRENT_TIMESTAMP
+                               FROM candidates candidate
+                               JOIN wireless_frames frame
+                                 ON frame.bssid = candidate.bssid
+                                AND frame.source_mac = candidate.source_mac
+                                AND COALESCE(frame.sensor_id, 'unknown') = candidate.sensor_id
+                                AND date_trunc('hour', frame.observed_at)
+                                      + floor(EXTRACT(minute FROM frame.observed_at) / 5) * INTERVAL '5 minutes'
+                                      = candidate.window_start
+                               LEFT JOIN wireless_frame_radio radio ON radio.dedupe_key = frame.dedupe_key
+                               GROUP BY candidate.window_start, candidate.sensor_id,
+                                        candidate.bssid, candidate.source_mac
+                               ON CONFLICT (window_start, sensor_id, bssid, source_mac) DO UPDATE SET
+                                 location_id = EXCLUDED.location_id,
+                                 frame_count = EXCLUDED.frame_count,
+                                 rssi_sample_count = EXCLUDED.rssi_sample_count,
+                                 rssi_min_dbm = EXCLUDED.rssi_min_dbm,
+                                 rssi_max_dbm = EXCLUDED.rssi_max_dbm,
+                                 rssi_avg_dbm = EXCLUDED.rssi_avg_dbm,
+                                 first_observed_at = EXCLUDED.first_observed_at,
+                                 last_observed_at = EXCLUDED.last_observed_at,
+                                 projected_at = CURRENT_TIMESTAMP""".update.run
+      // Retention follows the frames: a summary or catalog row survives only
+      // while its source evidence is still retained.  The one-day grace keeps
+      // a bucket that was just projected from being removed before its frames
+      // commit.
+      prunedSummaries <- sql"""DELETE FROM atheros_search.wireless_signal_summaries summary
+                                WHERE summary.window_start < CURRENT_TIMESTAMP - INTERVAL '1 day'
+                                  AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM wireless_frames frame
+                                    WHERE frame.bssid = summary.bssid
+                                      AND frame.source_mac = summary.source_mac
+                                      AND COALESCE(frame.sensor_id, 'unknown') = summary.sensor_id
+                                      AND frame.observed_at >= summary.window_start
+                                      AND frame.observed_at < summary.window_start + INTERVAL '5 minutes'
+                                  )""".update.run
+      prunedCatalog <- sql"""DELETE FROM atheros_search.ap_catalog catalog
+                              WHERE NOT EXISTS (
+                                SELECT 1 FROM wireless_frames frame
+                                WHERE frame.bssid = catalog.bssid
+                              )""".update.run
+      // Completed source and projection watermarks.  The status describes how
+      // completely the retained source is represented in the summaries; it
+      // never claims capture coverage a sensor may have missed.
+      watermark <- sql"""WITH source AS (
+                            SELECT MAX(observed_at) AS source_watermark_at
+                            FROM wireless_frames
+                          ),
+                          projection AS (
+                            SELECT MAX(last_observed_at) AS projection_watermark_at,
+                                   MAX(projected_at) AS last_projected_at
+                            FROM atheros_search.wireless_signal_summaries
+                          )
+                          INSERT INTO atheros_search.investigation_watermarks (
+                            projection_name, source_watermark_at, projection_watermark_at,
+                            coverage_status, coverage_reason, updated_at
+                          )
+                          SELECT 'wireless_evidence',
+                                 source.source_watermark_at,
+                                 projection.projection_watermark_at,
+                                 CASE
+                                   WHEN source.source_watermark_at IS NULL THEN 'unknown'
+                                   WHEN projection.projection_watermark_at IS NULL THEN 'stalled'
+                                   WHEN source.source_watermark_at - projection.projection_watermark_at
+                                          > INTERVAL '15 minutes' THEN
+                                     CASE WHEN projection.last_projected_at
+                                               < CURRENT_TIMESTAMP - INTERVAL '6 hours'
+                                          THEN 'stalled' ELSE 'partial' END
+                                   ELSE 'complete'
+                                 END,
+                                 CASE
+                                   WHEN source.source_watermark_at IS NULL
+                                     THEN 'no retained wireless frames'
+                                   WHEN projection.projection_watermark_at IS NULL
+                                     THEN 'no five-minute signal summaries have been projected'
+                                   WHEN source.source_watermark_at - projection.projection_watermark_at
+                                          > INTERVAL '15 minutes' THEN
+                                     'signal summaries lag the retained source watermark; '
+                                       || 'the projection recomputes buckets written within the last seven days'
+                                   ELSE NULL
+                                 END,
+                                 CURRENT_TIMESTAMP
+                          FROM source, projection
+                          ON CONFLICT (projection_name) DO UPDATE SET
+                            source_watermark_at = EXCLUDED.source_watermark_at,
+                            projection_watermark_at = EXCLUDED.projection_watermark_at,
+                            coverage_status = EXCLUDED.coverage_status,
+                            coverage_reason = EXCLUDED.coverage_reason,
+                            updated_at = CURRENT_TIMESTAMP""".update.run
+    yield removedSameDeviceEdges + removedIdentityMemberEdges + removedIdentityNodes + deviceNodes + apNodes + clusterNodes + edges + identityEdges + sameDeviceEdges + roamingEdges + sameChannelEdges + vendorLinkEdges + apCatalog + signalSummaries + prunedSummaries + prunedCatalog + watermark

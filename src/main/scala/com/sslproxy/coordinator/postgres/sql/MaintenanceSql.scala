@@ -178,7 +178,7 @@ object MaintenanceSql:
     sql"""SELECT e.dedupe_key, e.stream_name, e.payload_sha256, e.observed_at
            FROM sync_events e
            WHERE e.stream_name = 'wireless.audit'
-             AND e.status = 'completed'
+             AND e.status <> 'failed'
              AND e.payload_archived = true
              AND e.payload IS NULL
              AND e.payload_sha256 IS NOT NULL

@@ -540,6 +540,34 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(network, 1L)
       assertEquals(countAfter, 2L)
 
+  test("normalization projects archived events after the payload leaves PostgreSQL"):
+    requireDocker()
+    val key = "normalizer-archived-1"
+    val seed =
+      sql"""INSERT INTO sync_events (
+               dedupe_key, stream_name, observed_at, payload_ref, payload,
+               payload_sha256, payload_archived, payload_archived_at,
+               sensor_id, location_id, frame_control_flags, source_mac
+             ) VALUES (
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(java.time.Instant.EPOCH.plusSeconds(7L))},
+               'inline://test', NULL, ${"ab" * 32}, true, CURRENT_TIMESTAMP,
+               'normalizer-archived', 'lab', 0, 'aa:bb:cc:dd:ee:2a'
+             )""".update.run.void
+    for
+      _ <- seed.transact(xa)
+      _ <- repository.normalizeWirelessFrames(200).map(requireRight)
+      frames <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE dedupe_key = $key"""
+        .query[Long]
+        .unique
+        .transact(xa)
+      radio <- sql"""SELECT COUNT(*) FROM wireless_frame_radio WHERE dedupe_key = $key"""
+        .query[Long]
+        .unique
+        .transact(xa)
+    yield
+      assertEquals(frames, 1L)
+      assertEquals(radio, 1L)
+
   test("shadow alerts aggregate repeated devices and mark exactly the selected inputs"):
     requireDocker()
     val mac = "aa:bb:cc:dd:ee:29"

@@ -29,7 +29,8 @@ object ResultSql:
              $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.result',
              'sync.oracle.result', $messageKey, ${result.asJson.noSpaces}, 'pending',
              0, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-           ) ON CONFLICT (destination_topic, message_key) DO UPDATE SET
+           ) ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET
+             message_key = EXCLUDED.message_key,
              payload = EXCLUDED.payload,
              attempt_count = 0,
              max_attempts = EXCLUDED.max_attempts,
@@ -41,7 +42,9 @@ object ResultSql:
              published_at = NULL,
              last_error = NULL,
              updated_at = CURRENT_TIMESTAMP
-           WHERE outbox_events.status IN ('failed', 'cancelled')""".update.run.void
+           WHERE outbox_events.status IN ('failed', 'cancelled')
+              OR (outbox_events.status = 'published'
+                  AND outbox_events.message_key <> EXCLUDED.message_key)""".update.run.void
 
   def batchForUpdate(batchId: String): Query0[BatchState] =
     sql"""SELECT b.job_id, b.stream_name, b.payload_ref,

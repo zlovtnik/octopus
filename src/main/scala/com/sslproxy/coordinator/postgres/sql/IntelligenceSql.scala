@@ -256,7 +256,7 @@ object IntelligenceSql:
            FROM (
              SELECT candidate.vector_id, candidate.document_id,
                     candidate.embedding_model,
-                    candidate.embedding <=> CAST($anchorEmbedding AS public.vector) AS cosine_distance
+                    candidate.embedding OPERATOR(public.<=>) CAST($anchorEmbedding AS public.vector) AS cosine_distance
            FROM""" ++ vectorTable ++ fr"""candidate
              JOIN atheros_search.search_documents candidate_document
                ON candidate_document.document_id = candidate.document_id
@@ -275,7 +275,7 @@ object IntelligenceSql:
                        AND pair.right_document_id = CAST($anchorDocumentId AS uuid))
                    )
                )
-             ORDER BY candidate.embedding <=> CAST($anchorEmbedding AS public.vector) ASC
+             ORDER BY candidate.embedding OPERATOR(public.<=>) CAST($anchorEmbedding AS public.vector) ASC
              LIMIT $topK
            ) right_vector
            JOIN atheros_search.search_documents left_document

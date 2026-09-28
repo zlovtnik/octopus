@@ -130,7 +130,8 @@ object JobBatchSql:
                AND b.stream_name IN (""" ++ streams ++ fr""" )
              ORDER BY b.created_at, b.batch_id
              LIMIT $batchLimit
-             ON CONFLICT (destination_topic, message_key) DO UPDATE SET
+             ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET
+               message_key = EXCLUDED.message_key,
                payload = EXCLUDED.payload,
                attempt_count = 0,
                max_attempts = EXCLUDED.max_attempts,
@@ -142,5 +143,7 @@ object JobBatchSql:
                published_at = NULL,
                last_error = NULL,
                updated_at = CURRENT_TIMESTAMP
-             WHERE outbox_events.status IN ('failed', 'cancelled')""").update
+             WHERE outbox_events.status IN ('failed', 'cancelled')
+                OR (outbox_events.status = 'published'
+                    AND outbox_events.message_key <> EXCLUDED.message_key)""").update
     }

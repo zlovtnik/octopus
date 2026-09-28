@@ -895,6 +895,25 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[(String, Int, Boolean, Long, String, Int, String, Long)]
         .unique
         .transact(xa)
+      _ <- sql"""UPDATE outbox_events
+                  SET status = 'published', published_at = CURRENT_TIMESTAMP
+                  WHERE destination_topic = 'sync.oracle.result'
+                    AND source_id = $resultBatchId""".update.run.void.transact(xa)
+      _ <- ResultSql
+        .enqueue(
+          firstResult.copy(rowCount = 4, checksum = "second-attempt"),
+          attempt = 2,
+          outboxId = "77777777-7777-7777-7777-777777777777"
+        )
+        .transact(xa)
+      secondAttempt <- sql"""SELECT outbox_id, message_key, status,
+                                      payload ->> 'row_count', COUNT(*) OVER ()
+                               FROM outbox_events
+                               WHERE destination_topic = 'sync.oracle.result'
+                                 AND source_id = $resultBatchId"""
+        .query[(String, String, String, String, Long)]
+        .unique
+        .transact(xa)
       _ <- parkPendingLoadOutboxes()
     yield
       assertEquals(loadState, ("published", true, 1L))
@@ -903,6 +922,65 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         ("published", true, "1", "44444444-4444-4444-4444-444444444444")
       )
       assertEquals(reopened, ("pending", 0, true, 1L, "pending", 0, "3", 1L))
+      assertEquals(
+        secondAttempt,
+        (
+          "44444444-4444-4444-4444-444444444444",
+          s"$resultBatchId:2",
+          "pending",
+          "4",
+          1L
+        )
+      )
+
+  test("load dispatch reuses the source outbox row for a later batch attempt"):
+    requireDocker()
+    val record = translatedAudit(
+      """{"observed_at":"2026-07-25T20:01:31Z","host":"retry-outbox.example"}""",
+      offset = 91L
+    )
+
+    for
+      _ <- parkPendingLoadOutboxes()
+      decision <- persist(record, offset = 91L)
+      originalOutboxId <- sql"""SELECT outbox_id FROM outbox_events
+                                  WHERE destination_topic = 'sync.oracle.load'
+                                    AND source_id = ${decision.batchId}"""
+        .query[String]
+        .unique
+        .transact(xa)
+      _ <- (for
+        _ <- sql"""UPDATE outbox_events
+                     SET status = 'published', published_at = CURRENT_TIMESTAMP
+                     WHERE outbox_id = $originalOutboxId""".update.run
+        _ <- sql"""UPDATE sync_batches
+                     SET status = 'pending', attempt_count = 1
+                     WHERE batch_id = ${decision.batchId}""".update.run
+      yield ()).transact(xa)
+      dispatched <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+      _ = requireRight(dispatched)
+      state <- sql"""SELECT outbox_id, message_key, status, attempt_count,
+                             published_at IS NULL, COUNT(*) OVER ()
+                      FROM outbox_events
+                      WHERE source_type = 'sync_batch'
+                        AND source_id = ${decision.batchId}
+                        AND event_type = 'sync.load.requested'"""
+        .query[(String, String, String, Int, Boolean, Long)]
+        .unique
+        .transact(xa)
+      _ <- parkPendingLoadOutboxes()
+    yield assertEquals(
+      state,
+      (originalOutboxId, s"${decision.batchId}:2", "pending", 0, true, 1L)
+    )
+
+  test("pgvector cosine operator resolves outside the public search path"):
+    requireDocker()
+    sql"""SELECT '[1,0]'::public.vector OPERATOR(public.<=>) '[1,0]'::public.vector"""
+      .query[Double]
+      .unique
+      .transact(xa)
+      .map(distance => assertEqualsDouble(distance, 0.0d, 0.000001d))
 
   test("maximum accepted payload audit persists a compact payload_ref and stores full payload in payload column"):
     requireDocker()

@@ -12,10 +12,12 @@ class ResultSqlSuite extends FunSuite:
   test("result enqueue reopens only terminally failed messages"):
     assert(
       implementation.contains(
-        "ON CONFLICT (destination_topic, message_key) DO UPDATE SET"
+        "ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET"
       )
     )
+    assert(implementation.contains("message_key = EXCLUDED.message_key"))
     assert(implementation.contains("WHERE outbox_events.status IN ('failed', 'cancelled')"))
+    assert(implementation.contains("outbox_events.message_key <> EXCLUDED.message_key"))
     assert(implementation.contains("status = 'pending'"))
     assert(implementation.contains("published_at = NULL"))
     assert(!implementation.contains("DO NOTHING"))

@@ -20,10 +20,12 @@ class JobBatchSqlSuite extends FunSuite:
     assert(statement.sql.contains("LIMIT ?"))
     assert(
       statement.sql.contains(
-        "ON CONFLICT (destination_topic, message_key) DO UPDATE SET"
+        "ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET"
       )
     )
+    assert(statement.sql.contains("message_key = EXCLUDED.message_key"))
     assert(statement.sql.contains("WHERE outbox_events.status IN ('failed', 'cancelled')"))
+    assert(statement.sql.contains("outbox_events.message_key <> EXCLUDED.message_key"))
     assert(statement.sql.contains("status = 'pending'"))
     assert(!statement.sql.contains("DO NOTHING"))
     assert(!statement.sql.contains("status = CASE WHEN outbox_events.status IN"))

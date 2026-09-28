@@ -39,6 +39,11 @@ import scala.concurrent.duration.*
 object Main extends IOApp.Simple:
   private val log = StructuredLogger(getClass)
 
+  private final case class EventRetentionRuntime(
+    processor: EventRetentionProcessor[IO],
+    initialize: IO[Unit]
+  )
+
   override def run: IO[Unit] =
     val cfg = AppConfig.load
 
@@ -157,26 +162,29 @@ object Main extends IOApp.Simple:
                       )
                       val eventRetentionResource =
                         if enabledProcessorIds.contains(ProcessorId.EventRetention) then
-                          MinioPayloadArchive.resource(cfg.archive).map { archive =>
+                          MinioPayloadArchive.resource(cfg.archive).map { archiveRuntime =>
                             val archiver = new PayloadArchiver(
                               maintenanceStore,
-                              archive,
+                              archiveRuntime.archive,
                               cfg.archive.hotDays,
                               cfg.archive.batchSize
                             )
                             Some(
-                              new EventRetentionProcessor(
-                                maintenanceStore,
-                                archiver,
-                                maintenanceOwnerId,
-                                cfg.archive.eventRetentionDays,
-                                cfg.archive.tombstoneRetentionDays,
-                                cfg.archive.batchSize,
-                                leaseTtlSeconds
+                              EventRetentionRuntime(
+                                new EventRetentionProcessor(
+                                  maintenanceStore,
+                                  archiver,
+                                  maintenanceOwnerId,
+                                  cfg.archive.eventRetentionDays,
+                                  cfg.archive.tombstoneRetentionDays,
+                                  cfg.archive.batchSize,
+                                  leaseTtlSeconds
+                                ),
+                                archiveRuntime.initialize
                               )
                             )
                           }
-                        else Resource.pure[IO, Option[EventRetentionProcessor[IO]]](None)
+                        else Resource.pure[IO, Option[EventRetentionRuntime]](None)
 
                       eventRetentionResource.flatMap { eventRetentionProcessor =>
                         Resource
@@ -358,12 +366,13 @@ object Main extends IOApp.Simple:
                                   )
                                 ),
                                 ProcessorWorkload(ProcessorId.RfAlertProjector, cronScheduler.rfAlertStream)
-                              ) ++ eventRetentionProcessor.toList.map { processor =>
+                              ) ++ eventRetentionProcessor.toList.map { runtime =>
                                 ProcessorWorkload(
                                   ProcessorId.EventRetention,
                                   Stream
                                     .awakeEvery[IO](cfg.archive.maintenanceIntervalMs.millis)
-                                    .evalMap(_ => processor.runOnce)
+                                    .evalMap(_ => runtime.processor.runOnce),
+                                  startup = runtime.initialize
                                 )
                               }
 

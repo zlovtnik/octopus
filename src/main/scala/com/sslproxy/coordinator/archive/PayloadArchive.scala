@@ -4,12 +4,14 @@ import cats.effect.kernel.Async
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.ArchiveConfig
+import com.sslproxy.coordinator.domain.RetryableDependencyException
 import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import com.sslproxy.coordinator.util.Sha256Utils
-import io.minio.errors.ErrorResponseException
+import io.minio.errors.{ErrorResponseException, InvalidResponseException, ServerException}
 import io.minio.{BucketExistsArgs, MakeBucketArgs, MinioClient, PutObjectArgs, StatObjectArgs}
 
 import java.io.ByteArrayInputStream
+import java.net.{ConnectException, NoRouteToHostException, SocketTimeoutException, UnknownHostException}
 import java.nio.charset.StandardCharsets
 import java.time.ZoneOffset
 import scala.jdk.CollectionConverters.*
@@ -20,6 +22,11 @@ final class InvalidArchiveCandidate(message: String) extends IllegalArgumentExce
 
 trait PayloadArchive[F[_]]:
   def archive(candidate: ArchiveCandidate): F[ArchiveReceipt]
+
+final case class PayloadArchiveRuntime[F[_]](
+  archive: PayloadArchive[F],
+  initialize: F[Unit]
+)
 
 private[archive] final case class StoredArchiveObject(
   size: Long,
@@ -96,39 +103,44 @@ private final class MinioObjectStore(
   bucket: String
 ) extends ArchiveObjectStore[IO]:
   def put(objectKey: String, bytes: Array[Byte], payloadSha256: String): IO[Unit] =
-    IO.blocking {
-      val stream = new ByteArrayInputStream(bytes)
-      try
-        client.putObject(
-          PutObjectArgs
-            .builder()
-            .bucket(bucket)
-            .`object`(objectKey)
-            .contentType("application/json")
-            .userMetadata(Map("sha256" -> payloadSha256).asJava)
-            .stream(stream, bytes.length.toLong, -1L)
-            .build()
-        )
-      finally stream.close()
-    }.void
+    MinioPayloadArchive.retryableOperation("put_object") {
+      IO.blocking {
+        val stream = new ByteArrayInputStream(bytes)
+        try
+          client.putObject(
+            PutObjectArgs
+              .builder()
+              .bucket(bucket)
+              .`object`(objectKey)
+              .contentType("application/json")
+              .userMetadata(Map("sha256" -> payloadSha256).asJava)
+              .stream(stream, bytes.length.toLong, -1L)
+              .build()
+          )
+        finally stream.close()
+      }.void
+    }
 
   def stat(objectKey: String): IO[Option[StoredArchiveObject]] =
-    IO.blocking {
-      try
-        val value = client.statObject(
-          StatObjectArgs.builder().bucket(bucket).`object`(objectKey).build()
-        )
-        val storedSha256 = Option(value.userMetadata().get("sha256")).flatMap(_.asScala.headOption)
-        Some(StoredArchiveObject(value.size(), storedSha256))
-      catch
-        case error: ErrorResponseException
-            if Set("NoSuchKey", "NoSuchObject", "NotFound").contains(error.errorResponse().code()) =>
-          None
+    MinioPayloadArchive.retryableOperation("stat_object") {
+      IO.blocking {
+        try
+          val value = client.statObject(
+            StatObjectArgs.builder().bucket(bucket).`object`(objectKey).build()
+          )
+          val storedSha256 = Option(value.userMetadata().get("sha256")).flatMap(_.asScala.headOption)
+          Some(StoredArchiveObject(value.size(), storedSha256))
+        catch
+          case error: ErrorResponseException
+              if Set("NoSuchKey", "NoSuchObject", "NotFound").contains(error.errorResponse().code()) =>
+            None
+      }
     }
 
 object MinioPayloadArchive:
   private val LowercaseSha256 = "^[0-9a-f]{64}$".r
-  def resource(config: ArchiveConfig): Resource[IO, PayloadArchive[IO]] =
+  private val InvalidResponseStatus = "Response code: ([0-9]+)".r
+  def resource(config: ArchiveConfig): Resource[IO, PayloadArchiveRuntime[IO]] =
     Resource
       .make(
         IO.blocking(
@@ -140,25 +152,58 @@ object MinioPayloadArchive:
             .build()
         )
       )(client => IO.blocking(client.close()))
-      .flatMap { client =>
-        Resource
-          .eval(provisionBucket(client, config.bucket))
-          .as(
-            new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket)
-          )
+      .map { client =>
+        PayloadArchiveRuntime(
+          new HashVerifiedPayloadArchive[IO](new MinioObjectStore(client, config.bucket), config.bucket),
+          provisionBucket(client, config.bucket)
+        )
       }
 
   private def provisionBucket(client: MinioClient, bucket: String): IO[Unit] =
-    IO.blocking {
-      val bucketExists = client.bucketExists(
-        BucketExistsArgs.builder().bucket(bucket).build()
-      )
-      if !bucketExists then
-        try client.makeBucket(MakeBucketArgs.builder().bucket(bucket).build())
-        catch
-          case error: ErrorResponseException if isBucketAlreadyOwnedByCaller(error.errorResponse().code()) =>
-            ()
+    retryableOperation("provision_bucket") {
+      IO.blocking {
+        val bucketExists = client.bucketExists(
+          BucketExistsArgs.builder().bucket(bucket).build()
+        )
+        if !bucketExists then
+          try client.makeBucket(MakeBucketArgs.builder().bucket(bucket).build())
+          catch
+            case error: ErrorResponseException if isBucketAlreadyOwnedByCaller(error.errorResponse().code()) =>
+              ()
+      }
     }
+
+  private[archive] def retryableOperation[A](operation: String)(effect: IO[A]): IO[A] =
+    effect.adaptError {
+      case error if isRetryable(error) =>
+        new RetryableDependencyException("minio", operation, error)
+    }
+
+  private[archive] def isRetryable(error: Throwable): Boolean =
+    causeChain(error).exists {
+      case _: UnknownHostException | _: ConnectException | _: NoRouteToHostException | _: SocketTimeoutException =>
+        true
+      case response: ErrorResponseException =>
+        Option(response.response()).exists(value => isRetryableHttpStatus(value.code()))
+      case response: ServerException =>
+        isRetryableHttpStatus(response.statusCode())
+      case response: InvalidResponseException =>
+        InvalidResponseStatus
+          .findFirstMatchIn(Option(response.getMessage).getOrElse(""))
+          .flatMap(_.group(1).toIntOption)
+          .exists(isRetryableHttpStatus)
+      case _ => false
+    }
+
+  private[archive] def isRetryableHttpStatus(status: Int): Boolean =
+    status == 408 || status == 429 || status >= 500
+
+  private def causeChain(error: Throwable): List[Throwable] =
+    Iterator
+      .iterate(Option(error))(_.flatMap(current => Option(current.getCause).filterNot(_ eq current)))
+      .takeWhile(_.nonEmpty)
+      .flatten
+      .toList
 
   private[archive] def isBucketAlreadyOwnedByCaller(errorCode: String): Boolean =
     errorCode == "BucketAlreadyOwnedByYou"

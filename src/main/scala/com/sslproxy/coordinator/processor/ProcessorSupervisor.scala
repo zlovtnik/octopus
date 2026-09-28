@@ -5,7 +5,7 @@ import cats.effect.{Clock, IO, Ref}
 import cats.syntax.all.*
 import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
-import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.domain.{DatabaseError, RetryableDependencyException}
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
@@ -124,6 +124,9 @@ final class ProcessorSupervisor private (
       case Left(error: TerminalProcessorError) =>
         failTerminal(workload, runId, restartCount, error)
       case Left(error: ProcessorPersistenceException) =>
+        bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
+          IO.pure(error)
+      case Left(error: RetryableDependencyException) =>
         bestEffortFinishRun(workload.id, runId, ProcessorRunStatus.Retrying, Some(error)) *>
           IO.pure(error)
       case Left(error: DatabaseOperationException) =>

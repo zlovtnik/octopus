@@ -1,14 +1,15 @@
 package com.sslproxy.coordinator.processor
 
 import cats.data.EitherT
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import com.sslproxy.coordinator.config.ProcessorConfig
-import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.domain.{DatabaseError, RetryableDependencyException}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
 import fs2.Stream
 import munit.CatsEffectSuite
 
+import java.net.UnknownHostException
 import scala.concurrent.duration.*
 
 class ProcessorSupervisorSuite extends CatsEffectSuite:
@@ -95,6 +96,43 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
           .guarantee(fiber.cancel)
       }
     }
+  }
+
+  test("retryable dependency startup failure recovers without terminating other workloads") {
+    val recoveringId = ProcessorId.SyncScanIngestion
+    val healthyId = ProcessorId.WirelessHeartbeatIngestion
+    val config = ProcessorConfig(List(recoveringId.value, healthyId.value), 1L, 1L)
+    for
+      attempts <- Ref.of[IO, Int](0)
+      secondAttemptStarted <- Deferred[IO, Unit]
+      allowRecovery <- Deferred[IO, Unit]
+      supervisor <- ProcessorSupervisor.create(config)
+      recoveringStartup = attempts.updateAndGet(_ + 1).flatMap { attempt =>
+        if attempt == 1 then
+          IO.raiseError(
+            new RetryableDependencyException(
+              "minio",
+              "provision_bucket",
+              UnknownHostException("minio.test")
+            )
+          )
+        else secondAttemptStarted.complete(()).void *> allowRecovery.get
+      }
+      workloads = List(
+        ProcessorWorkload(recoveringId, Stream.never[IO], startup = recoveringStartup),
+        ProcessorWorkload(healthyId, Stream.never[IO])
+      )
+      fiber <- supervisor.run(workloads).compile.drain.start
+      _ <- (for
+        _ <- awaitLifecycle(supervisor, healthyId, ProcessorLifecycle.Ready)
+        _ <- secondAttemptStarted.get.timeout(2.seconds)
+        readyDuringOutage <- supervisor.readiness.ready
+        _ = assert(!readyDuringOutage)
+        _ <- allowRecovery.complete(())
+        _ <- awaitLifecycle(supervisor, recoveringId, ProcessorLifecycle.Ready)
+        observedAttempts <- attempts.get
+      yield assertEquals(observedAttempts, 2)).guarantee(fiber.cancel)
+    yield ()
   }
 
   test("retry delay is exponentially bounded with bounded jitter") {

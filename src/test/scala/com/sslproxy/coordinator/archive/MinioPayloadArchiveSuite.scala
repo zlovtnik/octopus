@@ -2,10 +2,13 @@ package com.sslproxy.coordinator.archive
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
+import com.sslproxy.coordinator.domain.RetryableDependencyException
 import com.sslproxy.coordinator.postgres.ArchiveCandidate
 import com.sslproxy.coordinator.util.Sha256Utils
+import io.minio.errors.{InvalidResponseException, ServerException}
 import munit.CatsEffectSuite
 
+import java.net.{ConnectException, UnknownHostException}
 import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 import java.time.Instant
@@ -35,6 +38,36 @@ class MinioPayloadArchiveSuite extends CatsEffectSuite:
   test("bucket provisioning ignores only a bucket already owned by this principal"):
     assert(MinioPayloadArchive.isBucketAlreadyOwnedByCaller("BucketAlreadyOwnedByYou"))
     assert(!MinioPayloadArchive.isBucketAlreadyOwnedByCaller("BucketAlreadyExists"))
+
+  test("transient network failures are recognized through wrapper causes"):
+    assert(
+      MinioPayloadArchive.isRetryable(
+        IllegalStateException("minio request failed", UnknownHostException("minio.test"))
+      )
+    )
+    assert(MinioPayloadArchive.isRetryable(ConnectException("connection refused")))
+    assert(!MinioPayloadArchive.isRetryable(IllegalArgumentException("invalid endpoint")))
+
+  test("only transient HTTP statuses are retryable"):
+    List(408, 429, 500, 503).foreach(status => assert(MinioPayloadArchive.isRetryableHttpStatus(status)))
+    List(400, 401, 403, 409).foreach(status => assert(!MinioPayloadArchive.isRetryableHttpStatus(status)))
+    assert(MinioPayloadArchive.isRetryable(ServerException("unavailable", 503, "")))
+    assert(!MinioPayloadArchive.isRetryable(ServerException("forbidden", 403, "")))
+    assert(MinioPayloadArchive.isRetryable(InvalidResponseException(503, "text/plain", "unavailable", "")))
+    assert(!MinioPayloadArchive.isRetryable(InvalidResponseException(401, "text/plain", "unauthorized", "")))
+
+  test("transient operations use a sanitized retryable dependency error"):
+    MinioPayloadArchive
+      .retryableOperation("provision_bucket")(
+        IO.raiseError(IllegalStateException("request failed", UnknownHostException("minio.test")))
+      )
+      .attempt
+      .map { result =>
+        val error = result.swap.toOption.getOrElse(fail("expected retryable dependency error"))
+        assert(error.isInstanceOf[RetryableDependencyException])
+        assertEquals(error.getMessage, "minio dependency temporarily unavailable during provision_bucket")
+        assert(!error.getMessage.contains("minio.test"))
+      }
 
   test("a duplicate archive reuses verified content without another upload"):
     for

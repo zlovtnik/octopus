@@ -24,5 +24,9 @@ class ProcessorContractSteps extends ScalaDsl with EN:
     assert(ProcessorCatalog.byId(requireSelected()).outputs.contains(output), output)
   }
 
+  Then("the processor declares {string} as its reconciliation policy") { (policy: String) =>
+    assert(ProcessorCatalog.byId(requireSelected()).reconciliationPolicy == policy, policy)
+  }
+
   private def requireSelected(): ProcessorId =
     selected.getOrElse(throw IllegalStateException("a processor must be selected before asserting its contract"))

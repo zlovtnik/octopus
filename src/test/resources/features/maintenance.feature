@@ -12,3 +12,8 @@ Feature: Maintenance processor contracts
       | search-retention           | expired search rows   |
       | stale-worker-cleanup       | expired worker leases |
       | scheduled-reconciliation   | domain/projection state|
+
+  Scenario: Event retention remains fail-closed while archive storage recovers
+    Given processor "event-retention" belongs to "maintenance"
+    Then the processor declares "archive metadata" as an input
+    And the processor declares "archive-before-delete audit" as its reconciliation policy

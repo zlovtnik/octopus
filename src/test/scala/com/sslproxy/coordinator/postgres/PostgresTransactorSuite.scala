@@ -53,5 +53,33 @@ class PostgresTransactorSuite extends FunSuite:
       Right("deauth")
     )
 
+  test("wireless alert identities are deterministic and type scoped"):
+    val source = PostgresTransactor.wirelessAlertSourceEventId("batch-1", 7L)
+
+    assertEquals(source, PostgresTransactor.wirelessAlertSourceEventId("batch-1", 7L))
+    assertNotEquals(
+      PostgresTransactor.wirelessAlertId(source, "rogue_ap"),
+      PostgresTransactor.wirelessAlertId(source, "signal_anomaly")
+    )
+
+  test("wireless canonical evidence retains common and type-specific fields"):
+    val evidence = PostgresTransactor.wirelessAlertEvidence(
+      "signal_anomaly",
+      "sensor-1",
+      "lab",
+      Some("02:00:00:00:00:01"),
+      None,
+      Some("network"),
+      Some(-42L),
+      """{"dbm_delta":20}"""
+    )
+    val json = parse(evidence).fold(error => fail(error.message), identity)
+
+    assertEquals(json.hcursor.get[String]("sensor_id"), Right("sensor-1"))
+    assertEquals(json.hcursor.downField("details").get[Long]("dbm_delta"), Right(20L))
+
+  test("wireless alert subjects fall back to the sensor when identifiers are absent"):
+    assertEquals(PostgresTransactor.alertSubject(None, "sensor-1"), "sensor" -> "sensor-1")
+
   test("outbox retry delay clamps a non-positive maximum to one second"):
     assertEquals(LeaseSql.retryDelaySeconds(attempt = 3, baseSeconds = 5, maxSeconds = 0), 1)

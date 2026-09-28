@@ -14,11 +14,16 @@ import com.sslproxy.coordinator.domain.{
 }
 import com.sslproxy.coordinator.postgres.sql.{IdentityGraphSql, MaintenanceSql, ProjectionSql, ResultSql}
 import com.sslproxy.coordinator.postgres.{
+  BlockedEventInsert,
   PostgresPayloadResolver,
   PostgresRepository,
   PostgresResult,
   PostgresSchemaPreflight,
-  PostgresTransactor
+  PostgresTransactor,
+  ProxyEventInsert,
+  WirelessBandwidthInsert,
+  WirelessRogueApInsert,
+  WirelessSignalAnomalyInsert
 }
 import com.sslproxy.coordinator.util.Sha256Utils
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -112,6 +117,146 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       doobieExecutor.shutdown()
       postgres.stop()
     super.afterAll()
+
+  test("legacy batch sinks satisfy canonical proxy rollup and wireless alert constraints"):
+    requireDocker()
+    val observedAt = java.time.OffsetDateTime.parse("2026-09-28T20:55:55Z")
+    val host = "postgres-load-regression.invalid"
+    val proxyEvent = ProxyEventInsert(
+      eventId = "0d996392-24a6-4f21-a2d2-e3b711ea05c1",
+      eventTime = observedAt,
+      eventType = "request",
+      host = host,
+      peerIp = None,
+      wgPubkey = None,
+      deviceId = None,
+      identitySource = "unknown",
+      peerHostname = None,
+      clientUa = None,
+      bytesUp = 10L,
+      bytesDown = 20L,
+      statusCode = Some(403L),
+      blocked = true,
+      classification = "ads_tracker",
+      obfuscationProfile = None,
+      correlationId = None,
+      parentEventId = None,
+      eventSequence = None,
+      durationMs = None,
+      reason = Some("policy"),
+      rawJson = """{"type":"request","blocked":true}"""
+    )
+    val blocked = BlockedEventInsert(
+      rowSequence = 0L,
+      host = host,
+      blockedBytes = 30L,
+      frequencyHz = Some(1.0d),
+      riskScore = Some(0.5d),
+      category = Some("ads_tracker"),
+      verdict = "BLOCKED",
+      tarpitHeldMs = 0L,
+      iatMs = None,
+      consecutiveBlocks = Some(1L),
+      lastVerdict = Some("BLOCKED"),
+      tlsVer = None,
+      alpn = None,
+      ja3Lite = None,
+      resolvedIp = None,
+      asnOrg = None
+    )
+    val batchId = "postgres-load-alert-regression"
+    val bandwidth = WirelessBandwidthInsert(
+      rowSequence = 1L,
+      schemaVersion = 1L,
+      windowStart = observedAt,
+      windowEnd = observedAt.plusMinutes(1L),
+      sensorId = "sensor-regression",
+      locationId = "lab",
+      iface = "wlan0",
+      channel = 36L,
+      sourceMac = "02:00:00:00:00:02",
+      destinationBssid = "02:00:00:00:00:01",
+      ssid = Some("test-network"),
+      bytes = 128L,
+      frameCount = 1L,
+      retryCount = 0L,
+      moreDataCount = 0L,
+      powerSaveCount = 0L,
+      strongestSignalDbm = Some(-40L),
+      histUnder100 = 0L,
+      hist100500 = 1L,
+      hist5001000 = 0L,
+      hist10001500 = 0L,
+      interArrivalP50Ms = None,
+      externalBssid = true,
+      thresholdExceeded = true,
+      wallClockDeltaMs = None,
+      windowIsPartial = false,
+      publishedAt = Some(observedAt.plusMinutes(1L))
+    )
+    val rogue = WirelessRogueApInsert(
+      0L,
+      observedAt,
+      "sensor-regression",
+      "lab",
+      "wlan0",
+      36L,
+      "02:00:00:00:00:01",
+      Some("test-network"),
+      Some(-40L),
+      1L,
+      Some("""{"event_type":"wireless_rogue_ap"}""")
+    )
+    val signal = WirelessSignalAnomalyInsert(
+      0L,
+      observedAt,
+      "sensor-regression",
+      "lab",
+      "02:00:00:00:00:02",
+      Some("02:00:00:00:00:01"),
+      Some("test-network"),
+      36L,
+      -60L,
+      -40L,
+      20L,
+      15L
+    )
+
+    for
+      _ <- schemaTransactor.insertProxyEvents("proxy-regression-1", List(proxyEvent), List(blocked), 0L)
+      _ <- schemaTransactor.insertProxyEvents("proxy-regression-1", List(proxyEvent), List(blocked), 0L)
+      _ <- schemaTransactor.insertProxyEvents(
+        "proxy-regression-2",
+        List(proxyEvent.copy(eventId = "91f92a7e-7670-4fb1-8fe4-9cd5bc2ca497")),
+        List(blocked),
+        0L
+      )
+      _ <- schemaTransactor.insertWirelessRogueAp(batchId, List(rogue))
+      _ <- schemaTransactor.insertWirelessSignalAnomaly(batchId, List(signal))
+      _ <- schemaTransactor.insertWirelessBandwidth(batchId, List(bandwidth))
+      _ <- schemaTransactor.insertWirelessRogueAp(batchId, List(rogue))
+      _ <- schemaTransactor.insertWirelessSignalAnomaly(batchId, List(signal))
+      _ <- schemaTransactor.insertWirelessBandwidth(batchId, List(bandwidth))
+      rollup <- sql"""SELECT blocked_attempts, blocked_bytes
+                       FROM octopus_core.proxy_blocked_host_rollups
+                       WHERE host = $host""".query[(Long, Long)].unique.transact(xa)
+      alertCount <- sql"""SELECT COUNT(*)
+                           FROM octopus_core.wireless_alerts
+                           WHERE batch_id = $batchId
+                             AND alert_id IS NOT NULL
+                             AND subject_kind IS NOT NULL
+                             AND subject_id IS NOT NULL
+                             AND severity IS NOT NULL
+                             AND evidence IS NOT NULL
+                             AND source_event_id IS NOT NULL""".query[Long].unique.transact(xa)
+      bandwidthBytes <- sql"""SELECT bytes
+                               FROM octopus_core.wireless_alerts
+                               WHERE batch_id = $batchId
+                                 AND alert_type = 'bandwidth_threshold'""".query[Long].unique.transact(xa)
+    yield
+      assertEquals(rollup, 2L -> 60L)
+      assertEquals(alertCount, 3L)
+      assertEquals(bandwidthBytes, 128L)
 
   test("wireless scan ingestion hydrates payload hashes and projected columns"):
     requireDocker()

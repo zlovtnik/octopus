@@ -264,7 +264,6 @@ final class PostgresTransactor private (
 
   private def optLong(v: Option[Long]): java.lang.Long = v.map(java.lang.Long.valueOf).orNull
   private def optStr(v: Option[String]): String = v.orNull
-  private def optDbl(v: Option[Double]): java.lang.Double = v.map(java.lang.Double.valueOf).orNull
 
   private def doInsertChunk(
     conn: Connection,
@@ -321,8 +320,11 @@ final class PostgresTransactor private (
   ): Long =
       val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
       try
+        val blockedBySequence = blockedRows.map(row => row.rowSequence -> row).toMap
+        val now = Timestamp.from(Instant.now())
         val allRows = rows.zipWithIndex.map { case (r, idx) =>
-          Seq[Any](
+          val blocked = blockedBySequence.get(rowOffset + idx)
+          val eventParams = Seq[Any](
             r.eventId,
             ts(r.eventTime),
             r.eventType,
@@ -352,42 +354,55 @@ final class PostgresTransactor private (
             optStr(r.reason),
             r.rawJson
           )
+          val rollupParams = blocked match
+            case Some(value) =>
+              Seq[Any](
+                value.host,
+                1L,
+                value.blockedBytes,
+                value.frequencyHz.getOrElse(0.0d),
+                value.verdict,
+                optStr(value.category),
+                value.riskScore.getOrElse(0.0d),
+                value.tarpitHeldMs,
+                optLong(value.iatMs),
+                value.consecutiveBlocks.getOrElse(0L),
+                optStr(value.lastVerdict),
+                optStr(value.tlsVer),
+                optStr(value.alpn),
+                optStr(value.ja3Lite),
+                optStr(value.resolvedIp),
+                optStr(value.asnOrg),
+                now,
+                now,
+                true
+              )
+            case None =>
+              Seq[Any](
+                r.host,
+                0L,
+                0L,
+                0.0d,
+                "BLOCKED",
+                null,
+                0.0d,
+                0L,
+                null,
+                0L,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                now,
+                now,
+                false
+              )
+          eventParams ++ rollupParams
         }
-        val count = executeBatch(stmt, allRows)
-        doInsertBlockedHostRollups(conn, blockedRows): Unit
-        count
-      finally stmt.close()
-
-  // ── proxy_blocked_host_rollups ────────────────────────────────
-  private def doInsertBlockedHostRollups(conn: Connection, rows: List[BlockedEventInsert]): Long =
-    if rows.isEmpty then 0L
-    else
-      val stmt = conn.prepareStatement(BatchSinkSql.UpsertBlockedHostRollups)
-      try
-        val now = Timestamp.from(Instant.now())
-        val params = rows.map(r =>
-          Seq[Any](
-            r.host,
-            1L,
-            r.blockedBytes,
-            optDbl(r.frequencyHz),
-            r.verdict,
-            r.category,
-            optDbl(r.riskScore),
-            r.tarpitHeldMs,
-            optLong(r.iatMs),
-            optLong(r.consecutiveBlocks),
-            r.lastVerdict,
-            optStr(r.tlsVer),
-            optStr(r.alpn),
-            optStr(r.ja3Lite),
-            optStr(r.resolvedIp),
-            optStr(r.asnOrg),
-            now,
-            now
-          )
-        )
-        executeBatch(stmt, params)
+        executeBatch(stmt, allRows): Unit
+        rows.size.toLong
       finally stmt.close()
 
   // ── proxy_payload_audit ───────────────────────────────────────
@@ -565,6 +580,9 @@ final class PostgresTransactor private (
         val firstWindowStart = group.map(_.windowStart).minBy(_.toInstant)
         val lastByTime = group.maxBy(_.windowStart.toInstant)
         val totalBytes = group.map(_.bytes).sum
+        val alertType = "bandwidth_threshold"
+        val sourceEventId = PostgresTransactor.wirelessAlertSourceEventId(batchId, minRowSeq)
+        val alertId = PostgresTransactor.wirelessAlertId(sourceEventId, alertType)
 
         val details = Json
           .obj(
@@ -573,30 +591,46 @@ final class PostgresTransactor private (
             "threshold" -> Json.fromString("exceeded")
           )
           .noSpaces
+        val evidence = PostgresTransactor.wirelessAlertEvidence(
+          alertType,
+          lastByTime.sensorId,
+          lastByTime.locationId,
+          Some(lastByTime.sourceMac),
+          Some(lastByTime.destinationBssid),
+          lastByTime.ssid,
+          lastByTime.strongestSignalDbm,
+          details
+        )
 
         alertCount += 1
-        setParam(stmt, 1, "bandwidth_threshold")
-        setParam(stmt, 2, batchId)
-        setParam(stmt, 3, minRowSeq)
-        setParam(stmt, 4, java.sql.Date.valueOf(firstWindowStart.toLocalDate))
-        setParam(stmt, 5, ts(firstWindowStart))
-        setParam(stmt, 6, lastByTime.sensorId)
-        setParam(stmt, 7, lastByTime.locationId)
-        setParam(stmt, 8, lastByTime.sourceMac)
-        setParam(stmt, 9, lastByTime.destinationBssid)
-        setParam(stmt, 10, optStr(lastByTime.ssid))
-        setParam(stmt, 11, null)
-        setParam(stmt, 12, details)
-        setParam(stmt, 13, null)
-        setParam(stmt, 14, now)
-        setParam(stmt, 15, now)
-        setParam(stmt, 16, totalBytes)
+        setParam(stmt, 1, alertId)
+        setParam(stmt, 2, alertType)
+        setParam(stmt, 3, "station")
+        setParam(stmt, 4, lastByTime.sourceMac)
+        setParam(stmt, 5, "medium")
+        setParam(stmt, 6, evidence)
+        setParam(stmt, 7, sourceEventId)
+        setParam(stmt, 8, batchId)
+        setParam(stmt, 9, minRowSeq)
+        setParam(stmt, 10, java.sql.Date.valueOf(firstWindowStart.toLocalDate))
+        setParam(stmt, 11, ts(firstWindowStart))
+        setParam(stmt, 12, lastByTime.sensorId)
+        setParam(stmt, 13, lastByTime.locationId)
+        setParam(stmt, 14, lastByTime.sourceMac)
+        setParam(stmt, 15, lastByTime.destinationBssid)
+        setParam(stmt, 16, optStr(lastByTime.ssid))
+        setParam(stmt, 17, optLong(lastByTime.strongestSignalDbm))
+        setParam(stmt, 18, details)
+        setParam(stmt, 19, null)
+        setParam(stmt, 20, now)
+        setParam(stmt, 21, now)
+        setParam(stmt, 22, totalBytes)
         stmt.addBatch()
       stmt.executeBatch(): Unit
       alertCount
     finally stmt.close()
 
-  // ── wireless alerts (4 alert types) ────────────────────────────
+  // ── wireless alerts ────────────────────────────────────────────
 
   override def insertWirelessRogueAp(batchId: String, rows: List[WirelessRogueApInsert]): IO[Long] =
     mergeWirelessAlerts(batchId, "rogue_ap", rogueApAlertRows(rows))
@@ -604,6 +638,9 @@ final class PostgresTransactor private (
   private def rogueApAlertRows(rows: List[WirelessRogueApInsert]): List[WirelessAlertRow] =
     rows.map { row =>
       WirelessAlertRow(
+        subjectKind = "access_point",
+        subjectId = row.rogueBssid,
+        severity = "high",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -624,7 +661,14 @@ final class PostgresTransactor private (
 
   private def deauthFloodAlertRows(rows: List[WirelessDeauthFloodInsert]): List[WirelessAlertRow] =
     rows.map { row =>
+      val (subjectKind, subjectId) = PostgresTransactor.alertSubject(
+        row.targetBssid.map("access_point" -> _).orElse(row.attackerMac.map("station" -> _)),
+        row.sensorId
+      )
       WirelessAlertRow(
+        subjectKind = subjectKind,
+        subjectId = subjectId,
+        severity = "high",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -650,6 +694,9 @@ final class PostgresTransactor private (
   private def signalAnomalyAlertRows(rows: List[WirelessSignalAnomalyInsert]): List[WirelessAlertRow] =
     rows.map { row =>
       WirelessAlertRow(
+        subjectKind = "station",
+        subjectId = row.sourceMac,
+        severity = "medium",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -676,6 +723,9 @@ final class PostgresTransactor private (
   private def pmfAttackAlertRows(rows: List[WirelessPmfAttackInsert]): List[WirelessAlertRow] =
     rows.map { row =>
       WirelessAlertRow(
+        subjectKind = "access_point",
+        subjectId = row.targetBssid.getOrElse(row.targetMac),
+        severity = "critical",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -699,7 +749,14 @@ final class PostgresTransactor private (
 
   private def attackSequenceAlertRows(rows: List[WirelessAttackSequenceInsert]): List[WirelessAlertRow] =
     rows.map { row =>
+      val (subjectKind, subjectId) = PostgresTransactor.alertSubject(
+        row.ssid.filter(_.nonEmpty).map("network" -> _),
+        row.sensorId
+      )
       WirelessAlertRow(
+        subjectKind = subjectKind,
+        subjectId = subjectId,
+        severity = "critical",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -726,7 +783,12 @@ final class PostgresTransactor private (
 
   private def sequenceAlertRows(rows: List[WirelessSequenceAlertInsert]): List[WirelessAlertRow] =
     rows.map { row =>
+      val subject = row.sourceMac.map("station" -> _).orElse(row.bssid.map("access_point" -> _))
+      val (subjectKind, subjectId) = PostgresTransactor.alertSubject(subject, row.sensorId)
       WirelessAlertRow(
+        subjectKind = subjectKind,
+        subjectId = subjectId,
+        severity = "high",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -756,6 +818,9 @@ final class PostgresTransactor private (
   private def handshakeAlertRows(rows: List[WirelessHandshakeAlertInsert]): List[WirelessAlertRow] =
     rows.map { row =>
       WirelessAlertRow(
+        subjectKind = "access_point",
+        subjectId = row.bssid,
+        severity = "medium",
         rowSequence = row.rowSequence,
         detectedAt = row.detectedAt,
         sensorId = row.sensorId,
@@ -790,8 +855,26 @@ final class PostgresTransactor private (
       val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
       try
         val params = rows.map { row =>
-          Seq[Any](
+          val sourceEventId = PostgresTransactor.wirelessAlertSourceEventId(batchId, row.rowSequence)
+          val alertId = PostgresTransactor.wirelessAlertId(sourceEventId, alertType)
+          val evidence = PostgresTransactor.wirelessAlertEvidence(
             alertType,
+            row.sensorId,
+            row.locationId,
+            row.primaryMac,
+            row.secondaryMac,
+            row.ssid,
+            row.signalDbm,
+            row.detailsJson
+          )
+          Seq[Any](
+            alertId,
+            alertType,
+            row.subjectKind,
+            row.subjectId,
+            row.severity,
+            evidence,
+            sourceEventId,
             batchId,
             row.rowSequence,
             ts(row.detectedAt),
@@ -989,7 +1072,49 @@ object PostgresTransactor:
         case None => Some(Json.fromString(raw))
     }
 
+  private[postgres] def wirelessAlertSourceEventId(batchId: String, rowSequence: Long): String =
+    PostgresRepository.stableUuid("wireless-alert-source", batchId, rowSequence.toString)
+
+  private[postgres] def wirelessAlertId(sourceEventId: String, alertType: String): String =
+    PostgresRepository.stableUuid("wireless-alert", sourceEventId, alertType)
+
+  private[postgres] def wirelessAlertEvidence(
+    alertType: String,
+    sensorId: String,
+    locationId: String,
+    primaryMac: Option[String],
+    secondaryMac: Option[String],
+    ssid: Option[String],
+    signalDbm: Option[Long],
+    detailsJson: String
+  ): String =
+    val details = circeParser.parse(detailsJson).fold(
+      error => throw IllegalArgumentException(s"invalid wireless alert details JSON: ${error.message}"),
+      identity
+    )
+    Json
+      .obj(
+        "event_type" -> Json.fromString(alertType),
+        "sensor_id" -> Json.fromString(sensorId),
+        "location_id" -> Json.fromString(locationId),
+        "primary_mac" -> primaryMac.fold(Json.Null)(Json.fromString),
+        "secondary_mac" -> secondaryMac.fold(Json.Null)(Json.fromString),
+        "ssid" -> ssid.fold(Json.Null)(Json.fromString),
+        "signal_dbm" -> signalDbm.fold(Json.Null)(Json.fromLong),
+        "details" -> details
+      )
+      .noSpaces
+
+  private[postgres] def alertSubject(
+    preferred: Option[(String, String)],
+    sensorId: String
+  ): (String, String) =
+    preferred.filter { case (_, subjectId) => subjectId.trim.nonEmpty }.getOrElse("sensor" -> sensorId)
+
   private final case class WirelessAlertRow(
+    subjectKind: String,
+    subjectId: String,
+    severity: String,
     rowSequence: Long,
     detectedAt: OffsetDateTime,
     sensorId: String,

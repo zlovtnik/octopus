@@ -37,7 +37,6 @@ class BatchSinkSqlSuite extends FunSuite:
 
   private val insertStatements = List(
     "InsertProxyEvents" -> BatchSinkSql.InsertProxyEvents,
-    "UpsertBlockedHostRollups" -> BatchSinkSql.UpsertBlockedHostRollups,
     "InsertProxyPayloadAudit" -> BatchSinkSql.InsertProxyPayloadAudit,
     "InsertWirelessAuditFrames" -> BatchSinkSql.InsertWirelessAuditFrames,
     "UpsertWirelessSensors" -> BatchSinkSql.UpsertWirelessSensors,
@@ -72,7 +71,29 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("wireguard_pubkey"))
     assert(statement.contains("classification"))
     assert(statement.contains("CAST(? AS jsonb)"))
-    assert(statement.contains("ON CONFLICT (event_id) DO UPDATE SET"))
+    assert(statement.contains("ON CONFLICT (event_id) DO NOTHING"))
+    assert(statement.contains("FROM inserted_event"))
+    assertEquals(statement.count(_ == '?'), 47)
+
+  test("blocked host rollup conflict expressions qualify the target table"):
+    val statement = BatchSinkSql.InsertProxyEvents
+
+    assert(statement.contains("blocked_attempts = proxy_blocked_host_rollups.blocked_attempts + 1"))
+    assert(
+      statement.contains(
+        "blocked_bytes = proxy_blocked_host_rollups.blocked_bytes + EXCLUDED.blocked_bytes"
+      )
+    )
+
+  test("wireless alert writes satisfy the canonical alert contract"):
+    List(BatchSinkSql.UpsertBandwidthAlerts, BatchSinkSql.UpsertWirelessAlerts).foreach { statement =>
+      assert(
+        statement.contains(
+          "alert_id, alert_type, subject_kind, subject_id, severity, evidence, source_event_id"
+        )
+      )
+      assert(statement.contains("ON CONFLICT (source_event_id, alert_type) DO UPDATE SET"))
+    }
 
   test("wireless client inventory preserves monotonic observation bounds"):
     val statement = BatchSinkSql.UpsertWirelessClientInventory
@@ -80,11 +101,7 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("last_seen = GREATEST"))
     assert(statement.contains("first_seen = LEAST"))
 
-  test("bandwidth alert byte accumulation treats null operands as zero"):
+  test("bandwidth alert replay replaces rather than double-counts bytes"):
     val statement = BatchSinkSql.UpsertBandwidthAlerts
 
-    assert(
-      statement.contains(
-        "bytes = COALESCE(wireless_alerts.bytes, 0) + COALESCE(EXCLUDED.bytes, 0)"
-      )
-    )
+    assert(statement.contains("bytes = EXCLUDED.bytes"))

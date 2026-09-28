@@ -9,24 +9,28 @@ object BatchSinkSql:
   val ConnectivityQuery: String = "SELECT 1"
 
   val InsertProxyEvents: String =
-    """INSERT INTO proxy_events (
+    """WITH inserted_event AS (
+      |  INSERT INTO proxy_events (
       |  event_id, event_time, event_type, host, peer_ip, wireguard_pubkey,
       |  registered_device_id, bytes_up, bytes_down, status_code, blocked, classification,
       |  correlation_id, causation_id, payload, batch_id, row_sequence, event_timestamp_utc,
       |  wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
       |  obfuscation_profile, event_sequence, duration_ms, reason, raw_json
       |) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS uuid), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id""".stripMargin
-
-  val UpsertBlockedHostRollups: String =
-    """INSERT INTO proxy_blocked_host_rollups (
+      |  ON CONFLICT (event_id) DO NOTHING
+      |  RETURNING event_id
+      |)
+      |INSERT INTO proxy_blocked_host_rollups (
       |  host, blocked_attempts, blocked_bytes, frequency_hz, verdict, category,
       |  risk_score, tarpit_held_ms, iat_ms, consecutive_blocks, last_verdict,
       |  tls_ver, alpn, ja3_lite, resolved_ip, asn_org, updated_at, first_seen
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      |)
+      |SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      |FROM inserted_event
+      |WHERE ?
       |ON CONFLICT (host) DO UPDATE SET
-      |  blocked_attempts = blocked_attempts + 1,
-      |  blocked_bytes = blocked_bytes + EXCLUDED.blocked_bytes,
+      |  blocked_attempts = proxy_blocked_host_rollups.blocked_attempts + 1,
+      |  blocked_bytes = proxy_blocked_host_rollups.blocked_bytes + EXCLUDED.blocked_bytes,
       |  frequency_hz = COALESCE(EXCLUDED.frequency_hz, proxy_blocked_host_rollups.frequency_hz),
       |  verdict = COALESCE(EXCLUDED.verdict, proxy_blocked_host_rollups.verdict),
       |  category = COALESCE(EXCLUDED.category, proxy_blocked_host_rollups.category),
@@ -84,27 +88,39 @@ object BatchSinkSql:
 
   val UpsertBandwidthAlerts: String =
     """INSERT INTO wireless_alerts (
-      |  alert_type, batch_id, row_sequence, alert_date, detected_at, sensor_id,
-      |  location_id, primary_mac, secondary_mac, ssid, signal_dbm, details_json, raw_json,
+      |  alert_id, alert_type, subject_kind, subject_id, severity, evidence, source_event_id,
+      |  batch_id, row_sequence, alert_date, detected_at, sensor_id, location_id,
+      |  primary_mac, secondary_mac, ssid, signal_dbm, details_json, raw_json,
       |  created_at, updated_at, bytes
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT (alert_type, batch_id, row_sequence) DO UPDATE SET
+      |) VALUES (CAST(? AS uuid), ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?)
+      |ON CONFLICT (source_event_id, alert_type) DO UPDATE SET
+      |  subject_kind = EXCLUDED.subject_kind,
+      |  subject_id = EXCLUDED.subject_id,
+      |  severity = EXCLUDED.severity,
+      |  evidence = EXCLUDED.evidence,
       |  batch_id = EXCLUDED.batch_id,
       |  row_sequence = EXCLUDED.row_sequence,
       |  detected_at = EXCLUDED.detected_at,
       |  location_id = EXCLUDED.location_id,
       |  ssid = EXCLUDED.ssid,
-      |  bytes = COALESCE(wireless_alerts.bytes, 0) + COALESCE(EXCLUDED.bytes, 0),
+      |  bytes = EXCLUDED.bytes,
       |  details_json = EXCLUDED.details_json,
       |  updated_at = CURRENT_TIMESTAMP""".stripMargin
 
   val UpsertWirelessAlerts: String =
     """INSERT INTO wireless_alerts (
-      |  alert_type, batch_id, row_sequence, detected_at, sensor_id, location_id,
-      |  interface, channel, primary_mac, secondary_mac, ssid, signal_dbm,
-      |  details_json, raw_json, created_at, updated_at
-      |) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      |ON CONFLICT (alert_type, batch_id, row_sequence) DO UPDATE SET
+      |  alert_id, alert_type, subject_kind, subject_id, severity, evidence, source_event_id,
+      |  batch_id, row_sequence, detected_at, sensor_id, location_id, interface, channel,
+      |  primary_mac, secondary_mac, ssid, signal_dbm, details_json, raw_json,
+      |  created_at, updated_at
+      |) VALUES (CAST(? AS uuid), ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?)
+      |ON CONFLICT (source_event_id, alert_type) DO UPDATE SET
+      |  subject_kind = EXCLUDED.subject_kind,
+      |  subject_id = EXCLUDED.subject_id,
+      |  severity = EXCLUDED.severity,
+      |  evidence = EXCLUDED.evidence,
+      |  batch_id = EXCLUDED.batch_id,
+      |  row_sequence = EXCLUDED.row_sequence,
       |  detected_at = EXCLUDED.detected_at,
       |  sensor_id = EXCLUDED.sensor_id,
       |  location_id = EXCLUDED.location_id,

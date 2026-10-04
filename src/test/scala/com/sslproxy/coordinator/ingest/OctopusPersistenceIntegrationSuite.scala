@@ -12,10 +12,14 @@ import com.sslproxy.coordinator.domain.{
   ResolvedScanRequestRecord,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.postgres.sql.{IdentityGraphSql, MaintenanceSql, ProjectionSql, ResultSql}
+import com.sslproxy.coordinator.postgres.sql.{DispatchAuthorizationSql, IdentityGraphSql, IngestionSql, MaintenanceSql, ProjectionSql, ResultSql}
 import com.sslproxy.coordinator.postgres.{
   BlockedEventInsert,
   PostgresPayloadResolver,
+  PostgresLoad,
+  PostgresLoadHandler,
+  PostgresTransformService,
+  PostgresClock,
   PostgresRepository,
   PostgresResult,
   PostgresSchemaPreflight,
@@ -909,6 +913,52 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .unique
         .transact(xa)
     yield assertEquals(state, ("published", "dispatched", 1, "running", 1L))
+
+  test("broker loads and results require an exact durable coordinator dispatch and outcome"):
+    requireDocker()
+    val rawJson = """{"observed_at":"2026-07-25T20:20:00Z","host":"authorization.example","body":{"ok":true}}"""
+    val record = translatedAudit(rawJson, offset = 9200L)
+    def metadata(topic: String, offset: Long, key: String): BrokerRecordMetadata =
+      BrokerRecordMetadata(topic, 0, offset, "authorization-integration", 1, ArtifactSha256, Some(key), "b" * 64)
+    for
+      _ <- parkPendingLoadOutboxes()
+      decision <- persist(record, offset = 9200L)
+      stored <- sql"""SELECT payload::text FROM outbox_events
+                       WHERE source_id = ${decision.batchId} AND event_type = 'sync.load.requested'"""
+        .query[String].unique.transact(xa)
+      load <- IO.fromEither(io.circe.parser.decode[PostgresLoad](stored))
+      _ <- DispatchAuthorizationSql.authorizeLoad(load).transact(xa)
+      rejected <- List(
+        load.copy(batchId = "unknown-batch"), load.copy(jobId = "other-job"),
+        load.copy(streamName = "proxy.events"), load.copy(payloadRef = "inline://json/W10"),
+        load.copy(cursorEnd = "forged-cursor"), load.copy(attempt = load.attempt + 1),
+        load.copy(batchNo = None)
+      ).traverse(candidate => DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa).attempt)
+      _ = assert(rejected.forall(_.isLeft))
+      handler = new PostgresLoadHandler(
+        new PostgresPayloadResolver("/tmp"), PostgresTransformService, schemaTransactor, PostgresClock,
+        sha => IngestionSql.payloadBySha256(sha).unique.transact(xa).map(Some(_)),
+        candidate => DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa)
+      )
+      forged <- handler.handle(load.copy(payloadRef = "inline://json/W10")).attempt
+      _ = assert(forged.isLeft)
+      result <- handler.handle(load)
+      _ = assertEquals(result.status, "success")
+      key = s"${load.batchId}:${load.attempt}"
+      noOutcome <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9201L, key))
+      _ = assert(noOutcome.isLeft)
+      _ <- repository.recordLoadResultWithEvidence(load, result, metadata("sync.oracle.load", 9202L, key)).map(requireRight)
+      altered <- repository.recordResultWithEvidence(result.copy(rowCount = result.rowCount + 1), metadata("sync.oracle.result", 9203L, key))
+      missingKey <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9204L, key).copy(messageKey = None))
+      _ = assert(altered.isLeft && missingKey.isLeft)
+      _ <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9205L, key)).map(requireRight)
+      _ <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9205L, key)).map(requireRight)
+      status <- sql"""SELECT status FROM sync_batches WHERE batch_id = ${load.batchId}""".query[String].unique.transact(xa)
+      _ = assertEquals(status, "completed")
+      _ <- sql"""UPDATE outbox_events SET message_key = ${s"${load.batchId}:2"}
+                  WHERE source_id = ${load.batchId} AND event_type = 'sync.load.requested'""".update.run.transact(xa)
+      stale <- DispatchAuthorizationSql.authorizeResult(result, Some(key)).transact(xa).attempt
+    yield assert(stale.isLeft)
 
   test("invalid load batch_id is parked after publication without dispatching its batch"):
     requireDocker()

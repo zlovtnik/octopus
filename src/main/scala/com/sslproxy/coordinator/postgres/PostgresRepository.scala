@@ -444,6 +444,9 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
   ): ConnectionIO[Unit] =
     val dedupeKey = s"load:${load.batchId}:${load.attempt.max(1)}"
     validateBrokerMetadata(metadata) *>
+      com.sslproxy.coordinator.postgres.sql.DispatchAuthorizationSql.authorizeLoad(load) *>
+      (if result.jobId == load.jobId && result.batchId == load.batchId then ().pure[ConnectionIO]
+       else FC.raiseError(IllegalArgumentException("load/result identity mismatch"))) *>
       existingBrokerEvidence(metadata).flatMap {
         case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
         case None =>
@@ -460,6 +463,7 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
 
     validateBrokerMetadata(metadata) *>
       validateResult(result) *>
+      com.sslproxy.coordinator.postgres.sql.DispatchAuthorizationSql.authorizeResult(result, metadata.messageKey) *>
       existingBrokerEvidence(metadata).flatMap {
         case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
         case None =>

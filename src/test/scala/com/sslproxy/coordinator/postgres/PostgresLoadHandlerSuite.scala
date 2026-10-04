@@ -18,6 +18,20 @@ import scala.collection.mutable.ListBuffer
 
 class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
+  test("unauthorized loads never resolve payloads, open a sink transaction or manufacture outcomes") {
+    val sink = new FailingSecondChunkSink(SQLException("must not run", "08006"))
+    val handler = new PostgresLoadHandler(
+      new PostgresPayloadResolver("/tmp"), PostgresTransformService, sink, PostgresClock,
+      _ => IO.raiseError(AssertionError("payload lookup must not run")),
+      _ => IO.raiseError(IllegalArgumentException("unauthorized coordinator load"))
+    )
+    handler.handle(proxyEventsLoad).attempt.map { result =>
+      assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
+      assertEquals(sink.transactionCount, 0)
+      assertEquals(sink.chunkCount, 0)
+    }
+  }
+
   test("database insert failure logs safe SQL metadata without parameter values or stack traces") {
     val output = new ByteArrayOutputStream()
     val context = LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
@@ -47,7 +61,8 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       PostgresTransformService,
       new FailingProxyEventSink(cause),
       PostgresClock,
-      _ => IO.pure(None)
+      _ => IO.pure(None),
+      _ => IO.unit
     )
 
     Resource
@@ -102,6 +117,7 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       sink,
       PostgresClock,
       _ => IO.pure(None),
+      _ => IO.unit,
       insertChunkRows = 1
     )
     val payload =

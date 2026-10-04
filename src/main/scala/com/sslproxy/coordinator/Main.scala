@@ -97,6 +97,7 @@ object Main extends IOApp.Simple:
                         oldTx,
                         PostgresClock,
                         payloadLookup,
+                        load => com.sslproxy.coordinator.postgres.sql.DispatchAuthorizationSql.authorizeLoad(load).transact(postgresDoobieTx),
                         insertChunkBytes = cfg.postgres.loadChunkMaxBytes
                       )
                     val ingestionStore = new PostgresIngestionStore(postgresRepo)

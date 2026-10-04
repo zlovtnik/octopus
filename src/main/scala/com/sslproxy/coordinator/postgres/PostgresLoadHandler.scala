@@ -14,6 +14,7 @@ class PostgresLoadHandler(
   sink: PostgresSink,
   clock: PostgresClock.type,
   payloadLookup: String => IO[Option[String]],
+  authorizeLoad: PostgresLoad => IO[Unit],
   insertChunkRows: Int = 500,
   insertChunkBytes: Int = 4 * 1024 * 1024
 ):
@@ -21,6 +22,10 @@ class PostgresLoadHandler(
   require(insertChunkRows > 0 && insertChunkBytes > 0, "insert chunk bounds must be positive")
 
   def handle(load: PostgresLoad): IO[PostgresResult] =
+    // Reject unauthorised messages before resolving payloads or manufacturing a result.
+    authorizeLoad(load) *> handleAuthorized(load)
+
+  private def handleAuthorized(load: PostgresLoad): IO[PostgresResult] =
     val finishedAt = clock.nowRfc3339
     (for
       resolved <- repairPayloadRefIfNeeded(load)

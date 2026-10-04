@@ -18,12 +18,18 @@ import scala.collection.mutable.ListBuffer
 
 class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
-  test("unauthorized loads never resolve payloads, open a sink transaction or manufacture outcomes") {
+  test(
+    "unauthorized loads never resolve payloads, open a sink transaction or manufacture outcomes"
+  ) {
     val sink = new FailingSecondChunkSink(SQLException("must not run", "08006"))
     val handler = new PostgresLoadHandler(
-      new PostgresPayloadResolver("/tmp"), PostgresTransformService, sink, PostgresClock,
+      new PostgresPayloadResolver("/tmp"),
+      PostgresTransformService,
+      sink,
+      PostgresClock,
       _ => IO.raiseError(AssertionError("payload lookup must not run")),
-      _ => IO.raiseError(IllegalArgumentException("unauthorized coordinator load"))
+      _ =>
+        IO.raiseError(IllegalArgumentException("unauthorized coordinator load"))
     )
     handler.handle(proxyEventsLoad).attempt.map { result =>
       assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
@@ -32,7 +38,9 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
     }
   }
 
-  test("database insert failure logs safe SQL metadata without parameter values or stack traces") {
+  test(
+    "database insert failure logs safe SQL metadata without parameter values or stack traces"
+  ) {
     val output = new ByteArrayOutputStream()
     val context = LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
     val encoder = new LogstashEncoder()
@@ -81,7 +89,10 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       .use(_ => handler.handle(proxyEventsLoad))
       .map { result =>
         assertEquals(result.status, "failed")
-        assertEquals(result.errorText, "SQLException SQLSTATE=23505 vendor_code=7 classification=permanent")
+        assertEquals(
+          result.errorText,
+          "SQLException SQLSTATE=23505 vendor_code=7 classification=permanent"
+        )
 
         val records = new String(output.toByteArray, StandardCharsets.UTF_8)
           .split('\n')
@@ -95,22 +106,48 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
           )
           .getOrElse(fail("expected an error-level postgres_load log"))
 
-        assertEquals(error.hcursor.downField("message").as[String].toOption, Some("postgres_load"))
-        assertEquals(error.hcursor.downField("status").as[String].toOption, Some("insert_failed"))
-        assertEquals(error.hcursor.downField("batch_id").as[String].toOption, Some("batch-1"))
-        assertEquals(error.hcursor.downField("stream_name").as[String].toOption, Some("proxy.events"))
-        assertEquals(error.hcursor.downField("error_class").as[String].toOption, Some("permanent"))
+        assertEquals(
+          error.hcursor.downField("message").as[String].toOption,
+          Some("postgres_load")
+        )
+        assertEquals(
+          error.hcursor.downField("status").as[String].toOption,
+          Some("insert_failed")
+        )
+        assertEquals(
+          error.hcursor.downField("batch_id").as[String].toOption,
+          Some("batch-1")
+        )
+        assertEquals(
+          error.hcursor.downField("stream_name").as[String].toOption,
+          Some("proxy.events")
+        )
+        assertEquals(
+          error.hcursor.downField("error_class").as[String].toOption,
+          Some("permanent")
+        )
         assert(error.hcursor.downField("stack_trace").focus.isEmpty)
-        assertEquals(error.hcursor.downField("error").as[String].toOption, Some(result.errorText))
+        assertEquals(
+          error.hcursor.downField("error").as[String].toOption,
+          Some(result.errorText)
+        )
         val logged = new String(output.toByteArray, StandardCharsets.UTF_8)
-        List("INSERT", "synthetic-private-value", "secret-value", "outer-private-value").foreach { value =>
+        List(
+          "INSERT",
+          "synthetic-private-value",
+          "secret-value",
+          "outer-private-value"
+        ).foreach { value =>
           assert(!logged.contains(value))
         }
       }
   }
 
-  test("a later chunk failure rolls back the whole load and remains retryable") {
-    val sink = new FailingSecondChunkSink(SQLException("connection lost", "08006"))
+  test(
+    "a later chunk failure rolls back the whole load and remains retryable"
+  ) {
+    val sink =
+      new FailingSecondChunkSink(SQLException("connection lost", "08006"))
     val handler = new PostgresLoadHandler(
       new PostgresPayloadResolver("/tmp"),
       PostgresTransformService,
@@ -135,81 +172,133 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
   }
 
   private def proxyEventsLoad: PostgresLoad =
-    val payload = """[{"type":"tls_scan","host":"example.com","time":"2026-07-20T12:00:00Z","blocked":false}]"""
+    val payload =
+      """[{"type":"tls_scan","host":"example.com","time":"2026-07-20T12:00:00Z","blocked":false}]"""
     proxyEventsLoad(payload)
 
   private def proxyEventsLoad(payload: String): PostgresLoad =
     val payloadRef = "inline://json/" + Base64.getUrlEncoder.withoutPadding
       .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
-    PostgresLoad("job-1", "batch-1", None, "proxy.events", payloadRef, "", "", 0)
+    PostgresLoad(
+      "job-1",
+      "batch-1",
+      None,
+      "proxy.events",
+      payloadRef,
+      "",
+      "",
+      0
+    )
 
   private class FailingProxyEventSink(cause: Throwable) extends PostgresSink:
-    override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
-      use(new PostgresLoadTransaction:
-        override def insertChunk(
-          _batchId: String,
-          _target: PostgresSinkTarget,
-          _rows: PostgresRowSet,
-          _rowOffset: Long
-        ): IO[Long] = IO.raiseError(cause)
+    override def withLoadTransaction[A](
+        use: PostgresLoadTransaction => IO[A]
+    ): IO[A] =
+      use(
+        new PostgresLoadTransaction:
+          override def insertChunk(
+              _batchId: String,
+              _target: PostgresSinkTarget,
+              _rows: PostgresRowSet,
+              _rowOffset: Long
+          ): IO[Long] = IO.raiseError(cause)
       )
 
     override def insertProxyEvents(
-      _batchId: String,
-      _rows: List[ProxyEventInsert],
-      _blockedRows: List[BlockedEventInsert],
-      _rowOffset: Long
+        _batchId: String,
+        _rows: List[ProxyEventInsert],
+        _blockedRows: List[BlockedEventInsert],
+        _rowOffset: Long
     ): IO[Long] = IO.raiseError(cause)
 
-    override def insertProxyPayloadAudit(_batchId: String, _rows: List[ProxyPayloadAuditInsert]): IO[Long] = unexpected
+    override def insertProxyPayloadAudit(
+        _batchId: String,
+        _rows: List[ProxyPayloadAuditInsert]
+    ): IO[Long] = unexpected
 
-    override def insertWirelessAuditFrames(_batchId: String, _rows: List[WirelessAuditFrameInsert]): IO[Long] =
+    override def insertWirelessAuditFrames(
+        _batchId: String,
+        _rows: List[WirelessAuditFrameInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessBandwidth(_batchId: String, _rows: List[WirelessBandwidthInsert]): IO[Long] = unexpected
+    override def insertWirelessBandwidth(
+        _batchId: String,
+        _rows: List[WirelessBandwidthInsert]
+    ): IO[Long] = unexpected
 
-    override def insertWirelessRogueAp(_batchId: String, _rows: List[WirelessRogueApInsert]): IO[Long] = unexpected
+    override def insertWirelessRogueAp(
+        _batchId: String,
+        _rows: List[WirelessRogueApInsert]
+    ): IO[Long] = unexpected
 
-    override def insertWirelessDeauthFlood(_batchId: String, _rows: List[WirelessDeauthFloodInsert]): IO[Long] =
+    override def insertWirelessDeauthFlood(
+        _batchId: String,
+        _rows: List[WirelessDeauthFloodInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessSignalAnomaly(_batchId: String, _rows: List[WirelessSignalAnomalyInsert]): IO[Long] =
+    override def insertWirelessSignalAnomaly(
+        _batchId: String,
+        _rows: List[WirelessSignalAnomalyInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessPmfAttack(_batchId: String, _rows: List[WirelessPmfAttackInsert]): IO[Long] = unexpected
+    override def insertWirelessPmfAttack(
+        _batchId: String,
+        _rows: List[WirelessPmfAttackInsert]
+    ): IO[Long] = unexpected
 
-    override def insertWirelessClientInventory(_batchId: String, _rows: List[WirelessClientInventoryInsert]): IO[Long] =
+    override def insertWirelessClientInventory(
+        _batchId: String,
+        _rows: List[WirelessClientInventoryInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessProbeRequests(_batchId: String, _rows: List[WirelessProbeRequestInsert]): IO[Long] =
+    override def insertWirelessProbeRequests(
+        _batchId: String,
+        _rows: List[WirelessProbeRequestInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessAttackSequence(_batchId: String, _rows: List[WirelessAttackSequenceInsert]): IO[Long] =
+    override def insertWirelessAttackSequence(
+        _batchId: String,
+        _rows: List[WirelessAttackSequenceInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessSequenceAlert(_batchId: String, _rows: List[WirelessSequenceAlertInsert]): IO[Long] =
+    override def insertWirelessSequenceAlert(
+        _batchId: String,
+        _rows: List[WirelessSequenceAlertInsert]
+    ): IO[Long] =
       unexpected
 
-    override def insertWirelessHandshakeAlert(_batchId: String, _rows: List[WirelessHandshakeAlertInsert]): IO[Long] =
+    override def insertWirelessHandshakeAlert(
+        _batchId: String,
+        _rows: List[WirelessHandshakeAlertInsert]
+    ): IO[Long] =
       unexpected
 
     private def unexpected: IO[Long] =
       IO.raiseError(IllegalStateException("unexpected sink target"))
 
-  private final class FailingSecondChunkSink(cause: Throwable) extends FailingProxyEventSink(cause):
+  private final class FailingSecondChunkSink(cause: Throwable)
+      extends FailingProxyEventSink(cause):
     var transactionCount = 0
     var chunkCount = 0
     var committedHosts = List.empty[String]
 
-    override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
+    override def withLoadTransaction[A](
+        use: PostgresLoadTransaction => IO[A]
+    ): IO[A] =
       val stagedHosts = ListBuffer.empty[String]
       transactionCount += 1
       val transaction = new PostgresLoadTransaction:
         override def insertChunk(
-          _batchId: String,
-          _target: PostgresSinkTarget,
-          rows: PostgresRowSet,
-          _rowOffset: Long
+            _batchId: String,
+            _target: PostgresSinkTarget,
+            rows: PostgresRowSet,
+            _rowOffset: Long
         ): IO[Long] =
           IO.defer {
             chunkCount += 1

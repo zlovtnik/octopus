@@ -12,7 +12,14 @@ import com.sslproxy.coordinator.domain.{
   ResolvedScanRequestRecord,
   ScanRequestRecord
 }
-import com.sslproxy.coordinator.postgres.sql.{DispatchAuthorizationSql, IdentityGraphSql, IngestionSql, MaintenanceSql, ProjectionSql, ResultSql}
+import com.sslproxy.coordinator.postgres.sql.{
+  DispatchAuthorizationSql,
+  IdentityGraphSql,
+  IngestionSql,
+  MaintenanceSql,
+  ProjectionSql,
+  ResultSql
+}
 import com.sslproxy.coordinator.postgres.{
   BlockedEventInsert,
   PostgresPayloadResolver,
@@ -75,7 +82,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     config.setPassword("postgres")
     config.setDriverClassName("org.postgresql.Driver")
     config.setMaximumPoolSize(4)
-    config.setConnectionInitSql("SET TIME ZONE 'UTC'; SET search_path TO octopus_core, atheros_search")
+    config.setConnectionInitSql(
+      "SET TIME ZONE 'UTC'; SET search_path TO octopus_core, atheros_search"
+    )
     config.addDataSourceProperty("stringtype", "unspecified")
     new HikariDataSource(config)
 
@@ -102,14 +111,19 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     warnOnly = false,
     manifestSha256 = manifestValue("manifest_sha256")
   )
-  private lazy val schemaTransactor = PostgresTransactor.fromDataSource(dataSource, schemaConfig)
-  private lazy val dockerAvailable = DockerClientFactory.instance().isDockerAvailable
-  private val dockerRequired = sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true")
+  private lazy val schemaTransactor =
+    PostgresTransactor.fromDataSource(dataSource, schemaConfig)
+  private lazy val dockerAvailable =
+    DockerClientFactory.instance().isDockerAvailable
+  private val dockerRequired =
+    sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true")
 
   override def beforeAll(): Unit =
     super.beforeAll()
     if dockerRequired && !dockerAvailable then
-      throw IllegalStateException("OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable")
+      throw IllegalStateException(
+        "OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable"
+      )
     else if dockerAvailable then
       postgres.start()
       containerStarted = true
@@ -122,7 +136,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       postgres.stop()
     super.afterAll()
 
-  test("legacy batch sinks satisfy canonical proxy rollup and wireless alert constraints"):
+  test(
+    "legacy batch sinks satisfy canonical proxy rollup and wireless alert constraints"
+  ):
     requireDocker()
     val observedAt = java.time.OffsetDateTime.parse("2026-09-28T20:55:55Z")
     val host = "postgres-load-regression.invalid"
@@ -227,8 +243,18 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
     for
-      _ <- schemaTransactor.insertProxyEvents("proxy-regression-1", List(proxyEvent), List(blocked), 0L)
-      _ <- schemaTransactor.insertProxyEvents("proxy-regression-1", List(proxyEvent), List(blocked), 0L)
+      _ <- schemaTransactor.insertProxyEvents(
+        "proxy-regression-1",
+        List(proxyEvent),
+        List(blocked),
+        0L
+      )
+      _ <- schemaTransactor.insertProxyEvents(
+        "proxy-regression-1",
+        List(proxyEvent),
+        List(blocked),
+        0L
+      )
       _ <- schemaTransactor.insertProxyEvents(
         "proxy-regression-2",
         List(proxyEvent.copy(eventId = "91f92a7e-7670-4fb1-8fe4-9cd5bc2ca497")),
@@ -243,7 +269,10 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- schemaTransactor.insertWirelessBandwidth(batchId, List(bandwidth))
       rollup <- sql"""SELECT blocked_attempts, blocked_bytes
                        FROM octopus_core.proxy_blocked_host_rollups
-                       WHERE host = $host""".query[(Long, Long)].unique.transact(xa)
+                       WHERE host = $host"""
+        .query[(Long, Long)]
+        .unique
+        .transact(xa)
       alertCount <- sql"""SELECT COUNT(*)
                            FROM octopus_core.wireless_alerts
                            WHERE batch_id = $batchId
@@ -252,11 +281,17 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                              AND subject_id IS NOT NULL
                              AND severity IS NOT NULL
                              AND evidence IS NOT NULL
-                             AND source_event_id IS NOT NULL""".query[Long].unique.transact(xa)
+                             AND source_event_id IS NOT NULL"""
+        .query[Long]
+        .unique
+        .transact(xa)
       bandwidthBytes <- sql"""SELECT bytes
                                FROM octopus_core.wireless_alerts
                                WHERE batch_id = $batchId
-                                 AND alert_type = 'bandwidth_threshold'""".query[Long].unique.transact(xa)
+                                 AND alert_type = 'bandwidth_threshold'"""
+        .query[Long]
+        .unique
+        .transact(xa)
     yield
       assertEquals(rollup, 2L -> 60L)
       assertEquals(alertCount, 3L)
@@ -370,14 +405,29 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[String]
         .unique
         .transact(xa)
-      projection = circeParser.parse(projectionJson).fold(throw _, identity).hcursor
+      projection = circeParser
+        .parse(projectionJson)
+        .fold(throw _, identity)
+        .hcursor
     yield
       assertEquals(hashes, (resolved.eventPayloadSha256, true))
       assertEquals(evidenceHash, resolved.sourceRecordSha256)
-      assertEquals(projection.get[String]("event_type"), Right("wifi_data_frame"))
-      assertEquals(projection.get[String]("sensor_id"), Right("sensor-projection"))
-      assertEquals(projection.get[String]("source_mac"), Right("aa:bb:cc:dd:ee:01"))
-      assertEquals(projection.get[String]("destination_bssid"), Right("aa:bb:cc:dd:ee:02"))
+      assertEquals(
+        projection.get[String]("event_type"),
+        Right("wifi_data_frame")
+      )
+      assertEquals(
+        projection.get[String]("sensor_id"),
+        Right("sensor-projection")
+      )
+      assertEquals(
+        projection.get[String]("source_mac"),
+        Right("aa:bb:cc:dd:ee:01")
+      )
+      assertEquals(
+        projection.get[String]("destination_bssid"),
+        Right("aa:bb:cc:dd:ee:02")
+      )
       assertEquals(projection.get[Int]("signal_dbm"), Right(-42))
       assertEquals(projection.get[Option[Int]]("noise_dbm"), Right(None))
       assertEquals(projection.get[Int]("frequency_mhz"), Right(5180))
@@ -388,14 +438,27 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(projection.get[Int]("dst_port"), Right(1900))
       assertEquals(projection.get[String]("app_protocol"), Right("ssdp"))
       assertEquals(projection.get[String]("session_key"), Right("session-key"))
-      assertEquals(projection.get[String]("frame_fingerprint"), Right("frame-fingerprint"))
+      assertEquals(
+        projection.get[String]("frame_fingerprint"),
+        Right("frame-fingerprint")
+      )
       assertEquals(projection.get[Boolean]("retry"), Right(false))
       assertEquals(projection.get[Boolean]("protected"), Right(true))
       assertEquals(projection.get[Double]("risk_score"), Right(0.6))
-      assertEquals(projection.get[String]("identity_source"), Right("observed_identity"))
-      assert(projection.get[String]("wireless_search_text").toOption.exists(_.contains("sensor-projection")))
+      assertEquals(
+        projection.get[String]("identity_source"),
+        Right("observed_identity")
+      )
+      assert(
+        projection
+          .get[String]("wireless_search_text")
+          .toOption
+          .exists(_.contains("sensor-projection"))
+      )
 
-  test("automatic identity confirmation requires the hard guard and yields to human decisions"):
+  test(
+    "automatic identity confirmation requires the hard guard and yields to human decisions"
+  ):
     requireDocker()
     val trustedIdentity = "11111111-1111-1111-1111-111111111111"
     val macs = (1 to 10).toList.map(index => f"02:00:00:00:00:$index%02x")
@@ -422,7 +485,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- candidates.traverse_ { case (candidateId, left, right, confidence) =>
         sql"""INSERT INTO atheros_search.merge_candidates (
                  candidate_id, mac_a, mac_b, confidence, projection_run_id
-               ) VALUES ($candidateId, $left, $right, $confidence, $candidateId)""".update.run.void.transact(xa)
+               ) VALUES ($candidateId, $left, $right, $confidence, $candidateId)""".update.run.void
+          .transact(xa)
       }
       _ <- List(
         "identity-not-match" -> "not_match",
@@ -430,7 +494,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         "identity-conflict" -> "conflict"
       ).traverse_ { case (candidateId, decision) =>
         sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
-               VALUES ($candidateId, $decision, 'identity-test')""".update.run.void.transact(xa)
+               VALUES ($candidateId, $decision, 'identity-test')""".update.run.void
+          .transact(xa)
       }
       projected <- repository.projectApprovedIdentities(0)
       _ = requireRight(projected)
@@ -477,7 +542,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ = assertEquals(skippedProjection, (2L, Some(0.98d)))
       _ <- sql"""UPDATE atheros_search.merge_candidates
                   SET confidence = 0.99
-                  WHERE candidate_id = 'identity-auto'""".update.run.void.transact(xa)
+                  WHERE candidate_id = 'identity-auto'""".update.run.void
+        .transact(xa)
       recomputed <- repository.projectApprovedIdentities(1)
       _ = requireRight(recomputed)
       refreshedProjection <- sql"""SELECT COUNT(*), MIN(confidence)
@@ -487,8 +553,10 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .unique
         .transact(xa)
       _ = assertEquals(refreshedProjection, (2L, Some(0.99d)))
-      _ <- sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
-                  VALUES ('identity-auto', 'conflict', 'identity-test')""".update.run.void.transact(xa)
+      _ <-
+        sql"""INSERT INTO atheros_search.merge_decisions (candidate_id, decision, decided_by)
+                  VALUES ('identity-auto', 'conflict', 'identity-test')""".update.run.void
+          .transact(xa)
       reprojected <- repository.projectApprovedIdentities(0)
       _ = requireRight(reprojected)
       regraphed <- repository.projectInfrastructureGraph(100)
@@ -506,7 +574,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ = assertEquals(blockedProjection, (0L, 0L))
     yield ()
 
-  test("historical hydration normalizes null-like projections without changing durable payloads"):
+  test(
+    "historical hydration normalizes null-like projections without changing durable payloads"
+  ):
     requireDocker()
     val payload =
       """{"event_type":"wifi_management_frame","observed_at":"2026-07-27T12:01:00Z","sensor_id":"backfill-sensor","location_id":"lab","frame_type":"management","frame_subtype":"beacon","source_mac":"AA:BB:CC:DD:EE:10","ssid":"null","signal_dbm":null,"noise_dbm":"null","frequency_mhz":"malformed","channel_flags":9223372036854775808,"raw_len":null,"frame_control_flags":"null","retry":null,"protected":"null","risk_score":"null","mixed_encryption":null,"tags":[],"rf":{"signal_dbm":"-42","noise_dbm":null,"frequency_mhz":"5180","channel_flags":{"raw":"256"},"raw_len":"null"},"mac":{"retry":"1"}}"""
@@ -556,43 +626,66 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    TIMESTAMP '2026-07-27 12:03:00',
                    CURRENT_TIMESTAMP + INTERVAL '1 day'
                  )""".update.run.transact(xa)
-      rawBefore <- sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
+      rawBefore <-
+        sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
                           FROM sync_events
                           WHERE dedupe_key = $payloadHash
                             AND stream_name = 'wireless.audit'"""
-        .query[(String, String, String)]
-        .unique
-        .transact(xa)
-      candidates <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
+          .query[(String, String, String)]
+          .unique
+          .transact(xa)
+      candidates <- repository
+        .findSyncEventsNeedingHydration(None, 100)
+        .map(requireRight)
       candidate = candidates
         .find(_.dedupeKey == payloadHash)
         .getOrElse(fail("expected sparse wireless row in hydration page"))
       nullSchemaCandidate = candidates
         .find(_.dedupeKey == nullSchemaHash)
-        .getOrElse(fail("expected JSON-null schema version row in hydration page"))
+        .getOrElse(
+          fail("expected JSON-null schema version row in hydration page")
+        )
       _ = assert(!candidates.exists(_.dedupeKey == archivedHash))
       _ = assert(!candidates.exists(_.dedupeKey == tombstonedHash))
-      hydrated <- repository.hydrateExistingSyncEvent(candidate, payload).map(requireRight)
+      hydrated <- repository
+        .hydrateExistingSyncEvent(candidate, payload)
+        .map(requireRight)
       nullSchemaHydrated <- repository
         .hydrateExistingSyncEvent(
           nullSchemaCandidate,
           nullSchemaPayload
         )
         .map(requireRight)
-      rawAfter <- sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
+      rawAfter <-
+        sql"""SELECT CAST(payload AS TEXT), payload_sha256, payload_ref
                          FROM sync_events
                          WHERE dedupe_key = $payloadHash
                            AND stream_name = 'wireless.audit'"""
-        .query[(String, String, String)]
-        .unique
-        .transact(xa)
+          .query[(String, String, String)]
+          .unique
+          .transact(xa)
       state <- sql"""SELECT schema_version, ssid, signal_dbm, noise_dbm,
                             frequency_mhz, channel_flags, raw_len, frame_control_flags,
                             retry, risk_score, mixed_encryption, protected
                      FROM sync_events
                      WHERE dedupe_key = $payloadHash
                        AND stream_name = 'wireless.audit'"""
-        .query[(Int, String, Int, Option[Int], Int, Int, Int, Int, Boolean, Option[Double], Option[Boolean], Boolean)]
+        .query[
+          (
+              Int,
+              String,
+              Int,
+              Option[Int],
+              Int,
+              Int,
+              Int,
+              Int,
+              Boolean,
+              Option[Double],
+              Option[Boolean],
+              Boolean
+          )
+        ]
         .unique
         .transact(xa)
       nullSchemaVersion <- sql"""SELECT schema_version
@@ -602,7 +695,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .query[Int]
         .unique
         .transact(xa)
-      remaining <- repository.findSyncEventsNeedingHydration(None, 100).map(requireRight)
+      remaining <- repository
+        .findSyncEventsNeedingHydration(None, 100)
+        .map(requireRight)
     yield
       assert(hydrated)
       assert(nullSchemaHydrated)
@@ -617,7 +712,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assert(!remaining.exists(_.dedupeKey == payloadHash))
       assert(!remaining.exists(_.dedupeKey == nullSchemaHash))
 
-  test("shadow alert generation skips null-like signals and uses maintained projections"):
+  test(
+    "shadow alert generation skips null-like signals and uses maintained projections"
+  ):
     requireDocker()
     val nullSignalPayload = """{"signal_dbm":"null"}"""
     val validSignalPayload = """{"signal_dbm":null,"rf":{"signal_dbm":"-40"}}"""
@@ -630,7 +727,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    payload, status, producer, source_mac, signal_dbm
                  ) VALUES (
                    $nullSignalKey, 'wireless.audit', CURRENT_TIMESTAMP,
-                   ${inlineRef(nullSignalPayload)}, $nullSignalKey, $nullSignalPayload,
+                   ${inlineRef(
+          nullSignalPayload
+        )}, $nullSignalKey, $nullSignalPayload,
                    'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:20', NULL
                  )""".update.run.transact(xa)
       _ <- sql"""INSERT INTO sync_events (
@@ -638,7 +737,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                    payload, status, producer, source_mac, signal_dbm
                  ) VALUES (
                    $validSignalKey, 'wireless.audit', CURRENT_TIMESTAMP,
-                   ${inlineRef(validSignalPayload)}, $validSignalKey, $validSignalPayload,
+                   ${inlineRef(
+          validSignalPayload
+        )}, $validSignalKey, $validSignalPayload,
                    'completed', 'ssl-proxy', 'aa:bb:cc:dd:ee:21', -40
                  )""".update.run.transact(xa)
       alerts <- repository.generateShadowAlerts(100).map(requireRight)
@@ -654,7 +755,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assert(alerts.exists(_.contains("aa:bb:cc:dd:ee:21")))
       assert(!alerts.exists(_.contains("aa:bb:cc:dd:ee:20")))
 
-  test("normalization fills a bounded frame and repairs missing children on replay"):
+  test(
+    "normalization fills a bounded frame and repairs missing children on replay"
+  ):
     requireDocker()
     val keys = List("normalizer-repair-1", "normalizer-repair-2")
     val seed = keys.zipWithIndex.traverse_ { case (key, index) =>
@@ -662,7 +765,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                dedupe_key, stream_name, observed_at, payload_ref, payload,
                sensor_id, location_id, frame_control_flags, source_mac
              ) VALUES (
-               $key, 'wireless.audit', ${java.sql.Timestamp.from(java.time.Instant.EPOCH.plusSeconds(index.toLong))},
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(
+          java.time.Instant.EPOCH.plusSeconds(index.toLong)
+        )},
                'inline://test', '{}', 'normalizer-test', 'lab', 0, 'aa:bb:cc:dd:ee:28'
              )""".update.run.void
     }
@@ -670,26 +775,33 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- seed.transact(xa)
       first <- repository.normalizeWirelessFrames(1).map(requireRight)
       _ = assertEquals(first, 7)
-      count <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
-        .query[Long]
-        .unique
-        .transact(xa)
+      count <-
+        sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
+          .query[Long]
+          .unique
+          .transact(xa)
       _ = assertEquals(count, 1L)
-      _ <- sql"""DELETE FROM wireless_frame_network WHERE dedupe_key = ${keys.head}""".update.run.transact(xa)
+      _ <-
+        sql"""DELETE FROM wireless_frame_network WHERE dedupe_key = ${keys.head}""".update.run
+          .transact(xa)
       _ <- repository.normalizeWirelessFrames(1).map(requireRight)
-      network <- sql"""SELECT COUNT(*) FROM wireless_frame_network WHERE dedupe_key = ${keys.head}"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      countAfter <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
-        .query[Long]
-        .unique
-        .transact(xa)
+      network <-
+        sql"""SELECT COUNT(*) FROM wireless_frame_network WHERE dedupe_key = ${keys.head}"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      countAfter <-
+        sql"""SELECT COUNT(*) FROM wireless_frames WHERE sensor_id = 'normalizer-test'"""
+          .query[Long]
+          .unique
+          .transact(xa)
     yield
       assertEquals(network, 1L)
       assertEquals(countAfter, 2L)
 
-  test("normalization projects archived events after the payload leaves PostgreSQL"):
+  test(
+    "normalization projects archived events after the payload leaves PostgreSQL"
+  ):
     requireDocker()
     val key = "normalizer-archived-1"
     val seed =
@@ -698,26 +810,32 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                payload_sha256, payload_archived, payload_archived_at,
                sensor_id, location_id, frame_control_flags, source_mac
              ) VALUES (
-               $key, 'wireless.audit', ${java.sql.Timestamp.from(java.time.Instant.EPOCH.plusSeconds(7L))},
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(
+          java.time.Instant.EPOCH.plusSeconds(7L)
+        )},
                'inline://test', NULL, ${"ab" * 32}, true, CURRENT_TIMESTAMP,
                'normalizer-archived', 'lab', 0, 'aa:bb:cc:dd:ee:2a'
              )""".update.run.void
     for
       _ <- seed.transact(xa)
       _ <- repository.normalizeWirelessFrames(200).map(requireRight)
-      frames <- sql"""SELECT COUNT(*) FROM wireless_frames WHERE dedupe_key = $key"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      radio <- sql"""SELECT COUNT(*) FROM wireless_frame_radio WHERE dedupe_key = $key"""
-        .query[Long]
-        .unique
-        .transact(xa)
+      frames <-
+        sql"""SELECT COUNT(*) FROM wireless_frames WHERE dedupe_key = $key"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      radio <-
+        sql"""SELECT COUNT(*) FROM wireless_frame_radio WHERE dedupe_key = $key"""
+          .query[Long]
+          .unique
+          .transact(xa)
     yield
       assertEquals(frames, 1L)
       assertEquals(radio, 1L)
 
-  test("shadow alerts aggregate repeated devices and mark exactly the selected inputs"):
+  test(
+    "shadow alerts aggregate repeated devices and mark exactly the selected inputs"
+  ):
     requireDocker()
     val mac = "aa:bb:cc:dd:ee:29"
     val now = java.time.Instant.now()
@@ -728,7 +846,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                payload, status, source_mac, signal_dbm, ssid
              ) VALUES (
-               $key, 'wireless.audit', ${java.sql.Timestamp.from(now.minusSeconds(age))},
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(
+          now.minusSeconds(age)
+        )},
                'inline://test', $key, '{}', 'completed', $mac, $signal, ${s"network-$index"}
              )""".update.run.void
     }
@@ -737,36 +857,50 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- seed.transact(xa)
       first <- repository.generateShadowAlerts(100).map(requireRight)
       repeated <- repository.generateShadowAlerts(100).map(requireRight)
-      stored <- sql"""SELECT occurrence_count, signal_dbm, ssid, first_occurred_at, last_occurred_at
+      stored <-
+        sql"""SELECT occurrence_count, signal_dbm, ssid, first_occurred_at, last_occurred_at
                        FROM wireless_shadow_alerts WHERE source_mac = $mac"""
-        .query[(Long, Int, String, java.sql.Timestamp, java.sql.Timestamp)]
-        .unique
-        .transact(xa)
-      marked <- sql"""SELECT COUNT(*) FROM wireless_shadow_alert_inputs WHERE source_mac = $mac"""
-        .query[Long]
-        .unique
-        .transact(xa)
+          .query[(Long, Int, String, java.sql.Timestamp, java.sql.Timestamp)]
+          .unique
+          .transact(xa)
+      marked <-
+        sql"""SELECT COUNT(*) FROM wireless_shadow_alert_inputs WHERE source_mac = $mac"""
+          .query[Long]
+          .unique
+          .transact(xa)
     yield
       assertEquals(first.count(_.contains(mac)), 1)
       assert(!repeated.exists(_.contains(mac)))
       assertEquals(stored._1, 3L)
       assertEquals(stored._2, -35)
       assertEquals(stored._3, "network-2")
-      assertEquals(stored._4.toInstant.toEpochMilli, now.minusSeconds(30L).toEpochMilli)
-      assertEquals(stored._5.toInstant.toEpochMilli, now.minusSeconds(10L).toEpochMilli)
+      assertEquals(
+        stored._4.toInstant.toEpochMilli,
+        now.minusSeconds(30L).toEpochMilli
+      )
+      assertEquals(
+        stored._5.toInstant.toEpochMilli,
+        now.minusSeconds(10L).toEpochMilli
+      )
       assertEquals(marked, 3L)
 
-  test("concurrent shadow alert replays aggregate only the inputs each call claims"):
+  test(
+    "concurrent shadow alert replays aggregate only the inputs each call claims"
+  ):
     requireDocker()
     val mac = "aa:bb:cc:dd:ee:30"
     val now = java.time.Instant.now()
-    val keys = (1 to 3).toList.map(index => Sha256Utils.sha256Hex(s"shadow-alert-concurrent-$index"))
+    val keys = (1 to 3).toList.map(index =>
+      Sha256Utils.sha256Hex(s"shadow-alert-concurrent-$index")
+    )
     val seed = keys.zipWithIndex.traverse_ { case (key, index) =>
       sql"""INSERT INTO sync_events (
                dedupe_key, stream_name, observed_at, payload_ref, payload_sha256,
                payload, status, source_mac, signal_dbm
              ) VALUES (
-               $key, 'wireless.audit', ${java.sql.Timestamp.from(now.minusSeconds(30L - index * 10L))},
+               $key, 'wireless.audit', ${java.sql.Timestamp.from(
+          now.minusSeconds(30L - index * 10L)
+        )},
                'inline://test', $key, '{}', 'completed', $mac, -40
              )""".update.run.void
     }
@@ -808,10 +942,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
           }
         yield alerts
       }
-      stored <- sql"""SELECT occurrence_count FROM wireless_shadow_alerts WHERE source_mac = $mac"""
-        .query[Long]
-        .unique
-        .transact(xa)
+      stored <-
+        sql"""SELECT occurrence_count FROM wireless_shadow_alerts WHERE source_mac = $mac"""
+          .query[Long]
+          .unique
+          .transact(xa)
       marked <- sql"""SELECT dedupe_key FROM wireless_shadow_alert_inputs
                        WHERE source_mac = $mac ORDER BY dedupe_key"""
         .query[String]
@@ -827,7 +962,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(marked, keys.sorted)
       assert(!repeated.exists(_.contains(mac)))
 
-  test("archived retention honors pending outboxes and deletes terminal UUID dependencies"):
+  test(
+    "archived retention honors pending outboxes and deletes terminal UUID dependencies"
+  ):
     requireDocker()
     val payload =
       """{"observed_at":"2025-01-01T00:00:00Z","event_type":"wifi_data_frame","sensor_id":"retention-test"}"""
@@ -837,54 +974,83 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
     for
       decision <- persist(record, offset = 9501L)
-      _ <- sql"""UPDATE sync_events SET status = 'completed', payload = NULL, payload_archived = true
-                  WHERE dedupe_key = ${record.dedupeKey}""".update.run.transact(xa)
+      _ <-
+        sql"""UPDATE sync_events SET status = 'completed', payload = NULL, payload_archived = true
+                  WHERE dedupe_key = ${record.dedupeKey}""".update.run
+          .transact(xa)
       _ <- sql"""INSERT INTO sync_event_payload_archives
                    (dedupe_key, stream_name, observed_at, payload_sha256, archive_uri)
                  SELECT dedupe_key, stream_name, observed_at, payload_sha256, 's3://test/retention'
-                 FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".update.run.transact(xa)
-      _ <- sql"""UPDATE sync_jobs SET status = 'completed' WHERE job_id = ${decision.jobId}""".update.run.transact(xa)
-      _ <- sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run
+                 FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".update.run
         .transact(xa)
-      blocked <- MaintenanceSql.retentionCandidates(30, 100).to[List].transact(xa)
+      _ <-
+        sql"""UPDATE sync_jobs SET status = 'completed' WHERE job_id = ${decision.jobId}""".update.run
+          .transact(xa)
+      _ <-
+        sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run
+          .transact(xa)
+      blocked <- MaintenanceSql
+        .retentionCandidates(30, 100)
+        .to[List]
+        .transact(xa)
       _ = assert(!blocked.exists(_._1 == record.dedupeKey))
-      _ <- sql"""UPDATE outbox_events SET status = 'published' WHERE source_id = ${decision.batchId}""".update.run
-        .transact(xa)
+      _ <-
+        sql"""UPDATE outbox_events SET status = 'published' WHERE source_id = ${decision.batchId}""".update.run
+          .transact(xa)
       _ <- sql"""INSERT INTO outbox_publish_attempts (outbox_id, attempt_no, status)
                  SELECT outbox_id, 1, 'published' FROM outbox_events WHERE source_id = ${decision.batchId}""".update.run
         .transact(xa)
-      _ <- sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
-                 VALUES (${decision.jobId}, ${decision.batchId}, 'test', 'retention fixture')""".update.run.transact(xa)
+      _ <-
+        sql"""INSERT INTO sync_errors (job_id, batch_id, error_class, error_text)
+                 VALUES (${decision.jobId}, ${decision.batchId}, 'test', 'retention fixture')""".update.run
+          .transact(xa)
       lease <- repository
-        .claimMaintenanceLease(resourceType, resourceId, "test-worker", java.util.UUID.randomUUID().toString, 60)
-        .map(result => requireRight(result).getOrElse(fail("expected maintenance lease")))
-      result <- repository.retainArchivedEvents(30, 90, 100, resourceType, resourceId, lease).map(requireRight)
-      remaining <- sql"""SELECT COUNT(*) FROM sync_events WHERE dedupe_key = ${record.dedupeKey}"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      outboxes <- sql"""SELECT COUNT(*) FROM outbox_events WHERE source_id = ${decision.batchId}"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      errors <- sql"""SELECT COUNT(*) FROM sync_errors WHERE batch_id = ${decision.batchId}"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      tombstones <- sql"""SELECT COUNT(*) FROM sync_event_tombstones WHERE dedupe_key = ${record.dedupeKey}"""
-        .query[Long]
-        .unique
-        .transact(xa)
-      archives <- sql"""SELECT COUNT(*) FROM sync_event_payload_archives WHERE dedupe_key = ${record.dedupeKey}"""
-        .query[Long]
-        .unique
-        .transact(xa)
+        .claimMaintenanceLease(
+          resourceType,
+          resourceId,
+          "test-worker",
+          java.util.UUID.randomUUID().toString,
+          60
+        )
+        .map(result =>
+          requireRight(result).getOrElse(fail("expected maintenance lease"))
+        )
+      result <- repository
+        .retainArchivedEvents(30, 90, 100, resourceType, resourceId, lease)
+        .map(requireRight)
+      remaining <-
+        sql"""SELECT COUNT(*) FROM sync_events WHERE dedupe_key = ${record.dedupeKey}"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      outboxes <-
+        sql"""SELECT COUNT(*) FROM outbox_events WHERE source_id = ${decision.batchId}"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      errors <-
+        sql"""SELECT COUNT(*) FROM sync_errors WHERE batch_id = ${decision.batchId}"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      tombstones <-
+        sql"""SELECT COUNT(*) FROM sync_event_tombstones WHERE dedupe_key = ${record.dedupeKey}"""
+          .query[Long]
+          .unique
+          .transact(xa)
+      archives <-
+        sql"""SELECT COUNT(*) FROM sync_event_payload_archives WHERE dedupe_key = ${record.dedupeKey}"""
+          .query[Long]
+          .unique
+          .transact(xa)
     yield
       assertEquals(result, 1L -> 1L)
       assertEquals((remaining, outboxes, errors), (0L, 0L, 0L))
       assertEquals((tombstones, archives), (1L, 1L))
 
-  test("load acknowledgement binds batch_id without a JSON collation comparison"):
+  test(
+    "load acknowledgement binds batch_id without a JSON collation comparison"
+  ):
     requireDocker()
     val rawJson =
       """{"observed_at":"2026-07-25T20:00:00Z","host":"ack.example","body":{"ok":true}}"""
@@ -898,7 +1064,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         destinationTopics = List("sync.oracle.load"),
         leaseSeconds = 60
       )
-      claimed = requireRight(claimedResult).getOrElse(fail("expected a claimed load outbox record"))
+      claimed = requireRight(claimedResult).getOrElse(
+        fail("expected a claimed load outbox record")
+      )
       acknowledged <- repository.acknowledgeOutbox(claimed)
       _ = assertEquals(acknowledged, Right(true))
       state <- sql"""SELECT o.status, b.status, b.attempt_count, j.status,
@@ -914,53 +1082,118 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .transact(xa)
     yield assertEquals(state, ("published", "dispatched", 1, "running", 1L))
 
-  test("broker loads and results require an exact durable coordinator dispatch and outcome"):
+  test(
+    "broker loads and results require an exact durable coordinator dispatch and outcome"
+  ):
     requireDocker()
-    val rawJson = """{"observed_at":"2026-07-25T20:20:00Z","host":"authorization.example","body":{"ok":true}}"""
+    val rawJson =
+      """{"observed_at":"2026-07-25T20:20:00Z","host":"authorization.example","body":{"ok":true}}"""
     val record = translatedAudit(rawJson, offset = 9200L)
-    def metadata(topic: String, offset: Long, key: String): BrokerRecordMetadata =
-      BrokerRecordMetadata(topic, 0, offset, "authorization-integration", 1, ArtifactSha256, Some(key), "b" * 64)
+    def metadata(
+        topic: String,
+        offset: Long,
+        key: String
+    ): BrokerRecordMetadata =
+      BrokerRecordMetadata(
+        topic,
+        0,
+        offset,
+        "authorization-integration",
+        1,
+        ArtifactSha256,
+        Some(key),
+        "b" * 64
+      )
     for
       _ <- parkPendingLoadOutboxes()
       decision <- persist(record, offset = 9200L)
       stored <- sql"""SELECT payload::text FROM outbox_events
                        WHERE source_id = ${decision.batchId} AND event_type = 'sync.load.requested'"""
-        .query[String].unique.transact(xa)
+        .query[String]
+        .unique
+        .transact(xa)
       load <- IO.fromEither(io.circe.parser.decode[PostgresLoad](stored))
       _ <- DispatchAuthorizationSql.authorizeLoad(load).transact(xa)
       rejected <- List(
-        load.copy(batchId = "unknown-batch"), load.copy(jobId = "other-job"),
-        load.copy(streamName = "proxy.events"), load.copy(payloadRef = "inline://json/W10"),
-        load.copy(cursorEnd = "forged-cursor"), load.copy(attempt = load.attempt + 1),
+        load.copy(batchId = "unknown-batch"),
+        load.copy(jobId = "other-job"),
+        load.copy(streamName = "proxy.events"),
+        load.copy(payloadRef = "inline://json/W10"),
+        load.copy(cursorEnd = "forged-cursor"),
+        load.copy(attempt = load.attempt + 1),
         load.copy(batchNo = None)
-      ).traverse(candidate => DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa).attempt)
+      ).traverse(candidate =>
+        DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa).attempt
+      )
       _ = assert(rejected.forall(_.isLeft))
       handler = new PostgresLoadHandler(
-        new PostgresPayloadResolver("/tmp"), PostgresTransformService, schemaTransactor, PostgresClock,
-        sha => IngestionSql.payloadBySha256(sha).unique.transact(xa).map(Some(_)),
-        candidate => DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa)
+        new PostgresPayloadResolver("/tmp"),
+        PostgresTransformService,
+        schemaTransactor,
+        PostgresClock,
+        sha =>
+          IngestionSql.payloadBySha256(sha).unique.transact(xa).map(Some(_)),
+        candidate =>
+          DispatchAuthorizationSql.authorizeLoad(candidate).transact(xa)
       )
-      forged <- handler.handle(load.copy(payloadRef = "inline://json/W10")).attempt
+      forged <- handler
+        .handle(load.copy(payloadRef = "inline://json/W10"))
+        .attempt
       _ = assert(forged.isLeft)
       result <- handler.handle(load)
       _ = assertEquals(result.status, "success")
       key = s"${load.batchId}:${load.attempt}"
-      noOutcome <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9201L, key))
+      noOutcome <- repository.recordResultWithEvidence(
+        result,
+        metadata("sync.oracle.result", 9201L, key)
+      )
       _ = assert(noOutcome.isLeft)
-      _ <- repository.recordLoadResultWithEvidence(load, result, metadata("sync.oracle.load", 9202L, key)).map(requireRight)
-      altered <- repository.recordResultWithEvidence(result.copy(rowCount = result.rowCount + 1), metadata("sync.oracle.result", 9203L, key))
-      missingKey <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9204L, key).copy(messageKey = None))
+      _ <- repository
+        .recordLoadResultWithEvidence(
+          load,
+          result,
+          metadata("sync.oracle.load", 9202L, key)
+        )
+        .map(requireRight)
+      altered <- repository.recordResultWithEvidence(
+        result.copy(rowCount = result.rowCount + 1),
+        metadata("sync.oracle.result", 9203L, key)
+      )
+      missingKey <- repository.recordResultWithEvidence(
+        result,
+        metadata("sync.oracle.result", 9204L, key).copy(messageKey = None)
+      )
       _ = assert(altered.isLeft && missingKey.isLeft)
-      _ <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9205L, key)).map(requireRight)
-      _ <- repository.recordResultWithEvidence(result, metadata("sync.oracle.result", 9205L, key)).map(requireRight)
-      status <- sql"""SELECT status FROM sync_batches WHERE batch_id = ${load.batchId}""".query[String].unique.transact(xa)
+      _ <- repository
+        .recordResultWithEvidence(
+          result,
+          metadata("sync.oracle.result", 9205L, key)
+        )
+        .map(requireRight)
+      _ <- repository
+        .recordResultWithEvidence(
+          result,
+          metadata("sync.oracle.result", 9205L, key)
+        )
+        .map(requireRight)
+      status <-
+        sql"""SELECT status FROM sync_batches WHERE batch_id = ${load.batchId}"""
+          .query[String]
+          .unique
+          .transact(xa)
       _ = assertEquals(status, "completed")
       _ <- sql"""UPDATE outbox_events SET message_key = ${s"${load.batchId}:2"}
-                  WHERE source_id = ${load.batchId} AND event_type = 'sync.load.requested'""".update.run.transact(xa)
-      stale <- DispatchAuthorizationSql.authorizeResult(result, Some(key)).transact(xa).attempt
+                  WHERE source_id = ${load.batchId} AND event_type = 'sync.load.requested'""".update.run
+        .transact(xa)
+      stale <- DispatchAuthorizationSql
+        .authorizeResult(result, Some(key))
+        .transact(xa)
+        .attempt
     yield assert(stale.isLeft)
 
-  test("invalid load batch_id is parked after publication without dispatching its batch"):
+  test(
+    "invalid load batch_id is parked after publication without dispatching its batch"
+  ):
     requireDocker()
     val rawJson =
       """{"observed_at":"2026-07-25T20:01:00Z","host":"invalid-batch.example"}"""
@@ -974,7 +1207,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         destinationTopics = List("sync.oracle.load"),
         leaseSeconds = 60
       )
-      claimed = requireRight(claimedResult).getOrElse(fail("expected a claimed load outbox record"))
+      claimed = requireRight(claimedResult).getOrElse(
+        fail("expected a claimed load outbox record")
+      )
       acknowledged <- repository.acknowledgeOutbox(
         claimed.copy(payload = """{"batch_id":"not-a-uuid"}""")
       )
@@ -1003,7 +1238,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(state._5, "pending")
       assertEquals(state._6, 1L)
 
-  test("outbox enqueue keeps published messages closed and reopens failed ones"):
+  test(
+    "outbox enqueue keeps published messages closed and reopens failed ones"
+  ):
     requireDocker()
     val record = translatedAudit(
       """{"observed_at":"2026-07-25T20:01:30Z","host":"idempotent-outbox.example"}""",
@@ -1024,23 +1261,34 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- sql"""UPDATE outbox_events
                   SET status = 'published', published_at = CURRENT_TIMESTAMP
                   WHERE destination_topic = 'sync.oracle.load'
-                    AND source_id = ${decision.batchId}""".update.run.void.transact(xa)
-      retriedLoad <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+                    AND source_id = ${decision.batchId}""".update.run.void
+        .transact(xa)
+      retriedLoad <- repository.prepareLoadDispatch(
+        List(record.streamName),
+        maxAttempts = 5,
+        limit = 100
+      )
       _ = requireRight(retriedLoad)
-      loadState <- sql"""SELECT status, published_at IS NOT NULL, COUNT(*) OVER ()
+      loadState <-
+        sql"""SELECT status, published_at IS NOT NULL, COUNT(*) OVER ()
                           FROM outbox_events
                           WHERE destination_topic = 'sync.oracle.load'
                             AND source_id = ${decision.batchId}"""
-        .query[(String, Boolean, Long)]
-        .unique
-        .transact(xa)
+          .query[(String, Boolean, Long)]
+          .unique
+          .transact(xa)
       _ <- ResultSql
-        .enqueue(firstResult, attempt = 1, outboxId = "44444444-4444-4444-4444-444444444444")
+        .enqueue(
+          firstResult,
+          attempt = 1,
+          outboxId = "44444444-4444-4444-4444-444444444444"
+        )
         .transact(xa)
       _ <- sql"""UPDATE outbox_events
                   SET status = 'published', published_at = CURRENT_TIMESTAMP
                   WHERE destination_topic = 'sync.oracle.result'
-                    AND message_key = ${s"$resultBatchId:1"}""".update.run.void.transact(xa)
+                    AND message_key = ${s"$resultBatchId:1"}""".update.run.void
+        .transact(xa)
       _ <- ResultSql
         .enqueue(
           firstResult.copy(rowCount = 2, checksum = "retry"),
@@ -1057,13 +1305,19 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .unique
         .transact(xa)
       _ <- sql"""UPDATE sync_batches SET status = 'pending'
-                  WHERE batch_id = ${decision.batchId}""".update.run.void.transact(xa)
+                  WHERE batch_id = ${decision.batchId}""".update.run.void
+        .transact(xa)
       _ <- sql"""UPDATE outbox_events
                   SET status = 'failed', last_error = 'publish attempts exhausted'
                   WHERE destination_topic IN ('sync.oracle.load', 'sync.oracle.result')
                     AND (source_id = ${decision.batchId}
-                         OR message_key = ${s"$resultBatchId:1"})""".update.run.void.transact(xa)
-      reopenedLoad <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+                         OR message_key = ${s"$resultBatchId:1"})""".update.run.void
+        .transact(xa)
+      reopenedLoad <- repository.prepareLoadDispatch(
+        List(record.streamName),
+        maxAttempts = 5,
+        limit = 100
+      )
       _ = requireRight(reopenedLoad)
       _ <- ResultSql
         .enqueue(
@@ -1093,7 +1347,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- sql"""UPDATE outbox_events
                   SET status = 'published', published_at = CURRENT_TIMESTAMP
                   WHERE destination_topic = 'sync.oracle.result'
-                    AND source_id = $resultBatchId""".update.run.void.transact(xa)
+                    AND source_id = $resultBatchId""".update.run.void
+        .transact(xa)
       _ <- ResultSql
         .enqueue(
           firstResult.copy(rowCount = 4, checksum = "second-attempt"),
@@ -1152,7 +1407,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                      SET status = 'pending', attempt_count = 1
                      WHERE batch_id = ${decision.batchId}""".update.run
       yield ()).transact(xa)
-      dispatched <- repository.prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
+      dispatched <- repository.prepareLoadDispatch(
+        List(record.streamName),
+        maxAttempts = 5,
+        limit = 100
+      )
       _ = requireRight(dispatched)
       state <- sql"""SELECT outbox_id, message_key, status, attempt_count,
                              published_at IS NULL, COUNT(*) OVER ()
@@ -1177,7 +1436,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .transact(xa)
       .map(distance => assertEqualsDouble(distance, 0.0d, 0.000001d))
 
-  test("maximum accepted payload audit persists a compact payload_ref and stores full payload in payload column"):
+  test(
+    "maximum accepted payload audit persists a compact payload_ref and stores full payload in payload column"
+  ):
     requireDocker()
     val prefix = """{"observed_at":"2026-07-25T20:02:00Z","body":""""
     val suffix = "\"}"
@@ -1186,14 +1447,20 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val record = translatedAudit(rawJson, offset = 3L)
     val expectedPayload = circeParser
       .parse(rawJson)
-      .fold(error => fail(s"expected valid payload audit JSON, found $error"), identity)
+      .fold(
+        error => fail(s"expected valid payload audit JSON, found $error"),
+        identity
+      )
     val expectedPayloadRef = circeParser
       .parse(record.requestJson)
       .toOption
       .flatMap(_.hcursor.get[String]("payload_ref").toOption)
       .getOrElse(fail("translated payload audit must contain payload_ref"))
 
-    assertEquals(rawJson.getBytes(StandardCharsets.UTF_8).length, ProxyMaxAuditBodyBytes)
+    assertEquals(
+      rawJson.getBytes(StandardCharsets.UTF_8).length,
+      ProxyMaxAuditBodyBytes
+    )
     assert(expectedPayloadRef.startsWith("sha256://"))
     assert(expectedPayloadRef.getBytes(StandardCharsets.UTF_8).length < 128)
 
@@ -1229,18 +1496,26 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .unique
         .transact(xa)
     yield
-      assertEquals(eventRef, (expectedPayloadRef, expectedPayloadRef.length.toLong))
+      assertEquals(
+        eventRef,
+        (expectedPayloadRef, expectedPayloadRef.length.toLong)
+      )
       assertEquals(batchRef, eventRef)
       val parsedStoredPayload = circeParser
         .parse(storedPayload)
-        .fold(error => fail(s"expected stored payload JSON, found $error"), identity)
+        .fold(
+          error => fail(s"expected stored payload JSON, found $error"),
+          identity
+        )
       assertEquals(
         Printer.noSpacesSortKeys.print(parsedStoredPayload),
         Printer.noSpacesSortKeys.print(expectedPayload)
       )
       assertEquals(evidenceCount, 1L)
 
-  test("canonical manifest parsing is repeatable and retains TEXT payload capacity"):
+  test(
+    "canonical manifest parsing is repeatable and retains TEXT payload capacity"
+  ):
     requireDocker()
     IO.blocking {
       val first = canonicalStatements().map { case (path, statements) =>
@@ -1252,12 +1527,26 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(second, first)
 
       val searchRoot = schemaRoot.resolveSibling("atheros_search")
-      val embeddingRecoveryStatements = canonicalStatements(canonicalManifest(searchRoot), searchRoot)
-        .collectFirst { case ("01_tables/009_embedding_recovery_contract.sql", statements) => statements }
-        .getOrElse(fail("embedding recovery contract is missing from the atheros_search manifest"))
+      val embeddingRecoveryStatements = canonicalStatements(
+        canonicalManifest(searchRoot),
+        searchRoot
+      )
+        .collectFirst {
+          case ("01_tables/009_embedding_recovery_contract.sql", statements) =>
+            statements
+        }
+        .getOrElse(
+          fail(
+            "embedding recovery contract is missing from the atheros_search manifest"
+          )
+        )
       val pgvectorRequirement = embeddingRecoveryStatements
         .find(_.trim.startsWith("DO $$"))
-        .getOrElse(fail("embedding recovery contract is missing its pgvector requirement block"))
+        .getOrElse(
+          fail(
+            "embedding recovery contract is missing its pgvector requirement block"
+          )
+        )
       assert(pgvectorRequirement.contains("RAISE EXCEPTION"))
       assert(pgvectorRequirement.trim.endsWith("END $$"))
     } *>
@@ -1284,7 +1573,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     requireDocker()
     new PostgresSchemaPreflight(schemaTransactor, schemaConfig).validate()
 
-  test("scan request evidence batch rolls back atomically when one record is invalid"):
+  test(
+    "scan request evidence batch rolls back atomically when one record is invalid"
+  ):
     requireDocker()
     val group = "octopus-scan-batch-atomic-v1"
     val first = translatedAudit(
@@ -1328,7 +1619,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       eventCount <- (fr"""SELECT COUNT(*) FROM sync_events
                             WHERE stream_name = 'proxy.payload_audit'
                               AND dedupe_key IN (""" ++
-        List(first.dedupeKey, second.dedupeKey).map(value => fr0"$value").intercalate(fr",") ++
+        List(first.dedupeKey, second.dedupeKey)
+          .map(value => fr0"$value")
+          .intercalate(fr",") ++
         fr")").query[Long].unique.transact(xa)
     yield
       assert(result.isLeft)
@@ -1339,11 +1632,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     requireDocker()
     val topic = "test.concurrent.claim"
     val outboxIds = (1 to 12).toList.map { index =>
-      java.util.UUID.nameUUIDFromBytes(s"$topic:$index".getBytes(StandardCharsets.UTF_8)).toString
+      java.util.UUID
+        .nameUUIDFromBytes(s"$topic:$index".getBytes(StandardCharsets.UTF_8))
+        .toString
     }
 
-    val insertRows = outboxIds.zipWithIndex.traverse_ { case (outboxId, index) =>
-      sql"""INSERT INTO outbox_events (
+    val insertRows = outboxIds.zipWithIndex.traverse_ {
+      case (outboxId, index) =>
+        sql"""INSERT INTO outbox_events (
               outbox_id, source_type, source_id, event_type,
               destination_topic, message_key, payload, status,
               attempt_count, max_attempts, next_attempt_at, created_at, updated_at
@@ -1357,7 +1653,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     for
       _ <- insertRows.transact(xa)
       claims <- outboxIds.indices.toList.parTraverseN(4) { index =>
-        repository.claimOutbox(s"concurrent-owner-$index", List(topic), leaseSeconds = 60)
+        repository.claimOutbox(
+          s"concurrent-owner-$index",
+          List(topic),
+          leaseSeconds = 60
+        )
       }
       records = claims.map(requireRight).flatten
     yield
@@ -1399,21 +1699,37 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         )
       )
       .noSpaces
-    val source = ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
+    val source =
+      ScanRequestRecord.decodeWire(requestJson).fold(throw _, identity)
     new PostgresPayloadResolver("/unused").resolve(source)
 
   private def inlineRef(payload: String): String =
     "inline://json/" + Base64.getUrlEncoder.withoutPadding
       .encodeToString(payload.getBytes(StandardCharsets.UTF_8))
 
-  private def translatedAudit(rawJson: String, offset: Long): ResolvedScanRequestRecord =
+  private def translatedAudit(
+      rawJson: String,
+      offset: Long
+  ): ResolvedScanRequestRecord =
     PayloadAuditConsumer
       .translateRecord(
-        ConsumerRecord[String, String]("proxy.payload_audit", 0, offset, null, rawJson)
+        ConsumerRecord[String, String](
+          "proxy.payload_audit",
+          0,
+          offset,
+          null,
+          rawJson
+        )
       )
-      .fold(error => fail(s"expected valid payload audit, found $error"), identity)
+      .fold(
+        error => fail(s"expected valid payload audit, found $error"),
+        identity
+      )
 
-  private def persist(record: ResolvedScanRequestRecord, offset: Long): IO[IngestionDecision] =
+  private def persist(
+      record: ResolvedScanRequestRecord,
+      offset: Long
+  ): IO[IngestionDecision] =
     val metadata = BrokerRecordMetadata(
       topic = "proxy.payload_audit",
       partition = 0,
@@ -1425,18 +1741,25 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       payloadSha256 = record.sourceRecordSha256
     )
 
-    repository.recordScanRequestWithEvidence(record, metadata).flatMap { result =>
-      val decision = requireRight(result)
-      assertEquals(decision.disposition, IngestionDisposition.Processed)
-      repository
-        .prepareLoadDispatch(List(record.streamName), maxAttempts = 5, limit = 100)
-        .map(dispatch =>
-          requireRight(dispatch): Unit
-          decision
-        )
+    repository.recordScanRequestWithEvidence(record, metadata).flatMap {
+      result =>
+        val decision = requireRight(result)
+        assertEquals(decision.disposition, IngestionDisposition.Processed)
+        repository
+          .prepareLoadDispatch(
+            List(record.streamName),
+            maxAttempts = 5,
+            limit = 100
+          )
+          .map(dispatch =>
+            requireRight(dispatch): Unit
+            decision
+          )
     }
 
-  test("projection cursors preserve complete groups across fetch chunks, replay, and late arrivals"):
+  test(
+    "projection cursors preserve complete groups across fetch chunks, replay, and late arrivals"
+  ):
     requireDocker()
     def seed(first: Int, last: Int): IO[Unit] =
       (for
@@ -1451,7 +1774,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                     FROM generate_series(1, 2) device,
                          generate_series(0, 1) hour,
                          generate_series($first, $last) sample""".update.run
-        _ <- sql"""INSERT INTO wireless_frame_radio (dedupe_key, signal_dbm, tsft_delta_us, wall_clock_delta_ms)
+        _ <-
+          sql"""INSERT INTO wireless_frame_radio (dedupe_key, signal_dbm, tsft_delta_us, wall_clock_delta_ms)
                     SELECT dedupe_key, -60, 10, 2 FROM wireless_frames
                     WHERE dedupe_key LIKE 'streaming-%'
                     ON CONFLICT (dedupe_key) DO NOTHING""".update.run
@@ -1473,13 +1797,20 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
     def verify(samplesPerWindow: Long): IO[Unit] =
       (for
-        behavior <- sql"""SELECT event_count FROM atheros_search.behaviour_snapshots
-                          WHERE source_mac LIKE '02:00:00:99:00:%'""".query[Long].to[List]
+        behavior <-
+          sql"""SELECT event_count FROM atheros_search.behaviour_snapshots
+                          WHERE source_mac LIKE '02:00:00:99:00:%'"""
+            .query[Long]
+            .to[List]
         timing <- sql"""SELECT source_event_count, tsft_p50_us, wall_p50_ms
                         FROM atheros_search.timing_profiles
-                        WHERE source_mac LIKE '02:00:00:99:00:%'""".query[(Long, Double, Double)].to[List]
+                        WHERE source_mac LIKE '02:00:00:99:00:%'"""
+          .query[(Long, Double, Double)]
+          .to[List]
         sequence <- sql"""SELECT frame_count FROM atheros_search.frame_sequences
-                          WHERE session_key LIKE 'streaming-session-%'""".query[Long].to[List]
+                          WHERE session_key LIKE 'streaming-session-%'"""
+          .query[Long]
+          .to[List]
         baseline <- sql"""SELECT sample_count, p50 FROM atheros_search.baseline_profiles
                           WHERE bssid LIKE '02:00:00:99:00:%' AND metric = 'signal_dbm'"""
           .query[(Long, Double)]
@@ -1511,12 +1842,21 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
              AND status = 'pending'""".update.run.void.transact(xa)
 
   private def requireRight[A](result: Either[DatabaseError, A]): A =
-    result.fold(error => fail(s"${error.operation}: ${error.message}"), identity)
+    result.fold(
+      error => fail(s"${error.operation}: ${error.message}"),
+      identity
+    )
 
   private def requireDocker(): Unit =
     if dockerRequired && !dockerAvailable then
-      throw IllegalStateException("OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable")
-    else assume(dockerAvailable, "Docker is required for the PostgreSQL integration suite")
+      throw IllegalStateException(
+        "OCTOPUS_REQUIRE_DOCKER=true but Docker is unavailable"
+      )
+    else
+      assume(
+        dockerAvailable,
+        "Docker is required for the PostgreSQL integration suite"
+      )
 
   private def applyCanonicalManifest(): Unit =
     val manifest = canonicalManifest()
@@ -1524,14 +1864,23 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val parsedStatements = canonicalStatements(manifest) ++
       canonicalStatements(canonicalManifest(searchRoot), searchRoot)
 
-    val connection = DriverManager.getConnection(jdbcUrl, "postgres", "postgres")
+    val connection =
+      DriverManager.getConnection(jdbcUrl, "postgres", "postgres")
     try
       val statement = connection.createStatement()
       try
-        val extensionsFile = schemaRoot.resolveSibling("00_extensions/001_runtime_extensions.sql")
+        val extensionsFile =
+          schemaRoot.resolveSibling("00_extensions/001_runtime_extensions.sql")
         if Files.exists(extensionsFile) then
-          val extensionsSql = new String(Files.readAllBytes(extensionsFile), StandardCharsets.UTF_8)
-          extensionsSql.split(";").map(_.trim).filter(_.nonEmpty).foreach(statement.execute)
+          val extensionsSql = new String(
+            Files.readAllBytes(extensionsFile),
+            StandardCharsets.UTF_8
+          )
+          extensionsSql
+            .split(";")
+            .map(_.trim)
+            .filter(_.nonEmpty)
+            .foreach(statement.execute)
 
         parsedStatements.foreach { case (_, statements) =>
           statements.foreach { sqlStatement =>
@@ -1560,14 +1909,15 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private def manifestValue(key: String): String =
     val manifest = canonicalManifest()
     key match
-      case "schema_version" => manifest.schemaVersion
+      case "schema_version"  => manifest.schemaVersion
       case "manifest_sha256" => manifest.manifestSha256
-      case _ => throw IllegalStateException(s"unsupported canonical manifest key $key")
+      case _                 =>
+        throw IllegalStateException(s"unsupported canonical manifest key $key")
 
   private final case class CanonicalManifest(
-    schemaVersion: String,
-    manifestSha256: String,
-    applyOrder: List[String]
+      schemaVersion: String,
+      manifestSha256: String,
+      applyOrder: List[String]
   )
 
   private def canonicalManifest(root: Path = schemaRoot): CanonicalManifest =
@@ -1575,13 +1925,19 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     val document =
       try Option(new Yaml().load[java.util.Map[String, Object]](input))
       finally input.close()
-    val values = document.getOrElse(throw IllegalStateException("canonical manifest is empty"))
+    val values = document.getOrElse(
+      throw IllegalStateException("canonical manifest is empty")
+    )
 
     def requiredScalar(key: String): String =
       Option(values.get(key))
         .map(_.toString.trim)
         .filter(_.nonEmpty)
-        .getOrElse(throw IllegalStateException(s"missing or empty $key in canonical manifest"))
+        .getOrElse(
+          throw IllegalStateException(
+            s"missing or empty $key in canonical manifest"
+          )
+        )
 
     val applyOrder = Option(values.get("apply_order"))
       .map(_.asInstanceOf[java.util.List[Object]].asScala.toList)
@@ -1589,7 +1945,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .map(_.toString.trim)
       .filter(_.nonEmpty)
     if applyOrder.isEmpty then
-      throw IllegalStateException("canonical manifest apply_order must not be missing or empty")
+      throw IllegalStateException(
+        "canonical manifest apply_order must not be missing or empty"
+      )
 
     CanonicalManifest(
       requiredScalar("schema_version"),
@@ -1601,18 +1959,23 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     canonicalStatements(canonicalManifest())
 
   private def canonicalStatements(
-    manifest: CanonicalManifest,
-    root: Path = schemaRoot
+      manifest: CanonicalManifest,
+      root: Path = schemaRoot
   ): List[(String, List[String])] =
     manifest.applyOrder.map { relative =>
       val source = Files.readString(root.resolve(relative))
       val statements = splitSqlStatements(source, relative)
       if statements.isEmpty then
-        throw IllegalStateException(s"canonical schema file $relative contains no complete SQL statements")
+        throw IllegalStateException(
+          s"canonical schema file $relative contains no complete SQL statements"
+        )
       relative -> statements
     }
 
-  private def splitSqlStatements(source: String, relative: String): List[String] =
+  private def splitSqlStatements(
+      source: String,
+      relative: String
+  ): List[String] =
     val statements = List.newBuilder[String]
     val current = new StringBuilder
     var index = 0
@@ -1623,7 +1986,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
 
     while index < source.length do
       val char = source.charAt(index)
-      val next = if index + 1 < source.length then source.charAt(index + 1) else 0.toChar
+      val next =
+        if index + 1 < source.length then source.charAt(index + 1) else 0.toChar
 
       if lineComment then
         if char == '\n' || char == '\r' then
@@ -1675,12 +2039,21 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       index += 1
 
     if quote != 0.toChar then
-      throw IllegalStateException(s"unterminated quoted literal in canonical schema file $relative")
+      throw IllegalStateException(
+        s"unterminated quoted literal in canonical schema file $relative"
+      )
     if dollarTag.nonEmpty then
-      throw IllegalStateException(s"unterminated dollar-quoted block in canonical schema file $relative")
-    if blockComment then throw IllegalStateException(s"unterminated block comment in canonical schema file $relative")
+      throw IllegalStateException(
+        s"unterminated dollar-quoted block in canonical schema file $relative"
+      )
+    if blockComment then
+      throw IllegalStateException(
+        s"unterminated block comment in canonical schema file $relative"
+      )
     if current.result().trim.nonEmpty then
-      throw IllegalStateException(s"incomplete SQL statement without semicolon in canonical schema file $relative")
+      throw IllegalStateException(
+        s"incomplete SQL statement without semicolon in canonical schema file $relative"
+      )
 
     statements.result()
 
@@ -1699,4 +2072,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       .takeWhile(_ != null)
       .map(_.resolve("sql/postgres/octopus_core"))
       .find(path => Files.isDirectory(path))
-      .getOrElse(throw IllegalStateException("cannot locate canonical octopus_core schema"))
+      .getOrElse(
+        throw IllegalStateException(
+          "cannot locate canonical octopus_core schema"
+        )
+      )

@@ -97,6 +97,68 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
   private lazy val repository = new PostgresRepository(xa)
+
+  test("stream wireless projection deduplicates replays without raw rows and expires only weekly evidence") {
+    requireDocker()
+    val now = java.time.Instant.now().minusSeconds(30)
+    val calibration = com.sslproxy.coordinator.config.SensorCalibration("stream-test", "test-lab", "reviewed-v1",
+      -40, 1, 2, 3, List(2412), List(1), 3, 4, now.minusSeconds(3600), now.plusSeconds(3600))
+    val json = s"""[{"sensorId":"stream-test","locationId":"test-lab","version":"reviewed-v1",
+      "referenceRssi":-40,"referenceMeters":1,"pathLossExponent":2,"uncertaintyDb":3,"frequenciesMhz":[2412],
+      "channels":[1],"minimumSamples":3,"maximumStddevDb":4,"validFrom":"${calibration.validFrom}",
+      "validUntil":"${calibration.validUntil}","accessPoints":["02:00:00:00:fa:01"]}]"""
+    val cfg = com.sslproxy.coordinator.config.WirelessProjectionConfig("projected", true, json)
+    val repo = new PostgresRepository(xa, wirelessProjection = cfg)
+    val event = com.sslproxy.coordinator.processor.WirelessObservation("stream-test", now,
+      Some("02:00:00:00:fa:02"), Some("02:00:00:00:fa:01"), Some("02:00:00:00:fa:02"), Some("test-ap"),
+      Some(-60), Some(2412), Some(1), "data", "dns", false, true, false)
+    val metadata = BrokerRecordMetadata("wireless.audit", 91, 100, "wireless-audit-projection-v1", 1, ArtifactSha256,
+      None, "1" * 64)
+    for
+      rawBefore <- sql"SELECT COUNT(*) FROM sync_events".query[Long].unique.transact(xa)
+      framesBefore <- sql"SELECT COUNT(*) FROM wireless_frames".query[Long].unique.transact(xa)
+      _ <- (0 until 3).toList.traverse_(i => repo.projectWirelessRecord(event, metadata.copy(offset = 100 + i,
+        payloadSha256 = (i + 1).toString * 64)).flatMap(result => IO(assertEquals(result, Right(true)))))
+      duplicate <- repo.projectWirelessRecord(event, metadata)
+      replay <- repo.projectWirelessRecord(event, metadata.copy(offset = 200))
+      conflict <- repo.projectWirelessRecord(event, metadata.copy(payloadSha256 = "f" * 64))
+      summaries <- sql"""SELECT summary_id::text, frame_count, radio::text FROM atheros_search.wireless_observation_summaries
+        WHERE sensor_id = 'stream-test'""".query[(String, Long, String)].to[List].transact(xa)
+      _ <- repo.buildSearchDocuments(100)
+      _ <- repo.prepareEmbeddingJobs(100, "nomic-embed-text-v2-moe")
+      jobsBefore <- sql"SELECT COUNT(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
+      _ <- repo.buildSearchDocuments(100)
+      _ <- repo.prepareEmbeddingJobs(100, "nomic-embed-text-v2-moe")
+      jobsAfter <- sql"SELECT COUNT(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
+      rangeCount <- sql"""SELECT COUNT(*) FROM atheros_search.wireless_topology_edges
+        WHERE edge_kind = 'calibrated_range' AND target_node_id = 'device:02:00:00:00:fa:02'""".query[Long].unique.transact(xa)
+      rawAfter <- sql"SELECT COUNT(*) FROM sync_events".query[Long].unique.transact(xa)
+      framesAfter <- sql"SELECT COUNT(*) FROM wireless_frames".query[Long].unique.transact(xa)
+      _ <- sql"""UPDATE atheros_search.wireless_observation_summaries SET window_start = window_start - INTERVAL '8 days',
+        window_end = window_end - INTERVAL '8 days', expires_at = expires_at - INTERVAL '8 days'
+        WHERE sensor_id = 'stream-test'""".update.run.transact(xa)
+      expired <- repo.expireWirelessProjections(100)
+      windowDocs <- sql"""SELECT COUNT(*) FROM atheros_search.search_documents
+        WHERE source_kind = 'observation_window' AND sensor_id = 'stream-test'""".query[Long].unique.transact(xa)
+      edgesAfter <- sql"""SELECT COUNT(*) FROM atheros_search.wireless_topology_edges
+        WHERE target_node_id IN ('device:02:00:00:00:fa:02', 'ap:02:00:00:00:fa:01') AND expires_at IS NOT NULL""".query[Long].unique.transact(xa)
+      entities <- sql"""SELECT COUNT(*) FROM atheros_search.wireless_topology_nodes
+        WHERE node_id IN ('device:02:00:00:00:fa:02', 'ap:02:00:00:00:fa:01')""".query[Long].unique.transact(xa)
+    yield
+      assertEquals(duplicate, Right(false))
+      assertEquals(replay, Right(false))
+      assert(conflict.isLeft)
+      assertEquals(summaries.map(_._2), List(3L))
+      assert(summaries.forall(_._3.contains("mean_dbm")))
+      assertEquals(jobsAfter, jobsBefore)
+      assertEquals(rangeCount, 1L)
+      assertEquals(rawAfter, rawBefore)
+      assertEquals(framesAfter, framesBefore)
+      assertEquals(expired, Right(1))
+      assertEquals(windowDocs, 0L)
+      assertEquals(edgesAfter, 0L)
+      assertEquals(entities, 2L)
+  }
   private lazy val schemaConfig = PostgresConfig(
     host = postgres.getHost,
     port = postgres.getMappedPort(5432).intValue(),

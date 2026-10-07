@@ -23,7 +23,8 @@ object ScanRequestStream:
     payloadResolver: PostgresPayloadResolver,
     metrics: CoordinatorMetrics,
     backpressure: BackpressureService,
-    producer: KafkaProducer[IO, String, String]
+    producer: KafkaProducer[IO, String, String],
+    wirelessProjectionOnly: Boolean = false
   ): Stream[IO, Unit] =
     val configuredStreams = configuredStreamNames(ingest.streamNames)
     LockedTopicConsumer.stream(
@@ -51,7 +52,9 @@ object ScanRequestStream:
             )
           )
         }
-        resolved <- configured.traverse { locked =>
+        // In projection-only mode wireless.audit owns durable processing. The
+        // companion discovery request must not hydrate or persist its payload.
+        resolved <- configured.filterNot(locked => wirelessProjectionOnly && locked.decoded.streamName == "wireless.audit").traverse { locked =>
           IO.blocking(payloadResolver.resolve(locked.decoded)).attempt.flatMap {
             case Right(record) => IO.pure(Some((locked, locked.decoded, record)))
             case Left(error) if isNonRetriableResolutionError(error) =>

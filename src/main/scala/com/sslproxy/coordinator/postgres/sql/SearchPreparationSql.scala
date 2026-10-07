@@ -18,6 +18,37 @@ object SearchPreparationSql:
       case SearchDocumentKind.Sequence => sequenceCandidates(limit)
       case SearchDocumentKind.ProxyEvent => proxyEventCandidates(limit)
       case SearchDocumentKind.ProxyBlockedHostWindow => proxyBlockedHostWindowCandidates(limit)
+      case SearchDocumentKind.DeviceProfile | SearchDocumentKind.ApProfile | SearchDocumentKind.IdentitySummary |
+          SearchDocumentKind.ObservationWindow => compactCandidates(kind, limit)
+
+  private def compactCandidates(kind: SearchDocumentKind, limit: Int): Query0[SearchDocumentSource] =
+    val base = kind match
+      case SearchDocumentKind.ObservationWindow => fr"""SELECT summary_id::text AS key, source_mac, location_id,
+        sensor_id, last_seen AS observed_at, bssid, ssid, updated_at,
+        jsonb_build_object('format_version', 1, 'kind', 'observation_window', 'window_start', window_start,
+          'window_end', window_end, 'frame_count', frame_count, 'counters', counters, 'radio', radio) AS detail
+        FROM atheros_search.wireless_observation_summaries WHERE expires_at > CURRENT_TIMESTAMP"""
+      case SearchDocumentKind.IdentitySummary => fr"""SELECT cluster_id AS key, NULL::text AS source_mac,
+        NULL::text AS location_id, NULL::text AS sensor_id, COALESCE(last_seen, updated_at) AS observed_at,
+        NULL::text AS bssid, NULL::text AS ssid, updated_at,
+        jsonb_build_object('format_version', 1, 'kind', 'reviewed_identity_cluster', 'name', cluster_name,
+          'member_count', cluster_size) AS detail FROM atheros_search.identity_clusters WHERE status = 'active'"""
+      case _ =>
+        val nodeKind = if kind == SearchDocumentKind.DeviceProfile then "device" else "access_point"
+        fr"""SELECT node_id AS key, normalized_mac AS source_mac, location_id, sensor_id, observed_at,
+          CASE WHEN node_kind = 'access_point' THEN normalized_mac END AS bssid, normalized_ssid AS ssid,
+          updated_at, jsonb_build_object('format_version', 1, 'kind', node_kind, 'attributes', node_payload) AS detail
+          FROM atheros_search.wireless_topology_nodes WHERE node_kind = $nodeKind"""
+    (fr"""WITH source AS (""" ++ base ++ fr""")
+      SELECT source.key, source.source_mac, source.location_id, source.sensor_id, source.observed_at,
+        source.bssid, source.ssid, source.detail::text
+      FROM source LEFT JOIN atheros_search.search_documents doc
+        ON doc.source_kind = ${kind.sourceKind} AND doc.source_key = source.key AND doc.status = 'active'
+      WHERE doc.document_id IS NULL OR doc.updated_at < source.updated_at
+      ORDER BY source.updated_at, source.key LIMIT ${limit.max(1)}""")
+      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp, Option[String], Option[String], String)]
+      .map(row => SearchDocumentSource(kind, row._1, row._2, row._3, row._4, row._5, row._6, row._7,
+        None, 0, false, row._8, row._8))
 
   private def eventCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id,
@@ -423,6 +454,16 @@ object SearchPreparationSql:
       }
 
   def persist(document: PreparedSearchDocument): ConnectionIO[Unit] =
+    if document.kind == SearchDocumentKind.ObservationWindow then
+      sql"""SELECT 1 FROM atheros_search.wireless_observation_summaries
+        WHERE summary_id = ${document.sourceKey}::uuid AND expires_at > CURRENT_TIMESTAMP FOR UPDATE"""
+        .query[Int].option.flatMap {
+          case Some(_) => persistCurrent(document)
+          case None => ().pure[ConnectionIO]
+        }
+    else persistCurrent(document)
+
+  private def persistCurrent(document: PreparedSearchDocument): ConnectionIO[Unit] =
     val sourceTable = document.kind.sourceTable
     val sourceKind = document.kind.sourceKind
     val tagsJson = document.tags
@@ -440,6 +481,13 @@ object SearchPreparationSql:
       .noSpaces
 
     for
+      // Compact entities use a stable document ID. Fence stale workers and
+      // remove their old vectors before replacing the current source version.
+      _ <- if document.kind.compact then
+        sql"""SELECT document_id FROM atheros_search.search_documents
+          WHERE document_id = ${document.documentId} AND normalized_sha256 <> ${document.normalizedSha256}
+          FOR UPDATE""".query[String].option.flatMap(_.traverse_(WirelessStreamSql.deleteDocument))
+        else ().pure[ConnectionIO]
       supersededIds <- sql"""UPDATE atheros_search.search_documents
                               SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
                               WHERE source_table = $sourceTable

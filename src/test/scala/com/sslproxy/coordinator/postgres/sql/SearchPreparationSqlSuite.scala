@@ -4,7 +4,7 @@ import com.sslproxy.coordinator.processor.SearchDocumentKind
 import munit.FunSuite
 
 class SearchPreparationSqlSuite extends FunSuite:
-  test("all public search kinds have document and embedding preparation paths"):
+  test("all durable search kinds have document and embedding preparation paths"):
     val kinds = SearchPreparationSql.supportedKinds
 
     assertEquals(
@@ -15,7 +15,11 @@ class SearchPreparationSqlSuite extends FunSuite:
         "behaviour_window",
         "frame_sequence",
         "proxy_event",
-        "proxy_blocked_host_window"
+        "proxy_blocked_host_window",
+        "device_profile",
+        "ap_profile",
+        "identity_summary",
+        "observation_window"
       )
     )
     assertEquals(kinds.map(_.embeddingKind).toSet, Set("event", "device", "behaviour", "sequence"))
@@ -32,6 +36,10 @@ class SearchPreparationSqlSuite extends FunSuite:
     assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("classification_counts"))
     assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("status_code_distribution"))
     assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("IS DISTINCT FROM"))
+    assert(candidateSql(SearchDocumentKind.DeviceProfile).contains("wireless_topology_nodes"))
+    assert(candidateSql(SearchDocumentKind.ApProfile).contains("wireless_topology_nodes"))
+    assert(candidateSql(SearchDocumentKind.IdentitySummary).contains("identity_clusters"))
+    assert(candidateSql(SearchDocumentKind.ObservationWindow).contains("wireless_observation_summaries"))
 
   test("embedding scans are scoped to the document kind"):
     SearchPreparationSql.supportedKinds.foreach { kind =>

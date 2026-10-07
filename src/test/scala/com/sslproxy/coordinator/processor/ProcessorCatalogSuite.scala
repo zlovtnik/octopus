@@ -13,8 +13,8 @@ class ProcessorCatalogSuite extends FunSuite:
     assertEquals(ids.distinct.size, ids.size)
   }
 
-  test("runtime ownership is exactly 24 Octopus and 2 Atheros Search processors") {
-    assertEquals(ProcessorId.octopusOwned.size, 24)
+  test("runtime ownership is exactly 25 Octopus and 2 Atheros Search processors") {
+    assertEquals(ProcessorId.octopusOwned.size, 25)
     assertEquals(ProcessorId.all.count(_.owner == ProcessorOwner.AtherosSearch), 2)
     assertEquals(
       ProcessorId.all.filter(_.owner == ProcessorOwner.AtherosSearch).map(_.value).toSet,

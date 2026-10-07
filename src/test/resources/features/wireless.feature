@@ -1,4 +1,4 @@
-@processor-wireless-heartbeat-ingestion @processor-wireless-frame-normalizer @processor-wireless-inventory-projector @processor-wireless-identity-projector @processor-wireless-behavior-projector @processor-wireless-timing-projector @processor-wireless-sequence-projector @processor-wireless-baseline-projector @processor-wireless-similarity-projector
+@processor-wireless-audit-projection @processor-wireless-heartbeat-ingestion @processor-wireless-frame-normalizer @processor-wireless-inventory-projector @processor-wireless-identity-projector @processor-wireless-behavior-projector @processor-wireless-timing-projector @processor-wireless-sequence-projector @processor-wireless-baseline-projector @processor-wireless-similarity-projector
 Feature: Wireless processor contracts
 
   Scenario Outline: An Octopus wireless processor has its declared durable contract
@@ -8,6 +8,7 @@ Feature: Wireless processor contracts
 
     Examples:
       | processor                    | input                     |
+      | wireless-audit-projection    | wireless.audit            |
       | wireless-heartbeat-ingestion  | wireless.sensor.heartbeat |
       | wireless-frame-normalizer     | wireless.audit            |
       | wireless-inventory-projector  | wireless normalized tables|

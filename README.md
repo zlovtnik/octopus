@@ -93,7 +93,7 @@ state. All 26 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 24 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 25 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-audit-projection`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
 There is no Rails/console processor family. The `integration_console` database
@@ -134,8 +134,9 @@ include `proxy.events`, `wireless.audit`, wireless alerts, and
 - Delivery is at least once from each consumer group's committed Kafka offset;
   a group without committed offsets starts at the earliest retained record.
 - Ingestion evidence is unique by group/topic/partition/offset.
-- Consumer offsets advance monotonically in the same PostgreSQL transaction as
-  durable processing evidence.
+- The direct `wireless-audit-projection-v1` consumer commits an offset only
+  after its receipt, dedupe hash, compact summary, graph evidence, and any
+  embedding source update commit in PostgreSQL.
 - Stream cursors advance monotonically and handle numeric wireless cursors
   without lexicographic regression.
 - Outbox mutations require owner, lease token, and fence matches.
@@ -171,7 +172,7 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | `postgres.load-chunk-max-bytes` | `POSTGRES_LOAD_CHUNK_MAX_BYTES` | Optional, default 4194304; positive cumulative JSON-row byte limit alongside 500 rows; oversized individual rows fail the load permanently |
 | `cron` | `COORDINATOR_*`, `SCHEMA_REFRESH_INTERVAL_SECS` | Every interval, attempt count, lease, fetch count, and batch size must be positive |
 | `backpressure` | `COORDINATOR_BACKPRESSURE_*`, `COORDINATOR_ADAPTIVE_PULL_*` | Multiplier, change threshold, and restart interval must be positive |
-| `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane |
+| `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane. `WIRELESS_PROJECTION_MODE` is `legacy`, `shadow`, or `projected`; ranges require reviewed calibration JSON. |
 | `processors` | `OCTOPUS_PROCESSOR_*`, `OCTOPUS_ENABLED_PROCESSORS`, similarity/distance variables | Enabled IDs must be Octopus-owned with dependencies enabled; delays, interval, and batch size positive; embedding pending high water not negative; scores finite and in range |
 | `archive` | `OCTOPUS_ARCHIVE_ENABLED`, `MINIO_*`, retention and archive variables | Credentials and bucket required when enabled; retention ordering, intervals, and batch size validated |
 
@@ -235,7 +236,10 @@ Important gates:
 |---|---|---|
 | `POSTGRES_ENABLED` | `false` | Enables PostgreSQL after TLS, least-privilege, and schema validation |
 | `POSTGRES_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
-| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `wireless-heartbeat-ingestion`. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
+| `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `wireless-heartbeat-ingestion` and `wireless-audit-projection`. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
+| `WIRELESS_PROJECTION_MODE` | `legacy` | `shadow` projects `wireless.audit` alongside legacy raw-frame normalization; `projected` disables new raw-frame writes after a retained-window comparison. |
+| `WIRELESS_RANGES_ENABLED` | `false` | Enables sensor-to-device range estimates only with a current reviewed calibration and stable sufficient RSSI samples. |
+| `WIRELESS_CALIBRATIONS_JSON` | `[]` | Deployment-managed calibration entries. Each supplies sensor/location, version, RSSI model, supported radio contexts, sample policy, and validity dates. |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane (cron, projections, retention, and support streams) |
 | `OCTOPUS_ENABLED_PROCESSORS` | `[]` | Comma-separated Octopus-owned processor IDs for the processor catalog. If this list is non-empty while consumers are enabled, it must include the three locked consumers. |
 | `OCTOPUS_PROCESSOR_RESTART_BASE_DELAY_MS` | `1000` | Initial retry delay |

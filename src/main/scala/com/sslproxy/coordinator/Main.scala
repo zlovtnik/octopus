@@ -99,7 +99,7 @@ object Main extends IOApp.Simple:
                 )
                 .flatMap { dbSemaphore =>
                   val postgresRepo =
-                    new PostgresRepository(postgresDoobieTx, Some(dbSemaphore))
+                    new PostgresRepository(postgresDoobieTx, Some(dbSemaphore), cfg.wireless.projection)
                   KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
                     val payloadResolver =
                       new PostgresPayloadResolver(cfg.sync.outboxDir)
@@ -269,7 +269,8 @@ object Main extends IOApp.Simple:
                                     payloadResolver,
                                     metrics,
                                     backpressureService,
-                                    kafka.producer
+                                    kafka.producer,
+                                    cfg.wireless.projection.projectionOnly
                                   )
                                   val loadStream = PostgresLoadStream.run(
                                     cfg.kafka,
@@ -294,6 +295,11 @@ object Main extends IOApp.Simple:
                                     )
 
                                   val consumerWorkloads = List(
+                                    ProcessorWorkload(
+                                      ProcessorId.WirelessAuditProjection,
+                                      com.sslproxy.coordinator.kafka.WirelessAuditStream.run(
+                                        cfg.kafka, cfg.wireless.projection, postgresRepo, metrics, kafka.producer)
+                                    ),
                                     ProcessorWorkload(
                                       ProcessorId.SyncScanIngestion,
                                       scanStream

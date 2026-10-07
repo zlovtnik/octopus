@@ -17,6 +17,12 @@ enum SearchDocumentKind(
   case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
   case ProxyEvent extends SearchDocumentKind("proxy_events", "proxy_event", "event")
   case ProxyBlockedHostWindow extends SearchDocumentKind("proxy_events", "proxy_blocked_host_window", "event")
+  case DeviceProfile extends SearchDocumentKind("wireless_topology_nodes", "device_profile", "device")
+  case ApProfile extends SearchDocumentKind("wireless_topology_nodes", "ap_profile", "device")
+  case IdentitySummary extends SearchDocumentKind("identity_clusters", "identity_summary", "device")
+  case ObservationWindow extends SearchDocumentKind("wireless_observation_summaries", "observation_window", "behaviour")
+
+  def compact: Boolean = Set(DeviceProfile, ApProfile, IdentitySummary, ObservationWindow).contains(this)
 
 final case class SearchDocumentSource(
   kind: SearchDocumentKind,
@@ -79,7 +85,9 @@ object SearchDocumentPreparation:
     else if normalizedText.isEmpty then Left(s"search document ${source.sourceKey} has no searchable text")
     else
       val checksum = Sha256Utils.sha256Hex(normalizedText.getBytes(StandardCharsets.UTF_8))
-      val documentId = stableUuid(s"${source.kind.sourceTable}:${source.sourceKey}:$checksum")
+      val documentId = if source.kind.compact then
+        stableUuid(List(source.kind.sourceKind, source.sourceKey).map(p => s"${p.length}:$p").mkString)
+      else stableUuid(s"${source.kind.sourceTable}:${source.sourceKey}:$checksum")
       val tokenCounts = tokenize(normalizedText).groupMapReduce(identity)(_ => 1)(_ + _)
       val total = tokenCounts.values.sum.max(1)
       val tokens = tokenCounts.toList.sortBy(_._1).map { case (token, count) =>

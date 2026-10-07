@@ -387,7 +387,7 @@ object AppConfig:
     ).flatten
 
   private def wirelessErrors(config: WirelessConfig): List[String] =
-    List(
+    config.projection.errors ++ List(
       Option.when(config.consumersCount <= 0)(
         "wireless.consumers-count must be positive"
       ),

@@ -29,6 +29,8 @@ enum ProcessorId(
   case SyncOutboxPublisher extends ProcessorId("sync-outbox-publisher", ProcessorOwner.Octopus, ProcessorFamily.Sync)
   case WirelessHeartbeatIngestion
       extends ProcessorId("wireless-heartbeat-ingestion", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
+  case WirelessAuditProjection
+      extends ProcessorId("wireless-audit-projection", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessFrameNormalizer
       extends ProcessorId("wireless-frame-normalizer", ProcessorOwner.Octopus, ProcessorFamily.Wireless)
   case WirelessInventoryProjector
@@ -65,6 +67,7 @@ enum ProcessorId(
 
 object ProcessorId:
   val all: List[ProcessorId] = List(
+    ProcessorId.WirelessAuditProjection,
     ProcessorId.SyncScanIngestion,
     ProcessorId.SyncJobPlanner,
     ProcessorId.SyncBacklogRecovery,
@@ -100,6 +103,7 @@ object ProcessorId:
 
   val octopusOwned: List[ProcessorId] = all.filter(_.owner == ProcessorOwner.Octopus)
   val kafkaConsumers: Set[ProcessorId] = Set(
+    ProcessorId.WirelessAuditProjection,
     ProcessorId.SyncScanIngestion,
     ProcessorId.SyncLoadConsumer,
     ProcessorId.SyncResultConsumer,
@@ -124,6 +128,16 @@ final case class ProcessorContract(
   */
 object ProcessorCatalog:
   val contracts: List[ProcessorContract] = List(
+    continuous(
+      ProcessorId.WirelessAuditProjection,
+      List("wireless.audit"),
+      List("wireless_observation_summaries", "wireless_topology_nodes", "wireless_topology_edges"),
+      Nil,
+      "topic/partition/offset and payload hash",
+      "kafka partition",
+      "park invalid records; retry storage errors",
+      "seven-day projection comparison"
+    ),
     continuous(
       ProcessorId.SyncScanIngestion,
       List("sync.scan.request"),

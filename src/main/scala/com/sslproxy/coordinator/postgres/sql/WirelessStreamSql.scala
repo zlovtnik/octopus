@@ -181,6 +181,30 @@ object WirelessStreamSql:
         if old.focus.nonEmpty || json.asObject.exists(_.size < 64) then json.mapObject(_.add(key, bin)) else json
       case _ => json
 
+  // Cheap indexed deletes; independent of the heavy summary-cascade limit.
+  private val ExpiryDeleteBatch = 5000
+
+  private def expireReceipts(limit: Int): ConnectionIO[Int] =
+    sql"""DELETE FROM octopus_core.wireless_projection_receipts WHERE (topic, partition_id, offset_id) IN
+      (SELECT topic, partition_id, offset_id FROM octopus_core.wireless_projection_receipts
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, topic, partition_id, offset_id
+        LIMIT ${limit.max(1)} FOR UPDATE SKIP LOCKED)""".update.run
+
+  private def expireHashes(limit: Int): ConnectionIO[Int] =
+    sql"""DELETE FROM octopus_core.wireless_projection_hashes WHERE payload_sha256 IN
+      (SELECT payload_sha256 FROM octopus_core.wireless_projection_hashes
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, payload_sha256
+        LIMIT ${limit.max(1)} FOR UPDATE SKIP LOCKED)""".update.run
+
+  private def drainExpired(deleteBatch: Int => ConnectionIO[Int]): ConnectionIO[Unit] =
+    def loop: ConnectionIO[Unit] =
+      deleteBatch(ExpiryDeleteBatch).flatMap { deleted =>
+        if deleted < ExpiryDeleteBatch then ().pure[ConnectionIO] else loop
+      }
+    loop
+
   def expire(limit: Int): ConnectionIO[Int] =
     for
       ids <- sql"""SELECT summary_id::text FROM atheros_search.wireless_observation_summaries
@@ -195,10 +219,8 @@ object WirelessStreamSql:
           _ <- sql"DELETE FROM atheros_search.wireless_observation_summaries WHERE summary_id = $summaryId::uuid".update.run
         yield ()
       }
-      _ <- sql"""DELETE FROM octopus_core.wireless_projection_receipts WHERE (topic, partition_id, offset_id) IN
-        (SELECT topic, partition_id, offset_id FROM octopus_core.wireless_projection_receipts WHERE expires_at <= CURRENT_TIMESTAMP LIMIT ${limit.max(1)})""".update.run
-      _ <- sql"""DELETE FROM octopus_core.wireless_projection_hashes WHERE payload_sha256 IN
-        (SELECT payload_sha256 FROM octopus_core.wireless_projection_hashes WHERE expires_at <= CURRENT_TIMESTAMP LIMIT ${limit.max(1)})""".update.run
+      _ <- drainExpired(expireReceipts)
+      _ <- drainExpired(expireHashes)
     yield ids.size
 
   def deleteDocument(documentId: String): ConnectionIO[Unit] =

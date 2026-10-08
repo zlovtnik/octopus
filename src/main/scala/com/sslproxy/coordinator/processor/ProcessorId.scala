@@ -135,7 +135,7 @@ object ProcessorCatalog:
       Nil,
       "topic/partition/offset and payload hash",
       "kafka partition",
-      "park invalid records; retry storage errors",
+      "park invalid and permanent records; retry retryable storage errors",
       "seven-day projection comparison"
     ),
     continuous(

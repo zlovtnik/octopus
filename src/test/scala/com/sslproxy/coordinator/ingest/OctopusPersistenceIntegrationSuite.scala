@@ -159,6 +159,29 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(edgesAfter, 0L)
       assertEquals(entities, 2L)
   }
+
+  test("wireless projection expiry drains multi-batch receipt and hash backlogs") {
+    requireDocker()
+    for
+      _ <- sql"""INSERT INTO octopus_core.wireless_projection_receipts
+        (topic, partition_id, offset_id, payload_sha256, disposition, observed_at, expires_at)
+        SELECT 'wireless.audit', 1, i, lpad(to_hex(i), 64, '0'), 'received',
+          CURRENT_TIMESTAMP - INTERVAL '10 days', CURRENT_TIMESTAMP - INTERVAL '1 day'
+        FROM generate_series(1, 5001) i""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.wireless_projection_hashes (payload_sha256, expires_at)
+        SELECT lpad(to_hex(i), 64, '0'), CURRENT_TIMESTAMP - INTERVAL '1 day'
+        FROM generate_series(1, 5001) i""".update.run.transact(xa)
+      expired <- repository.expireWirelessProjections(100)
+      receiptsLeft <- sql"""SELECT COUNT(*) FROM octopus_core.wireless_projection_receipts
+        WHERE expires_at <= CURRENT_TIMESTAMP""".query[Long].unique.transact(xa)
+      hashesLeft <- sql"""SELECT COUNT(*) FROM octopus_core.wireless_projection_hashes
+        WHERE expires_at <= CURRENT_TIMESTAMP""".query[Long].unique.transact(xa)
+    yield
+      assertEquals(expired, Right(0))
+      assertEquals(receiptsLeft, 0L)
+      assertEquals(hashesLeft, 0L)
+  }
+
   private lazy val schemaConfig = PostgresConfig(
     host = postgres.getHost,
     port = postgres.getMappedPort(5432).intValue(),

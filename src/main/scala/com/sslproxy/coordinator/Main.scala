@@ -298,7 +298,7 @@ object Main extends IOApp.Simple:
                                     ProcessorWorkload(
                                       ProcessorId.WirelessAuditProjection,
                                       com.sslproxy.coordinator.kafka.WirelessAuditStream.run(
-                                        cfg.kafka, cfg.wireless.projection, postgresRepo, metrics, kafka.producer)
+                                        cfg.kafka, cfg.wireless.projection, postgresRepo, metrics, backpressureService, kafka.producer)
                                     ),
                                     ProcessorWorkload(
                                       ProcessorId.SyncScanIngestion,

@@ -27,6 +27,18 @@ class IdentityGraphSqlSuite extends FunSuite:
     assert(implementation.contains("'same_channel', pair.shared_channels::double precision, 'channel_overlap'"))
     assert(implementation.contains("'vendor_link', pair.shared_ouis::double precision, 'vendor_match'"))
 
+  test("graph edges require existing endpoints and dangling edges are removed"):
+    val implementation = Files.readString(
+      Paths.get("src/main/scala/com/sslproxy/coordinator/postgres/sql/IdentityGraphSql.scala")
+    )
+
+    assert(implementation.contains("DELETE FROM atheros_search.graph_edges edge"))
+    assert(implementation.contains("source_node.node_id = edge.source_node_id"))
+    assert(implementation.contains("target_node.node_id = edge.target_node_id"))
+    assert(implementation.contains("device_node.node_id = CONCAT('device:', frame.source_mac)"))
+    assert(implementation.contains("ap_node.node_id = CONCAT('ap:', frame.bssid)"))
+    assert(implementation.contains("'graph_projection'"))
+
   test("device pair edge ids use canonical mac ordering"):
     val implementation = Files.readString(
       Paths.get("src/main/scala/com/sslproxy/coordinator/postgres/sql/IdentityGraphSql.scala")

@@ -636,6 +636,88 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ = assertEquals(blockedProjection, (0L, 0L))
     yield ()
 
+  test("graph projection keeps endpoints closed, repairs dangling edges, and avoids starve-out"):
+    requireDocker()
+    val bssid = "02:00:00:aa:00:01"
+    val uninventoried = "02:00:00:cc:00:01"
+    def frames: IO[Unit] =
+      (for
+        _ <- sql"""INSERT INTO wireless_frames
+                     (dedupe_key, source_mac, bssid, observed_at, frame_type, frame_subtype)
+                     SELECT CONCAT('closure-bb-', device, '-', sample),
+                            CONCAT('02:00:00:bb:00:0', device), $bssid::text,
+                            TIMESTAMPTZ '2026-09-01 00:00:00+00' + sample * INTERVAL '1 second',
+                            'management', 'beacon'
+                     FROM generate_series(1, 4) device,
+                          generate_series(1, 3) sample""".update.run
+        _ <- sql"""INSERT INTO wireless_frames
+                     (dedupe_key, source_mac, bssid, observed_at, frame_type, frame_subtype)
+                     SELECT CONCAT('closure-cc-', sample),
+                            $uninventoried::text, $bssid::text,
+                            TIMESTAMPTZ '2026-09-01 00:00:10+00' + sample * INTERVAL '1 second',
+                            'management', 'beacon'
+                     FROM generate_series(1, 3) sample""".update.run
+        _ <- sql"""INSERT INTO devices (mac_id, mac_hint, first_seen, last_seen)
+                     SELECT CONCAT('02:00:00:bb:00:0', device),
+                            CONCAT('02:00:00:bb:00:0', device),
+                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                     FROM generate_series(1, 4) device
+                     ON CONFLICT (mac_id) DO NOTHING""".update.run
+      yield ()).transact(xa)
+
+    for
+      _ <- frames
+      _ <- sql"""INSERT INTO atheros_search.graph_edges
+                   (edge_id, source_node_id, target_node_id, edge_kind, weight, weight_basis,
+                    evidence, projection_run_id)
+                   VALUES ('observed:stale:dangling', 'device:02:00:00:dd:00:01',
+                           CONCAT('ap:', $bssid::text),
+                           'observed_at', 1, 'frame_count', '{}'::jsonb, 'stale-run')""".update.run
+        .transact(xa)
+      // First run with a small batch: pending-first must still cover cold pairs
+      // across ticks instead of refreshing only the hottest.
+      first <- repository.projectInfrastructureGraph(2)
+      _ = requireRight(first)
+      second <- repository.projectInfrastructureGraph(2)
+      _ = requireRight(second)
+      third <- repository.projectInfrastructureGraph(2)
+      _ = requireRight(third)
+      closed <- sql"""SELECT COUNT(*)
+                      FROM atheros_search.graph_edges edge
+                      LEFT JOIN atheros_search.graph_nodes source_node
+                        ON source_node.node_id = edge.source_node_id
+                      LEFT JOIN atheros_search.graph_nodes target_node
+                        ON target_node.node_id = edge.target_node_id
+                      WHERE source_node.node_id IS NULL OR target_node.node_id IS NULL"""
+        .query[Long].unique.transact(xa)
+      observed <- sql"""SELECT COUNT(*)
+                        FROM atheros_search.graph_edges
+                        WHERE edge_kind = 'observed_at' AND edge_id LIKE 'observed:02:00:00:bb:%'"""
+        .query[Long].unique.transact(xa)
+      unobserved <- sql"""SELECT COUNT(*)
+                          FROM atheros_search.graph_edges
+                          WHERE edge_id = CONCAT('observed:', $uninventoried::text, ':', $bssid::text)"""
+        .query[Long].unique.transact(xa)
+      stubs <- sql"""SELECT COUNT(*)
+                     FROM atheros_search.graph_nodes
+                     WHERE node_id = CONCAT('device:', $uninventoried::text)"""
+        .query[Long].unique.transact(xa)
+      deviceNodes <- sql"""SELECT COUNT(*)
+                           FROM atheros_search.graph_nodes
+                           WHERE node_kind = 'device' AND normalized_mac LIKE '02:00:00:bb:%'"""
+        .query[Long].unique.transact(xa)
+      coverage <- sql"""SELECT coverage_status
+                        FROM atheros_search.investigation_watermarks
+                        WHERE projection_name = 'graph_projection'"""
+        .query[String].unique.transact(xa)
+      _ = assertEquals(closed, 0L)
+      _ = assertEquals(observed, 4L)
+      _ = assertEquals(unobserved, 0L)
+      _ = assertEquals(stubs, 0L)
+      _ = assertEquals(deviceNodes, 4L)
+      _ = assert(coverage == "partial" || coverage == "complete")
+    yield ()
+
   test(
     "historical hydration normalizes null-like projections without changing durable payloads"
   ):

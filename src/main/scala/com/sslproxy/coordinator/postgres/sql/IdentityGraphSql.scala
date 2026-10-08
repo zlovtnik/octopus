@@ -294,7 +294,10 @@ object IdentityGraphSql:
                           FROM devices device
                           LEFT JOIN octopus_core.registered_devices registered
                             ON registered.mac = device.mac_id
-                          ORDER BY device.last_seen DESC, device.mac_id
+                          LEFT JOIN atheros_search.graph_nodes existing
+                            ON existing.node_id = CONCAT('device:', device.mac_id)
+                          ORDER BY (existing.node_id IS NULL) DESC,
+                                   device.last_seen DESC, device.mac_id
                           LIMIT $batchLimit
                     ON CONFLICT (node_id) DO UPDATE SET
                       label = EXCLUDED.label,
@@ -321,6 +324,8 @@ object IdentityGraphSql:
                       FROM wireless_frames frame
                       LEFT JOIN atheros_search.ap_risk_scores risk
                         ON risk.bssid = frame.bssid
+                      LEFT JOIN atheros_search.graph_nodes existing
+                        ON existing.node_id = CONCAT('ap:', frame.bssid)
                       LEFT JOIN LATERAL (
                         SELECT wireless_alerts.alert_type,
                                wireless_alerts.severity,
@@ -345,7 +350,8 @@ object IdentityGraphSql:
                       WHERE frame.bssid IS NOT NULL
                       GROUP BY frame.bssid, risk.composite_risk, alert.alert_type, alert.severity,
                                alert.resolved_at, alert.evidence
-                      ORDER BY MAX(frame.observed_at) DESC, frame.bssid
+                      ORDER BY COUNT(existing.node_id) = 0 DESC,
+                               MAX(frame.observed_at) DESC, frame.bssid
                       LIMIT $batchLimit
                     ON CONFLICT (node_id) DO UPDATE SET
                       label = COALESCE(EXCLUDED.label, graph_nodes.label),
@@ -388,8 +394,20 @@ object IdentityGraphSql:
                             jsonb_build_object('frame_count', COUNT(*)), MAX(frame.observed_at), $projectionRunId
                      FROM wireless_frames frame
                      WHERE frame.source_mac IS NOT NULL AND frame.bssid IS NOT NULL
+                       AND EXISTS (
+                         SELECT 1 FROM atheros_search.graph_nodes device_node
+                         WHERE device_node.node_id = CONCAT('device:', frame.source_mac)
+                       )
+                       AND EXISTS (
+                         SELECT 1 FROM atheros_search.graph_nodes ap_node
+                         WHERE ap_node.node_id = CONCAT('ap:', frame.bssid)
+                       )
                      GROUP BY frame.source_mac, frame.bssid
-                     ORDER BY MAX(frame.observed_at) DESC, frame.source_mac, frame.bssid
+                     ORDER BY NOT EXISTS (
+                               SELECT 1 FROM atheros_search.graph_edges existing
+                               WHERE existing.edge_id = CONCAT('observed:', frame.source_mac, ':', frame.bssid)
+                             ) DESC,
+                              MAX(frame.observed_at) DESC, frame.source_mac, frame.bssid
                      LIMIT $batchLimit
                      ON CONFLICT (edge_id) DO UPDATE SET
                        weight = EXCLUDED.weight,
@@ -410,6 +428,14 @@ object IdentityGraphSql:
                                     'approved identity membership',
                                     member.evidence, member.last_seen, $projectionRunId
                              FROM atheros_search.identity_cluster_members member
+                             WHERE EXISTS (
+                               SELECT 1 FROM atheros_search.graph_nodes device_node
+                               WHERE device_node.node_id = CONCAT('device:', member.mac)
+                             )
+                               AND EXISTS (
+                               SELECT 1 FROM atheros_search.graph_nodes cluster_node
+                               WHERE cluster_node.node_id = CONCAT('identity:', member.cluster_id)
+                             )
                              ORDER BY member.last_seen DESC, member.cluster_id, member.mac
                              LIMIT $batchLimit
                              ON CONFLICT (edge_id) DO UPDATE SET
@@ -462,6 +488,14 @@ object IdentityGraphSql:
                                           AND left_device.registered_device_id = candidate.trusted_registered_device_id
                                       ))
                                   )
+                                  AND EXISTS (
+                                    SELECT 1 FROM atheros_search.graph_nodes left_node
+                                    WHERE left_node.node_id = CONCAT('device:', candidate.mac_a)
+                                  )
+                                  AND EXISTS (
+                                    SELECT 1 FROM atheros_search.graph_nodes right_node
+                                    WHERE right_node.node_id = CONCAT('device:', candidate.mac_b)
+                                  )
                                 ORDER BY candidate.confirmed_at, candidate.candidate_id
                                 LIMIT $batchLimit
                                 ON CONFLICT (edge_id) DO UPDATE SET
@@ -500,6 +534,14 @@ object IdentityGraphSql:
                               GROUP BY LEAST(left_frame.source_mac, right_frame.source_mac),
                                        GREATEST(left_frame.source_mac, right_frame.source_mac)
                             ) pair
+                            WHERE EXISTS (
+                              SELECT 1 FROM atheros_search.graph_nodes left_node
+                              WHERE left_node.node_id = CONCAT('device:', pair.left_mac)
+                            )
+                              AND EXISTS (
+                              SELECT 1 FROM atheros_search.graph_nodes right_node
+                              WHERE right_node.node_id = CONCAT('device:', pair.right_mac)
+                            )
                             ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
                             LIMIT $batchLimit
                             ON CONFLICT (edge_id) DO UPDATE SET
@@ -545,6 +587,14 @@ object IdentityGraphSql:
                                            GREATEST(left_frame.source_mac, right_frame.source_mac)
                                 ) pair
                                 WHERE pair.shared_channels >= 1
+                                  AND EXISTS (
+                                    SELECT 1 FROM atheros_search.graph_nodes left_node
+                                    WHERE left_node.node_id = CONCAT('device:', pair.left_mac)
+                                  )
+                                  AND EXISTS (
+                                    SELECT 1 FROM atheros_search.graph_nodes right_node
+                                    WHERE right_node.node_id = CONCAT('device:', pair.right_mac)
+                                  )
                                 ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
                                 LIMIT $batchLimit
                                 ON CONFLICT (edge_id) DO UPDATE SET
@@ -592,6 +642,14 @@ object IdentityGraphSql:
                                  GROUP BY LEAST(left_oui.source_mac, right_oui.source_mac),
                                           GREATEST(left_oui.source_mac, right_oui.source_mac)
                                ) pair
+                               WHERE EXISTS (
+                                 SELECT 1 FROM atheros_search.graph_nodes left_node
+                                 WHERE left_node.node_id = CONCAT('device:', pair.left_mac)
+                               )
+                                 AND EXISTS (
+                                 SELECT 1 FROM atheros_search.graph_nodes right_node
+                                 WHERE right_node.node_id = CONCAT('device:', pair.right_mac)
+                               )
                                ORDER BY pair.last_observed DESC, pair.left_mac, pair.right_mac
                                LIMIT $batchLimit
                                ON CONFLICT (edge_id) DO UPDATE SET
@@ -770,4 +828,63 @@ object IdentityGraphSql:
                             coverage_status = EXCLUDED.coverage_status,
                             coverage_reason = EXCLUDED.coverage_reason,
                             updated_at = CURRENT_TIMESTAMP""".update.run
-    yield removedSameDeviceEdges + removedIdentityMemberEdges + removedIdentityNodes + deviceNodes + apNodes + clusterNodes + edges + identityEdges + sameDeviceEdges + roamingEdges + sameChannelEdges + vendorLinkEdges + apCatalog + signalSummaries + prunedSummaries + prunedCatalog + watermark
+      // Graph integrity: an edge is only meaningful when both endpoints exist.
+      // Inventory remains the sole device-node source; edges whose device or AP
+      // node is absent are removed rather than repaired with placeholder nodes.
+      removedDanglingEdges <- sql"""DELETE FROM atheros_search.graph_edges edge
+                                     WHERE NOT EXISTS (
+                                       SELECT 1 FROM atheros_search.graph_nodes source_node
+                                       WHERE source_node.node_id = edge.source_node_id
+                                     )
+                                       OR NOT EXISTS (
+                                       SELECT 1 FROM atheros_search.graph_nodes target_node
+                                       WHERE target_node.node_id = edge.target_node_id
+                                     )""".update.run
+      // Coverage watermark: projected pairs vs retained frame pairs. Frame MAC
+      // counts are a different grain from device nodes and must not be compared
+      // as equivalent client counts.
+      graphWatermark <- sql"""WITH source AS (
+                                SELECT MAX(observed_at) AS source_watermark_at,
+                                       COUNT(DISTINCT (source_mac, bssid)) AS pair_count,
+                                       COUNT(DISTINCT source_mac) AS mac_count
+                                FROM wireless_frames
+                                WHERE source_mac IS NOT NULL AND bssid IS NOT NULL
+                              ),
+                              projection AS (
+                                SELECT MAX(observed_at) AS projection_watermark_at,
+                                       COUNT(*) AS pair_count
+                                FROM atheros_search.graph_edges
+                                WHERE edge_kind = 'observed_at'
+                              ),
+                              devices AS (
+                                SELECT COUNT(*) AS device_count
+                                FROM atheros_search.graph_nodes
+                                WHERE node_kind = 'device'
+                              )
+                              INSERT INTO atheros_search.investigation_watermarks (
+                                projection_name, source_watermark_at, projection_watermark_at,
+                                coverage_status, coverage_reason, updated_at
+                              )
+                              SELECT 'graph_projection',
+                                     source.source_watermark_at,
+                                     projection.projection_watermark_at,
+                                     CASE
+                                       WHEN source.pair_count = 0 THEN 'unknown'
+                                       WHEN projection.pair_count = 0 THEN 'stalled'
+                                       WHEN projection.pair_count < source.pair_count THEN 'partial'
+                                       ELSE 'complete'
+                                     END,
+                                     format(
+                                       '%s of %s distinct (source_mac,bssid) pairs projected; %s device nodes vs %s frame source MACs',
+                                       projection.pair_count, source.pair_count,
+                                       devices.device_count, source.mac_count
+                                     ),
+                                     CURRENT_TIMESTAMP
+                              FROM source, projection, devices
+                              ON CONFLICT (projection_name) DO UPDATE SET
+                                source_watermark_at = EXCLUDED.source_watermark_at,
+                                projection_watermark_at = EXCLUDED.projection_watermark_at,
+                                coverage_status = EXCLUDED.coverage_status,
+                                coverage_reason = EXCLUDED.coverage_reason,
+                                updated_at = CURRENT_TIMESTAMP""".update.run
+    yield removedSameDeviceEdges + removedIdentityMemberEdges + removedIdentityNodes + deviceNodes + apNodes + clusterNodes + edges + identityEdges + sameDeviceEdges + roamingEdges + sameChannelEdges + vendorLinkEdges + apCatalog + signalSummaries + prunedSummaries + prunedCatalog + watermark + removedDanglingEdges + graphWatermark

@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.metrics
 
-import cats.effect.{Deferred, IO, Ref}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.circe.Json
@@ -167,7 +167,7 @@ class StatsMaterializerSuite extends CatsEffectSuite:
           else IO.pure(LifetimeTotals(40L, 3L, StatsSnapshot.toIso(computedAt)))
       pair <- setup(repo, clock.get)
       (service, store) = pair
-      result <- service.runJob(MetricJob.Peaks).background.use { fiber =>
+      result <- Resource.make(service.runJob(MetricJob.Peaks).start)(_.cancel).use { fiber =>
         started.get *> clock.set(at.plusSeconds(60)) *>
           service.runJob(MetricJob.Peaks) *> release.complete(()) *>
           fiber.joinWithNever *> snapshot(service, store)

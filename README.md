@@ -323,6 +323,24 @@ and MinIO (`stats/latest.json` plus history objects). The materializer is not a
 `ProcessorId` and never affects `/ready`. The public website is served by
 `services/stats-reader`, which only reads those precomputed store objects.
 
+[MetricsRepository](src/main/scala/com/sslproxy/coordinator/metrics/MetricsRepository.scala)
+has a [JDBC interpreter](src/main/scala/com/sslproxy/coordinator/postgres/PostgresMetricsRepository.scala)
+that reuses the managed Hikari pool and database worker permits. All JDBC work,
+including acquisition and cleanup, runs through `PostgresTransactor.withTransaction`
+on `IO.blocking`, with `POSTGRES_STATEMENT_TIMEOUT_SECS` and
+`POSTGRES_NETWORK_TIMEOUT_SECS` enforced for each read. There are no immediate
+query retries; the next scheduled refresh retries a failed measurement.
+Peaks, lifetime totals, and the two throughput windows update independently.
+Failures retain last-good values and original measurement timestamps; failures
+before the first measurement remain JSON null. A successful empty ledger yields
+zero lifetime counts and zero-filled hourly buckets. History covers 24 or 168
+complete UTC hours with an exclusive upper bound. Cached history expires when
+that window changes, so failed reads cannot invent zero activity in a new hour.
+
+The stats-reader rollout still requires a reviewed image digest and inclusion
+in the environment app-stack slices before switching the public gateway route;
+see the [stats-reader rollout notes](../stats-reader/README.md).
+
 Processor metrics include a one-hot lifecycle gauge per processor, the current
 persisted restart count, and supervised retry counters. Existing ingestion,
 pending-ledger, backpressure, outbox, and DLQ counters remain available on the

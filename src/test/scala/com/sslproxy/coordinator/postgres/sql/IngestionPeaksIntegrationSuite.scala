@@ -41,8 +41,9 @@ class IngestionPeaksIntegrationSuite extends FunSuite:
     )) { connection =>
       Using.resource(connection.createStatement()) { statement =>
         statement.execute("SET TIME ZONE 'America/Los_Angeles'"): Unit
-        statement.execute("CREATE TEMP TABLE ingestion_evidence (first_seen_at timestamptz NOT NULL)"): Unit
-        statement.execute("""INSERT INTO ingestion_evidence VALUES
+        statement.execute("CREATE SCHEMA octopus_core"): Unit
+        statement.execute("CREATE TABLE octopus_core.ingestion_evidence (first_seen_at timestamptz NOT NULL)"): Unit
+        statement.execute("""INSERT INTO octopus_core.ingestion_evidence VALUES
           ('2026-01-04T23:59:59Z'), ('2026-01-05T00:00:00Z'),
           ('2026-01-05T10:00:00Z'), ('2026-01-11T23:59:59Z'),
           ('2026-01-12T00:00:00Z')"""): Unit
@@ -57,7 +58,7 @@ class IngestionPeaksIntegrationSuite extends FunSuite:
           assertEquals(rows.getString(2), "2026-01-05")
           assertEquals(rows.getString(3), "2026-01-11")
         }
-        statement.execute("TRUNCATE ingestion_evidence"): Unit
+        statement.execute("TRUNCATE octopus_core.ingestion_evidence"): Unit
         Using.resource(statement.executeQuery(IngestionSql.PeakRecordsDayQuery.sql))(rows => assert(!rows.next()))
         Using.resource(statement.executeQuery(IngestionSql.PeakRecordsWeekQuery.sql))(rows => assert(!rows.next()))
       }

@@ -16,7 +16,7 @@ object IngestionSql:
   val PeakRecordsDayQuery: Query0[(Long, String)] =
     sql"""SELECT count(*) AS records,
                   to_char(date_trunc('day', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day
-           FROM ingestion_evidence
+           FROM octopus_core.ingestion_evidence
            GROUP BY 2
            ORDER BY records DESC, day ASC
            LIMIT 1""".query[(Long, String)]
@@ -25,21 +25,21 @@ object IngestionSql:
     sql"""SELECT count(*) AS records,
                   to_char(date_trunc('week', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS week_start,
                   to_char(date_trunc('week', first_seen_at AT TIME ZONE 'UTC') + INTERVAL '6 days', 'YYYY-MM-DD') AS week_end
-           FROM ingestion_evidence
+           FROM octopus_core.ingestion_evidence
            GROUP BY 2, 3
            ORDER BY records DESC, week_start ASC
            LIMIT 1""".query[(Long, String, String)]
 
   val IngestionLifetimeTotalsQuery: Query0[(Long, Long)] =
     sql"""SELECT count(*) AS records_total,
-                  count(DISTINCT to_char(date_trunc('day', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')) AS days_counted
-           FROM ingestion_evidence""".query[(Long, Long)]
+                  count(DISTINCT (first_seen_at AT TIME ZONE 'UTC')::date) AS days_counted
+           FROM octopus_core.ingestion_evidence""".query[(Long, Long)]
 
-  def ingestionHourlyBuckets(since: java.sql.Timestamp): Query0[(String, Long)] =
+  def ingestionHourlyBuckets(since: java.sql.Timestamp, until: java.sql.Timestamp): Query0[(String, Long)] =
     sql"""SELECT to_char(date_trunc('hour', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:00:00Z') AS bucket_start,
                   count(*) AS records
-           FROM ingestion_evidence
-           WHERE first_seen_at >= ${since}
+           FROM octopus_core.ingestion_evidence
+           WHERE first_seen_at >= ${since} AND first_seen_at < ${until}
            GROUP BY 1
            ORDER BY 1""".query[(String, Long)]
 

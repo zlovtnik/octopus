@@ -514,7 +514,7 @@ object Main extends IOApp.Simple:
                                   val statsMaterializerStream =
                                     com.sslproxy.coordinator.metrics.StatsMaterializerStream
                                       .run(
-                                        postgresRepo,
+                                        new com.sslproxy.coordinator.postgres.PostgresMetricsRepository(oldTx, Some(dbSemaphore)),
                                         metrics,
                                         cfg.statsStore,
                                         cfg.statsMaterializer

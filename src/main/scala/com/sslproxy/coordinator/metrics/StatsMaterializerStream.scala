@@ -3,7 +3,6 @@ package com.sslproxy.coordinator.metrics
 import cats.effect.IO
 import com.sslproxy.coordinator.config.{StatsMaterializerConfig, StatsStoreConfig}
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
-import com.sslproxy.coordinator.postgres.PostgresRepository
 import fs2.Stream
 
 import scala.concurrent.duration.*
@@ -13,7 +12,7 @@ object StatsMaterializerStream:
   private val logger = StructuredLogger("metrics.stream")
 
   def run(
-    repo: PostgresRepository,
+    repo: MetricsRepository[IO],
     metrics: CoordinatorMetrics,
     storeConfig: StatsStoreConfig,
     config: StatsMaterializerConfig

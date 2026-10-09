@@ -3,36 +3,30 @@ package com.sslproxy.coordinator.metrics
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
-import com.sslproxy.coordinator.postgres.PostgresRepository
+import com.sslproxy.coordinator.util.ErrorSanitizer
 import io.circe.Json
 
 import java.time.{Instant, ZoneOffset}
 import java.time.temporal.ChronoUnit
 
-final case class MaterializedPeaks(
-  peaks: PeaksSnapshot,
-  lifetime: Option[LifetimeTotals],
-  computedAt: Instant
-)
-
-final case class MaterializedHistory(
-  throughput24h: Option[ThroughputSeries],
-  throughput7d: Option[ThroughputSeries],
-  computedAt: Instant
-)
+final case class MeasuredMetric[A](value: A, computedAt: Instant)
 
 /** Compute-only metrics materializer. Jobs write last-good parts in memory and
   * publish a full snapshot to Redis/MinIO. Never participates in processor
   * readiness and never fails the process.
   */
 final class StatsMaterializer(
-  repo: PostgresRepository,
+  repo: MetricsRepository[IO],
   metrics: CoordinatorMetrics,
   redis: StatsSnapshotStore,
   minio: StatsSnapshotStore & StatsHistoryStore,
-  peaksState: Ref[IO, Option[MaterializedPeaks]],
-  historyState: Ref[IO, Option[MaterializedHistory]],
-  liveState: Ref[IO, Option[LiveStripSnapshot]]
+  dayState: Ref[IO, Option[MeasuredMetric[Option[DayPeak]]]],
+  weekState: Ref[IO, Option[MeasuredMetric[Option[WeekPeak]]]],
+  lifetimeState: Ref[IO, Option[LifetimeTotals]],
+  dayHistory: Ref[IO, Option[MeasuredMetric[ThroughputSeries]]],
+  weekHistory: Ref[IO, Option[MeasuredMetric[ThroughputSeries]]],
+  liveState: Ref[IO, Option[LiveStripSnapshot]],
+  now: IO[Instant]
 ):
   private val logger = StructuredLogger("metrics.materializer")
 
@@ -44,36 +38,37 @@ final class StatsMaterializer(
       case MetricJob.Publish        => publish
 
   private def refreshPeaks: IO[Unit] =
-    val day = repo.peakRecordsDay().flatMap {
-      case Right(v) => IO.pure(v)
-      case Left(e)  => IO.raiseError(RuntimeException(s"peak day failed: $e"))
+    now.flatMap { at =>
+      (
+        recover("peakDay")(repo.peakDay.flatMap(v => update(dayState, MeasuredMetric(v, at)))),
+        recover("peakWeek")(repo.peakWeek.flatMap(v => update(weekState, MeasuredMetric(v, at)))),
+        recover("lifetimeTotals")(
+          repo.lifetimeTotals(at).flatMap { totals =>
+            lifetimeState.update {
+              case Some(previous) if Instant.parse(previous.computedAt).isAfter(at) => Some(previous)
+              case _ => Some(totals)
+            }
+          }
+        )
+      ).parTupled.void
     }
-    val week = repo.peakRecordsWeek().flatMap {
-      case Right(v) => IO.pure(v)
-      case Left(e)  => IO.raiseError(RuntimeException(s"peak week failed: $e"))
-    }
-    val lifetime = repo.ingestionLifetimeTotals().flatMap {
-      case Right(v) => IO.pure(v)
-      case Left(e)  => IO.raiseError(RuntimeException(s"lifetime totals failed: $e"))
-    }
-    (day, week, lifetime).parTupled.flatMap { case (d, w, l) =>
-      val now = Instant.now()
-      val peaks = PeaksSnapshot(
-        peaksComputedAt = Some(StatsSnapshot.toIso(now)),
-        peakRecordsDay = d.map(_._1),
-        peakRecordsDayDate = d.map(_._2),
-        peakRecordsWeek = w.map(_._1),
-        peakRecordsWeekStart = w.map(_._2),
-        peakRecordsWeekEnd = w.map(_._3)
-      )
-      val totals = l.map { case (records, days) =>
-        LifetimeTotals(recordsTotal = records, daysCounted = days, computedAt = StatsSnapshot.toIso(now))
-      }
-      peaksState.set(Some(MaterializedPeaks(peaks, totals, now)))
+
+  private def recover(label: String)(run: IO[Unit]): IO[Unit] =
+    run.handleErrorWith(error => IO(logger.warn(
+      "metric_query_failed",
+      "metric" -> label,
+      "error" -> ErrorSanitizer.message(error)
+    )))
+
+  // Overlapping jobs may finish out of order; an older refresh cannot regress a cache.
+  private def update[A](state: Ref[IO, Option[MeasuredMetric[A]]], value: MeasuredMetric[A]): IO[Unit] =
+    state.update {
+      case Some(previous) if previous.computedAt.isAfter(value.computedAt) => Some(previous)
+      case _ => Some(value)
     }
 
   private def refreshLiveStrip: IO[Unit] =
-    IO(Instant.now()).flatMap { now =>
+    now.flatMap { now =>
       val rate = metrics.ingestProcessedRatePerSec(now.toEpochMilli)
       val pending = metrics.pendingLedgerCountValue
       val lastSuccess = metrics.ingestLastSuccessEpochSeconds.map(ts => StatsSnapshot.toIso(Instant.ofEpochSecond(ts)))
@@ -93,46 +88,54 @@ final class StatsMaterializer(
     }
 
   private def refreshHistory: IO[Unit] =
-    val since = Instant.now().minus(8, ChronoUnit.DAYS)
-    repo.ingestionHourlyBuckets(since).flatMap {
-      case Left(e)  => IO.raiseError(RuntimeException(s"history buckets failed: $e"))
-      case Right(rows) =>
-        val now = Instant.now()
-        val points = rows.map { case (bucketStart, records) =>
-          ThroughputPoint(bucketStart, records)
+    now.flatMap { at =>
+      val until = at.truncatedTo(ChronoUnit.HOURS)
+      def refresh(hours: Int, state: Ref[IO, Option[MeasuredMetric[ThroughputSeries]]]): IO[Unit] =
+        recover(s"throughput${hours}h") {
+          repo.hourlyBuckets(until.minus(hours.toLong, ChronoUnit.HOURS), until).flatMap { rows =>
+            val series = ThroughputSeries("hour", StatsMaterializer.fillHourly(rows, at, hours))
+            update(state, MeasuredMetric(series, at))
+          }
         }
-        val full = StatsMaterializer.fillHourly(points, now, 168)
-        historyState.set(
-          Some(
-            MaterializedHistory(
-              throughput24h = Some(ThroughputSeries("hour", full.takeRight(24))),
-              throughput7d = Some(ThroughputSeries("hour", full)),
-              computedAt = now
-            )
-          )
-        )
+      (refresh(24, dayHistory), refresh(168, weekHistory)).parTupled.void
     }
+
+  private def currentHistory(value: Option[MeasuredMetric[ThroughputSeries]], at: Instant): Option[ThroughputSeries] =
+    // The wire contract has no per-series freshness field. Never relabel an old
+    // hourly window as current, or fill unknown hours after a failed query with zeros.
+    value.filter(_.computedAt.truncatedTo(ChronoUnit.HOURS) == at.truncatedTo(ChronoUnit.HOURS)).map(_.value)
 
   private def publish: IO[Unit] =
     for
-      peaks <- peaksState.get
-      history <- historyState.get
+      day <- dayState.get
+      week <- weekState.get
+      lifetime <- lifetimeState.get
+      history24h <- dayHistory.get
+      history7d <- weekHistory.get
       live <- liveState.get
-      now <- IO(Instant.now())
+      now <- now
+      d = day.flatMap(_.value)
+      w = week.flatMap(_.value)
+      // A shared timestamp must not claim the older surviving peak is newer.
+      peaksAt = (day.map(_.computedAt).toList ++ week.map(_.computedAt).toList).minOption
+      peaks = peaksAt.map(at => PeaksSnapshot(
+        Some(StatsSnapshot.toIso(at)), d.map(_.records), d.map(_.date),
+        w.map(_.records), w.map(_.start), w.map(_.end)
+      ))
       snapshot = StatsSnapshot(
         asOf = StatsSnapshot.toIso(now),
-        peaks = peaks.map(_.peaks),
+        peaks = peaks,
         liveStrip = live,
-        lifetimeTotals = peaks.flatMap(_.lifetime),
-        throughput24h = history.flatMap(_.throughput24h),
-        throughput7d = history.flatMap(_.throughput7d)
+        lifetimeTotals = lifetime,
+        throughput24h = currentHistory(history24h, now),
+        throughput7d = currentHistory(history7d, now)
       )
       json = StatsSnapshot.toJson(snapshot)
       _ <- redis.save(json).handleErrorWith { error =>
         IO(
           logger.warn(
             "redis_publish_failed",
-            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+            "error" -> ErrorSanitizer.message(error)
           )
         )
       }
@@ -140,7 +143,7 @@ final class StatsMaterializer(
         IO(
           logger.warn(
             "minio_publish_failed",
-            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+            "error" -> ErrorSanitizer.message(error)
           )
         )
       }
@@ -148,7 +151,7 @@ final class StatsMaterializer(
         IO(
           logger.warn(
             "minio_history_failed",
-            "error" -> Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+            "error" -> ErrorSanitizer.message(error)
           )
         )
       }
@@ -177,13 +180,17 @@ object StatsMaterializer:
     }
 
   def create(
-    repo: PostgresRepository,
+    repo: MetricsRepository[IO],
     metrics: CoordinatorMetrics,
     redis: StatsSnapshotStore,
-    minio: StatsSnapshotStore & StatsHistoryStore
+    minio: StatsSnapshotStore & StatsHistoryStore,
+    now: IO[Instant] = IO.realTimeInstant
   ): IO[StatsMaterializer] =
     for
-      peaks <- Ref.of[IO, Option[MaterializedPeaks]](None)
-      history <- Ref.of[IO, Option[MaterializedHistory]](None)
+      day <- Ref.of[IO, Option[MeasuredMetric[Option[DayPeak]]]](None)
+      week <- Ref.of[IO, Option[MeasuredMetric[Option[WeekPeak]]]](None)
+      lifetime <- Ref.of[IO, Option[LifetimeTotals]](None)
+      history24h <- Ref.of[IO, Option[MeasuredMetric[ThroughputSeries]]](None)
+      history7d <- Ref.of[IO, Option[MeasuredMetric[ThroughputSeries]]](None)
       live <- Ref.of[IO, Option[LiveStripSnapshot]](None)
-    yield new StatsMaterializer(repo, metrics, redis, minio, peaks, history, live)
+    yield new StatsMaterializer(repo, metrics, redis, minio, day, week, lifetime, history24h, history7d, live, now)

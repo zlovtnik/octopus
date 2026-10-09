@@ -14,6 +14,8 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
 - `postgres/` and `postgres/sql/` own repositories, transforms, checksums,
   schema preflight, typed sinks, and named parameterized SQL.
 - `processor/` owns IDs, catalog contracts, leases, retry, and supervision.
+- `wiring/` assembles resources, services, workloads, HTTP, and runtime streams;
+  business packages retain their implementations.
 - `cron/` and `dispatch/` own periodic ingest/batch/dispatch and outbox
   publication. `archive/` owns MinIO payload archival. `http/` owns health
   and metrics. `observability/` owns logs, Micrometer, and OTLP.

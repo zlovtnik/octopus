@@ -65,6 +65,7 @@ remain disabled by default.
 | Package | Responsibility |
 |---|---|
 | `config` | PureConfig model, environment overrides, and fail-closed validation |
+| `wiring` | Resource ownership, service assembly, workload declarations, HTTP setup, and runtime gates |
 | `ingest` | Scan-request hydration and `proxy.payload_audit` consumption |
 | `domain` | Scan request, load, payload-audit, and broker metadata types |
 | `kafka` | Locked consumers, committed-offset restart, DLQ conversion, and wireless handlers |

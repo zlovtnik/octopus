@@ -8,10 +8,18 @@ import java.nio.file.Files
 
 class ProcessorWorkloadWiringSuite extends FunSuite:
   test("every Octopus-owned processor has exactly one workload declaration"):
-    val source = Files.readString(
-      java.nio.file.Path.of("src/main/scala/com/sslproxy/coordinator/Main.scala"),
-      StandardCharsets.UTF_8
+    val sources = List(
+      "wiring/workloads/ConsumerWorkloads.scala",
+      "wiring/workloads/ScheduledWorkloads.scala",
+      "wiring/workloads/RetentionWorkloads.scala",
+      "wiring/RuntimeStreams.scala"
     )
+    val source = sources.map { path =>
+      Files.readString(
+        java.nio.file.Path.of(s"src/main/scala/com/sslproxy/coordinator/$path"),
+        StandardCharsets.UTF_8
+      )
+    }.mkString("\n")
 
     ProcessorId.octopusOwned.foreach { id =>
       val caseName = id.productPrefix

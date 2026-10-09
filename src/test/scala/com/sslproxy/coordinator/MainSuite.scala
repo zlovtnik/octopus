@@ -1,25 +1,65 @@
 package com.sslproxy.coordinator
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO, Resource}
 import com.sslproxy.coordinator.config.RuntimeConfig
 import com.sslproxy.coordinator.processor.ProcessorId
+import com.sslproxy.coordinator.wiring.{DatabaseModule, RuntimeStreams}
 import fs2.Stream
 import munit.CatsEffectSuite
 
+import scala.concurrent.ExecutionContextExecutorService
 import scala.concurrent.duration.*
 
 class MainSuite extends CatsEffectSuite:
 
   test("database worker permits use the configured connection reserve"):
-    assertEquals(Main.dbWorkerPermits(20, 2), 18L)
-    assertEquals(Main.dbWorkerPermits(20, 5), 15L)
+    assertEquals(DatabaseModule.dbWorkerPermits(20, 2), 18L)
+    assertEquals(DatabaseModule.dbWorkerPermits(20, 5), 15L)
 
   test("database worker permits retain one worker for small pools"):
-    assertEquals(Main.dbWorkerPermits(2, 1), 1L)
-    assertEquals(Main.dbWorkerPermits(1, 1), 1L)
+    assertEquals(DatabaseModule.dbWorkerPermits(2, 1), 1L)
+    assertEquals(DatabaseModule.dbWorkerPermits(1, 1), 1L)
+
+  test("database executor keeps daemon thread naming and shuts down on release"):
+    DatabaseModule.blockingExecutionContext(2).use { ec =>
+      IO {
+        val thread = Thread.currentThread()
+        assertEquals(thread.getName, "doobie-postgres-pool")
+        assert(thread.isDaemon)
+        assert(!ec.isShutdown)
+        ec
+      }.evalOn(ec)
+    }.map(ec => assert(ec.isShutdown))
+
+  test("database executor shuts down when later resource acquisition fails"):
+    for
+      acquired <- Deferred[IO, ExecutionContextExecutorService]
+      failure = new IllegalStateException("later acquisition failed")
+      outcome <- DatabaseModule.blockingExecutionContext(2)
+        .evalTap(ec => acquired.complete(ec).void)
+        .flatMap(_ => Resource.eval(IO.raiseError[Unit](failure)))
+        .use(_ => IO.unit)
+        .attempt
+      ec <- acquired.get
+    yield
+      assertEquals(outcome, Left(failure))
+      assert(ec.isShutdown)
+
+  test("database executor shuts down when application use is cancelled"):
+    for
+      acquired <- Deferred[IO, ExecutionContextExecutorService]
+      fiber <- DatabaseModule.blockingExecutionContext(2).use { ec =>
+        acquired.complete(ec) *> IO.never[Unit]
+      }.start
+      _ <- (for
+        ec <- acquired.get
+        _ <- fiber.cancel
+        _ <- IO(assert(ec.isShutdown))
+      yield ()).guarantee(fiber.cancel)
+    yield ()
 
   test("active runtime starts supervised, processor-support, and required streams"):
-    Main
+    RuntimeStreams
       .enabledRuntimeStreams(
         RuntimeConfig(processorsEnabled = true, consumersEnabled = true),
         Stream.emit("supervised").covary[IO],
@@ -32,19 +72,19 @@ class MainSuite extends CatsEffectSuite:
       .map(values => assertEquals(values.toSet, Set("supervised", "support", "required")))
 
   test("consumer-only runtime excludes processor support"):
-    val processorOnly = Main.enabledRuntimeStreams(
+    val processorOnly = RuntimeStreams.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = true, consumersEnabled = false),
       Stream.emit("supervised").covary[IO],
       Stream.emit("support").covary[IO],
       Stream.emit("required").covary[IO]
     )
-    val consumerOnly = Main.enabledRuntimeStreams(
+    val consumerOnly = RuntimeStreams.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = false, consumersEnabled = true),
       Stream.emit("supervised").covary[IO],
       Stream.emit("support").covary[IO],
       Stream.emit("required").covary[IO]
     )
-    val disabled = Main.enabledRuntimeStreams(
+    val disabled = RuntimeStreams.enabledRuntimeStreams(
       RuntimeConfig(processorsEnabled = false, consumersEnabled = false),
       Stream.emit("supervised").covary[IO],
       Stream.emit("support").covary[IO],
@@ -61,7 +101,7 @@ class MainSuite extends CatsEffectSuite:
       assertEquals(disabledOutcome, Left(()))
 
   test("consumer runtime supervises locked and auxiliary Kafka consumers"):
-    val enabled = Main.runtimeConsumerProcessorIds(
+    val enabled = RuntimeStreams.runtimeConsumerProcessorIds(
       RuntimeConfig(processorsEnabled = false, consumersEnabled = true)
     )
 
@@ -70,7 +110,7 @@ class MainSuite extends CatsEffectSuite:
     assert(enabled.contains(ProcessorId.SyncLoadConsumer))
     assert(enabled.contains(ProcessorId.SyncResultConsumer))
     assertEquals(
-      Main.runtimeConsumerProcessorIds(
+      RuntimeStreams.runtimeConsumerProcessorIds(
         RuntimeConfig(processorsEnabled = true, consumersEnabled = false)
       ),
       Set.empty

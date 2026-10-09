@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator
 
 import cats.effect.kernel.Fiber
+import cats.syntax.all.*
 import cats.effect.std.Semaphore
 import cats.effect.{IO, IOApp, Resource}
 import com.comcast.ip4s.*
@@ -11,7 +12,7 @@ import com.sslproxy.coordinator.dispatch.{
   BackpressureService,
   BatchDispatchService
 }
-import com.sslproxy.coordinator.http.HealthRoutes
+import com.sslproxy.coordinator.http.{HealthRoutes, PublicStatsRoutes}
 import com.sslproxy.coordinator.ingest.SyncEventHydrationService
 import com.sslproxy.coordinator.kafka.{
   KafkaComponents,
@@ -247,6 +248,20 @@ object Main extends IOApp.Simple:
                                   cfg.postgres.connectionTimeoutMs.millis
                                 )
 
+                                val statsService =
+                                  new com.sslproxy.coordinator.observability.OperationalStatsService(
+                                    com.sslproxy.coordinator.observability.PostgresPeaksSource(postgresRepo),
+                                    metrics,
+                                    cfg.publicStats.peaksRefreshSeconds.seconds
+                                  )
+                                val publicStatsRoutes =
+                                  if cfg.publicStats.enabled then
+                                    new PublicStatsRoutes(
+                                      statsService,
+                                      cfg.publicStats.allowedOrigins
+                                    ).routes
+                                  else org.http4s.HttpRoutes.empty[IO]
+
                                 val httpPort = Port
                                   .fromInt(cfg.http.port)
                                   .getOrElse(
@@ -258,7 +273,9 @@ object Main extends IOApp.Simple:
                                   .default[IO]
                                   .withPort(httpPort)
                                   .withHost(host"0.0.0.0")
-                                  .withHttpApp(healthRoutes.routes.orNotFound)
+                                  .withHttpApp(
+                                    (healthRoutes.routes <+> publicStatsRoutes).orNotFound
+                                  )
                                   .build
 
                                 serverResource.flatMap { _ =>

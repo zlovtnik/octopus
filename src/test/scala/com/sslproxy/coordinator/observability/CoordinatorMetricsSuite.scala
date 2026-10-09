@@ -40,3 +40,58 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
     assert(output.contains("coordinator_ingest_processed_total_count 3.0"), output)
     assert(!output.contains("coordinator.ingest"), output)
   }
+
+  test("scrape exports last-success timestamp as _value series") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    metrics.recordIngestInvocation(success = true)
+    val output = metrics.scrape
+    assert(
+      output.contains("coordinator_ingest_ledger_last_success_timestamp_seconds_value"),
+      output
+    )
+  }
+
+  test("ingestLastSuccessEpochSeconds returns None when never set") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    assertEquals(metrics.ingestLastSuccessEpochSeconds, None)
+  }
+
+  test("ingestLastSuccessEpochSeconds returns timestamp after success") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    metrics.recordIngestInvocation(success = true)
+    assert(metrics.ingestLastSuccessEpochSeconds.nonEmpty)
+  }
+
+  test("ingestProcessedRatePerSec returns 0 with no samples") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    assertEquals(metrics.ingestProcessedRatePerSec(System.currentTimeMillis()), 0.0)
+  }
+
+  test("ingestProcessedRatePerSec returns 0 with a single sample") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    metrics.recordIngestProcessed(5)
+    assertEquals(metrics.ingestProcessedRatePerSec(System.currentTimeMillis()), 0.0)
+  }
+
+  test("ingestProcessedRatePerSec computes rate from counter growth") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    val now = System.currentTimeMillis()
+    metrics.recordIngestProcessed(10)
+    metrics.recordIngestProcessed(10)
+    val rate = metrics.ingestProcessedRatePerSec(now + 100)
+    assert(rate >= 0.0, s"rate should be non-negative, got $rate")
+  }
+
+  test("pendingLedgerCountValue reflects recorded count") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    metrics.recordPendingLedgerCount(42)
+    assertEquals(metrics.pendingLedgerCountValue, 42L)
+  }
+
+  test("backpressureActiveValue reflects recorded state") {
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+    metrics.recordBackpressureActive(true)
+    assert(metrics.backpressureActiveValue)
+    metrics.recordBackpressureActive(false)
+    assert(!metrics.backpressureActiveValue)
+  }

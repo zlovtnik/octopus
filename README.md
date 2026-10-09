@@ -261,6 +261,10 @@ Important gates:
 | `SYNC_EVENT_TOMBSTONE_RETENTION_DAYS` | `45` | Replay-protection period after event deletion |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default | OTLP endpoint for Kafka and PostgreSQL boundary spans |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
+| `OCTOPUS_PUBLIC_STATS_ENABLED` | `false` | Enables the public `/public/stats` JSON endpoint for the product site |
+| `OCTOPUS_PUBLIC_STATS_ALLOWED_ORIGINS` | `[]` | CORS allowlist for `/public/stats`; comma-separated origins |
+| `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `60` | Cache TTL for peak day/week DB aggregates |
+| `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
@@ -291,6 +295,7 @@ schemas, and ingestion evidence.
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
 | `/actuator/prometheus` | compatibility alias for metrics |
+| `/public/stats` | public read-only JSON: peak day/week from `ingestion_evidence` + live pipeline strip (requires `OCTOPUS_PUBLIC_STATS_ENABLED=true`) |
 
 Processor metrics include a one-hot lifecycle gauge per processor, the current
 persisted restart count, and supervised retry counters. Existing ingestion,

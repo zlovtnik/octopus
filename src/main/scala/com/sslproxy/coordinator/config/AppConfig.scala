@@ -34,7 +34,8 @@ final case class AppConfig(
   wireless: WirelessConfig,
   runtime: RuntimeConfig,
   processors: ProcessorConfig,
-  archive: ArchiveConfig
+  archive: ArchiveConfig,
+  publicStats: PublicStatsConfig = PublicStatsConfig()
 ) derives ConfigReader
 
 final case class PostgresConfig(
@@ -116,6 +117,13 @@ final case class BackpressureConfig(
 
 final case class HttpConfig(
   port: Int
+) derives ConfigReader
+
+final case class PublicStatsConfig(
+  enabled: Boolean = false,
+  allowedOrigins: List[String] = Nil,
+  peaksRefreshSeconds: Int = 60,
+  rateWindowSeconds: Int = 300
 ) derives ConfigReader
 
 final case class SyncConfig(
@@ -231,6 +239,7 @@ object AppConfig:
         backpressureErrors(config.backpressure) ++
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
+        publicStatsErrors(config.publicStats) ++
         postgresBoundErrors(config.postgres) ++
         stagedPostgresErrors ++
         runtimeErrors
@@ -386,6 +395,19 @@ object AppConfig:
     List(
       Option.when(config.port <= 0 || config.port > 65535)(
         "http.port must be between 1 and 65535"
+      )
+    ).flatten
+
+  private def publicStatsErrors(config: PublicStatsConfig): List[String] =
+    List(
+      Option.when(config.enabled && config.allowedOrigins.isEmpty)(
+        "public-stats.allowed-origins must not be empty when public-stats.enabled=true"
+      ),
+      Option.when(config.peaksRefreshSeconds <= 0)(
+        "public-stats.peaks-refresh-seconds must be positive"
+      ),
+      Option.when(config.rateWindowSeconds <= 0)(
+        "public-stats.rate-window-seconds must be positive"
       )
     ).flatten
 

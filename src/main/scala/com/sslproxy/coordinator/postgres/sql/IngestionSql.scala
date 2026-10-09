@@ -13,6 +13,23 @@ object IngestionSql:
     sql"""SELECT COUNT(*) FROM sync_events
            WHERE status IN ('pending', 'processing')""".query[Long]
 
+  val PeakRecordsDayQuery: Query0[(Long, String)] =
+    sql"""SELECT count(*) AS records,
+                  to_char(date_trunc('day', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day
+           FROM ingestion_evidence
+           GROUP BY 2
+           ORDER BY records DESC, day ASC
+           LIMIT 1""".query[(Long, String)]
+
+  val PeakRecordsWeekQuery: Query0[(Long, String, String)] =
+    sql"""SELECT count(*) AS records,
+                  to_char(date_trunc('week', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS week_start,
+                  to_char(date_trunc('week', first_seen_at AT TIME ZONE 'UTC') + 6, 'YYYY-MM-DD') AS week_end
+           FROM ingestion_evidence
+           GROUP BY 2, 3
+           ORDER BY records DESC, week_start ASC
+           LIMIT 1""".query[(Long, String, String)]
+
   def hydrationCandidates(
     after: Option[HydrationCursor],
     limit: Int

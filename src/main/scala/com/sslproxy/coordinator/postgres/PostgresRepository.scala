@@ -65,6 +65,16 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       IngestionSql.PendingLedgerCountQuery.unique
     }
 
+  def peakRecordsDay(): IO[Either[DatabaseError, Option[(Long, String)]]] =
+    runDb("postgres.peak_records_day") {
+      IngestionSql.PeakRecordsDayQuery.option
+    }
+
+  def peakRecordsWeek(): IO[Either[DatabaseError, Option[(Long, String, String)]]] =
+    runDb("postgres.peak_records_week") {
+      IngestionSql.PeakRecordsWeekQuery.option
+    }
+
   def processIngestLedger(
     streamNames: List[String],
     scanMaxAttempts: Int,

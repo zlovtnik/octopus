@@ -59,6 +59,9 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
   private val backpressureActiveGauge: AtomicLong = new AtomicLong(0)
   private val ingestLastSuccessTimestamp: AtomicLong = new AtomicLong(0)
 
+  private val processedSamples: java.util.concurrent.atomic.AtomicReference[Vector[(Long, Long)]] =
+    java.util.concurrent.atomic.AtomicReference(Vector.empty)
+
   private val routeRunningGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val routeSuspendedGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val processorLifecycleGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
@@ -145,7 +148,38 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
     if success then ingestLastSuccessTimestamp.set(System.currentTimeMillis() / 1000)
 
   def recordIngestProcessed(count: Long): Unit =
-    if count > 0 then ingestProcessedCounter.increment(count.toDouble)
+    if count > 0 then
+      ingestProcessedCounter.increment(count.toDouble)
+      sampleProcessed()
+
+  private def sampleProcessed(): Unit =
+    val now = System.currentTimeMillis()
+    val cumulative = ingestProcessedCounter.count().toLong
+    processedSamples.updateAndGet { samples =>
+      val trimmed = samples.filter(s => now - s._1 < 3600_000L)
+      trimmed :+ (now -> cumulative)
+    }
+    ()
+
+  def ingestProcessedRatePerSec(nowMs: Long): Double =
+    val samples = processedSamples.get()
+    val windowMs = 300_000L
+    val inWindow = samples.filter(s => nowMs - s._1 <= windowMs)
+    if inWindow.size < 2 then 0.0
+    else
+      val (t0, c0) = inWindow.head
+      val (t1, c1) = inWindow.last
+      val dtSec = (t1 - t0) / 1000.0
+      if dtSec <= 0 then 0.0
+      else math.max(0.0, (c1 - c0) / dtSec)
+
+  def pendingLedgerCountValue: Long = pendingLedgerGauge.get()
+
+  def backpressureActiveValue: Boolean = backpressureActiveGauge.get() > 0
+
+  def ingestLastSuccessEpochSeconds: Option[Long] =
+    val ts = ingestLastSuccessTimestamp.get()
+    if ts > 0 then Some(ts) else None
 
   def recordBatchDispatched(): Unit =
     batchesDispatchedCounter.increment()

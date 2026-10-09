@@ -511,12 +511,21 @@ object Main extends IOApp.Simple:
                                     "result_group" -> cfg.kafka.resultConsumer
                                   )
 
+                                  val statsMaterializerStream =
+                                    com.sslproxy.coordinator.metrics.StatsMaterializerStream
+                                      .run(
+                                        postgresRepo,
+                                        metrics,
+                                        cfg.statsStore,
+                                        cfg.statsMaterializer
+                                      )
+
                                   val streams = enabledRuntimeStreams(
                                     cfg.runtime,
                                     supervisedStreams,
                                     processorSupportStreams,
                                     requiredRuntimeStreams
-                                  )
+                                  ).merge(statsMaterializerStream)
 
                                   Resource.make(
                                     postgresRepo.ensureAllCursors(

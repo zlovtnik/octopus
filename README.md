@@ -265,6 +265,17 @@ Important gates:
 | `OCTOPUS_PUBLIC_STATS_ALLOWED_ORIGINS` | `[]` | CORS allowlist for `/public/stats`; comma-separated origins |
 | `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `300` | Cache TTL for peak day/week DB aggregates |
 | `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
+| `OCTOPUS_STATS_PUBLISH_ENABLED` | `false` | Enables the metrics materializer worker pool that writes Redis/MinIO snapshots |
+| `OCTOPUS_STATS_WORKER_COUNT` | `3` | Metric worker pool size |
+| `OCTOPUS_STATS_PUBLISH_INTERVAL_SECONDS` | `30` | Snapshot publish cadence |
+| `OCTOPUS_STATS_PEAKS_INTERVAL_SECONDS` | `300` | Peaks and lifetime totals refresh cadence |
+| `OCTOPUS_STATS_HISTORY_INTERVAL_SECONDS` | `60` | Hourly throughput bucket refresh cadence |
+| `OCTOPUS_STATS_LIVE_INTERVAL_SECONDS` | `15` | Live-strip sample cadence |
+| `OCTOPUS_STATS_JOB_TIMEOUT_SECONDS` | `60` | Per-job timeout; a stuck job never blocks other workers |
+| `REDIS_ADDR` | `ssl-proxy-redis-runtime:6379` | Redis endpoint for the hot public stats snapshot |
+| `REDIS_PASSWORD` | empty | Redis AUTH password from the `redis-runtime` secret |
+| `MINIO_STATS_BUCKET` | `ssl-proxy-stats` | MinIO bucket for stats snapshots and history |
+| `MINIO_STATS_PREFIX` | `stats/` | Object key prefix inside the stats bucket |
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
@@ -295,20 +306,22 @@ schemas, and ingestion evidence.
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
 | `/actuator/prometheus` | compatibility alias for metrics |
-| `/public/stats` | public read-only JSON: peak day/week from `ingestion_evidence` + live pipeline strip (requires `OCTOPUS_PUBLIC_STATS_ENABLED=true`) |
+| `/public/stats` | internal diagnostic JSON (peaks + live strip). The public gateway path is served by `services/stats-reader` from precomputed Redis/MinIO snapshots |
 
-Public stats use `Cache-Control: no-store`. Peak aggregates share one
+Public stats on this process use `Cache-Control: no-store`. Peak aggregates share one
 single-flight background refresh and a 300-second cache by default. Callers
 never block on the database: a request returns the last good snapshot (or null
 peaks before the first successful refresh) and a failed refresh keeps that
 snapshot instead of failing the route. The handler also applies a hard
 two-second ceiling so a stuck peaks path cannot hang the socket; on timeout it
-returns null peaks and a null live strip rather than hanging. The live strip reports the
-responding process's scheduled ingest-ledger processor, not all incoming streams.
-Its rate counts every processed batch over a full five-minute window, including
-isolated batches and idle time. It stays null for the first five minutes after
-startup and whenever pending, intake-control, or successful processing observations
-are over 60 seconds old. A successful processing check can find no work.
+returns null peaks and a null live strip rather than hanging.
+
+When `OCTOPUS_STATS_PUBLISH_ENABLED=true`, a separate metrics materializer
+worker pool computes peaks, lifetime totals, hourly throughput, and the live
+strip on a timer, then publishes a JSON snapshot to Redis (`stats:current:v2`)
+and MinIO (`stats/latest.json` plus history objects). The materializer is not a
+`ProcessorId` and never affects `/ready`. The public website is served by
+`services/stats-reader`, which only reads those precomputed store objects.
 
 Processor metrics include a one-hot lifecycle gauge per processor, the current
 persisted restart count, and supervised retry counters. Existing ingestion,

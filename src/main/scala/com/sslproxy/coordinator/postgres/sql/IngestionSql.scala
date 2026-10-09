@@ -30,6 +30,19 @@ object IngestionSql:
            ORDER BY records DESC, week_start ASC
            LIMIT 1""".query[(Long, String, String)]
 
+  val IngestionLifetimeTotalsQuery: Query0[(Long, Long)] =
+    sql"""SELECT count(*) AS records_total,
+                  count(DISTINCT to_char(date_trunc('day', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')) AS days_counted
+           FROM ingestion_evidence""".query[(Long, Long)]
+
+  def ingestionHourlyBuckets(since: java.sql.Timestamp): Query0[(String, Long)] =
+    sql"""SELECT to_char(date_trunc('hour', first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:00:00Z') AS bucket_start,
+                  count(*) AS records
+           FROM ingestion_evidence
+           WHERE first_seen_at >= ${since}
+           GROUP BY 1
+           ORDER BY 1""".query[(String, Long)]
+
   def hydrationCandidates(
     after: Option[HydrationCursor],
     limit: Int

@@ -75,6 +75,16 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       IngestionSql.PeakRecordsWeekQuery.option
     }
 
+  def ingestionLifetimeTotals(): IO[Either[DatabaseError, Option[(Long, Long)]]] =
+    runDb("postgres.ingestion_lifetime_totals") {
+      IngestionSql.IngestionLifetimeTotalsQuery.option
+    }
+
+  def ingestionHourlyBuckets(since: java.time.Instant): IO[Either[DatabaseError, List[(String, Long)]]] =
+    runDb("postgres.ingestion_hourly_buckets") {
+      IngestionSql.ingestionHourlyBuckets(java.sql.Timestamp.from(since)).to[List]
+    }
+
   def processIngestLedger(
     streamNames: List[String],
     scanMaxAttempts: Int,

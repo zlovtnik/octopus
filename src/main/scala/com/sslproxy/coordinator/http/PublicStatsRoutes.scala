@@ -51,9 +51,13 @@ class PublicStatsRoutes(
       statsService.snapshot.flatMap { s =>
         Ok(statsJson(s)).map { resp =>
           val all = corsHeaders(origin) :+
-            Header.Raw(CIString("Cache-Control"), "public, max-age=30")
+            Header.Raw(CIString("Cache-Control"), "no-store")
           resp.withHeaders(Headers(all.map(h => h: org.http4s.Header.ToRaw)*))
         }
+      }.handleErrorWith { _ =>
+        ServiceUnavailable(Json.obj("error" -> Json.fromString("Metrics unavailable"))).map(
+          _.withHeaders(Headers((corsHeaders(origin) :+ Header.Raw(CIString("Cache-Control"), "no-store")).map(h => h: Header.ToRaw)*))
+        )
       }
 
     case request @ OPTIONS -> Root / "public" / "stats" =>

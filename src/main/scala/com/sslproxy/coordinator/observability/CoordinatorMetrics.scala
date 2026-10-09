@@ -12,7 +12,7 @@ import scala.jdk.CollectionConverters.*
 
 import atomic.AtomicLong
 
-class CoordinatorMetrics(private val registry: MeterRegistry):
+class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => Long = () => System.currentTimeMillis()):
   import CoordinatorMetrics.{ProcessorLifecycleValues, log}
 
   private val kafkaGauges = scala.collection.mutable.Map.empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], Gauge)]
@@ -58,6 +58,10 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
   private val pendingLedgerGauge: AtomicLong = new AtomicLong(0)
   private val backpressureActiveGauge: AtomicLong = new AtomicLong(0)
   private val ingestLastSuccessTimestamp: AtomicLong = new AtomicLong(0)
+  private val pendingObservedAt: AtomicLong = new AtomicLong(0)
+  private val backpressureObservedAt: AtomicLong = new AtomicLong(0)
+  private val processedObservedAt: AtomicLong = new AtomicLong(0)
+  private val startedAt: Long = nowMillis()
 
   private val processedSamples: java.util.concurrent.atomic.AtomicReference[Vector[(Long, Long)]] =
     java.util.concurrent.atomic.AtomicReference(Vector.empty)
@@ -136,42 +140,39 @@ class CoordinatorMetrics(private val registry: MeterRegistry):
 
   def recordPendingLedgerCount(count: Long): Unit =
     pendingLedgerGauge.set(count)
+    pendingObservedAt.set(nowMillis())
 
   def recordBackpressureActive(active: Boolean): Unit =
     backpressureActiveGauge.set(if active then 1L else 0L)
+    backpressureObservedAt.set(nowMillis())
 
   def incrementLoopCounter(): Unit =
     loopAttemptsCounter.increment()
 
   def recordIngestInvocation(success: Boolean): Unit =
     ingestInvocationsCounter.increment()
-    if success then ingestLastSuccessTimestamp.set(System.currentTimeMillis() / 1000)
+    if success then ingestLastSuccessTimestamp.set(nowMillis() / 1000)
 
   def recordIngestProcessed(count: Long): Unit =
+    val now = nowMillis()
     if count > 0 then
       ingestProcessedCounter.increment(count.toDouble)
-      sampleProcessed()
-
-  private def sampleProcessed(): Unit =
-    val now = System.currentTimeMillis()
-    val cumulative = ingestProcessedCounter.count().toLong
-    processedSamples.updateAndGet { samples =>
-      val trimmed = samples.filter(s => now - s._1 < 3600_000L)
-      trimmed :+ (now -> cumulative)
-    }
+      processedSamples.updateAndGet { samples =>
+        samples.filter(s => now - s._1 < 300_000L) :+ (now -> count)
+      }: Unit
+    // Empty successful processing passes are observations too.
+    processedObservedAt.set(now)
     ()
 
   def ingestProcessedRatePerSec(nowMs: Long): Double =
-    val samples = processedSamples.get()
-    val windowMs = 300_000L
-    val inWindow = samples.filter(s => nowMs - s._1 <= windowMs)
-    if inWindow.size < 2 then 0.0
-    else
-      val (t0, c0) = inWindow.head
-      val (t1, c1) = inWindow.last
-      val dtSec = (t1 - t0) / 1000.0
-      if dtSec <= 0 then 0.0
-      else math.max(0.0, (c1 - c0) / dtSec)
+    processedSamples.get().iterator
+      .filter { case (at, _) => at <= nowMs && nowMs - at < 300_000L }
+      .map(_._2.toDouble).sum / 300.0
+
+  def publicReadingsFresh(nowMs: Long): Boolean =
+    def fresh(at: Long): Boolean = at > 0 && nowMs >= at && nowMs - at <= 60_000L
+    nowMs - startedAt >= 300_000L &&
+      fresh(pendingObservedAt.get()) && fresh(backpressureObservedAt.get()) && fresh(processedObservedAt.get())
 
   def pendingLedgerCountValue: Long = pendingLedgerGauge.get()
 

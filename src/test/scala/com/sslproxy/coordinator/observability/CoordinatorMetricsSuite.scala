@@ -67,10 +67,10 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
     assertEquals(metrics.ingestProcessedRatePerSec(System.currentTimeMillis()), 0.0)
   }
 
-  test("ingestProcessedRatePerSec returns 0 with a single sample") {
+  test("ingestProcessedRatePerSec counts even a single batch across the whole window") {
     val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
     metrics.recordIngestProcessed(5)
-    assertEquals(metrics.ingestProcessedRatePerSec(System.currentTimeMillis()), 0.0)
+    assertEqualsDouble(metrics.ingestProcessedRatePerSec(System.currentTimeMillis()), 5.0 / 300.0, 0.000001)
   }
 
   test("ingestProcessedRatePerSec computes rate from counter growth") {
@@ -86,6 +86,35 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
     val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
     metrics.recordPendingLedgerCount(42)
     assertEquals(metrics.pendingLedgerCountValue, 42L)
+  }
+
+  test("rate includes all batches including same-millisecond batches and expires idle traffic") {
+    var now = 1000L
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry(), () => now)
+    metrics.recordIngestProcessed(300)
+    metrics.recordIngestProcessed(300)
+    now = 151000L
+    metrics.recordIngestProcessed(300)
+    assertEquals(metrics.ingestProcessedRatePerSec(now), 3.0)
+    now = 301000L
+    assertEquals(metrics.ingestProcessedRatePerSec(now), 1.0)
+    now = 451000L
+    assertEquals(metrics.ingestProcessedRatePerSec(now), 0.0)
+  }
+
+  test("public readings require a full window and fresh collection, including observed zero") {
+    var now = 1000L
+    val metrics = new CoordinatorMetrics(SimpleMeterRegistry(), () => now)
+    assert(!metrics.publicReadingsFresh(now))
+    now = 301000L
+    assert(!metrics.publicReadingsFresh(now))
+    metrics.recordPendingLedgerCount(0)
+    metrics.recordBackpressureActive(false)
+    metrics.recordIngestProcessed(0)
+    assert(metrics.publicReadingsFresh(now))
+    assertEquals(metrics.ingestProcessedRatePerSec(now), 0.0)
+    now += 61000L
+    assert(!metrics.publicReadingsFresh(now))
   }
 
   test("backpressureActiveValue reflects recorded state") {

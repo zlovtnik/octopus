@@ -240,7 +240,14 @@ object Main extends IOApp.Simple:
                                   runtimeConsumerProcessorIds
                                 )
                               )
-                              .flatMap { supervisor =>
+                              .evalMap { supervisor =>
+                                com.sslproxy.coordinator.observability.OperationalStatsService.create(
+                                  com.sslproxy.coordinator.observability.PostgresPeaksSource(postgresRepo),
+                                  metrics,
+                                  cfg.publicStats.peaksRefreshSeconds.seconds
+                                ).map(stats => (supervisor, stats))
+                              }
+                              .flatMap { case (supervisor, statsService) =>
                                 val healthRoutes = new HealthRoutes(
                                   oldTx,
                                   metrics,
@@ -248,12 +255,6 @@ object Main extends IOApp.Simple:
                                   cfg.postgres.connectionTimeoutMs.millis
                                 )
 
-                                val statsService =
-                                  new com.sslproxy.coordinator.observability.OperationalStatsService(
-                                    com.sslproxy.coordinator.observability.PostgresPeaksSource(postgresRepo),
-                                    metrics,
-                                    cfg.publicStats.peaksRefreshSeconds.seconds
-                                  )
                                 val publicStatsRoutes =
                                   if cfg.publicStats.enabled then
                                     new PublicStatsRoutes(

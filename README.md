@@ -297,6 +297,15 @@ schemas, and ingestion evidence.
 | `/actuator/prometheus` | compatibility alias for metrics |
 | `/public/stats` | public read-only JSON: peak day/week from `ingestion_evidence` + live pipeline strip (requires `OCTOPUS_PUBLIC_STATS_ENABLED=true`) |
 
+Public stats use `Cache-Control: no-store`. Peak aggregates share one refresh
+lock and a 60-second cache by default; a failed refresh returns sanitized 503
+JSON rather than republishing expired history. The live strip reports the
+responding process's scheduled ingest-ledger processor, not all incoming streams.
+Its rate counts every processed batch over a full five-minute window, including
+isolated batches and idle time. It stays null for the first five minutes after
+startup and whenever pending, intake-control, or successful processing observations
+are over 60 seconds old. A successful processing check can find no work.
+
 Processor metrics include a one-hot lifecycle gauge per processor, the current
 persisted restart count, and supervised retry counters. Existing ingestion,
 pending-ledger, backpressure, outbox, and DLQ counters remain available on the

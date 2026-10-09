@@ -58,15 +58,18 @@ object OperationalStatsService:
 
   def toIso(instant: Instant): String = isoFormatter.format(instant)
 
-class OperationalStatsService(
+  def create(peaks: PeaksSource, metrics: CoordinatorMetrics, refreshEvery: FiniteDuration): IO[OperationalStatsService] =
+    Semaphore[IO](1).map(lock => new OperationalStatsService(peaks, metrics, refreshEvery, lock))
+
+class OperationalStatsService private (
   peaks: PeaksSource,
   metrics: CoordinatorMetrics,
-  refreshEvery: FiniteDuration
+  refreshEvery: FiniteDuration,
+  refreshLock: Semaphore[IO]
 ):
   import OperationalStatsService.*
 
   private val cache: Ref[IO, Option[PeaksSnapshot]] = Ref.unsafe(None)
-  private val refreshLock: IO[Semaphore[IO]] = Semaphore[IO](1)
 
   def snapshot: IO[PublicStats] =
     for
@@ -76,9 +79,10 @@ class OperationalStatsService(
         case Some(s) if java.time.Duration.between(s.computedAt, now).toSeconds < refreshEvery.toSeconds =>
           IO.pure(s)
         case _ =>
-          refreshLock.flatMap(_.permit.use(_ => refreshIfNeeded(now)))
-      live = liveStrip(now)
-    yield buildStats(result, live, now)
+          refreshLock.permit.use(_ => refreshIfNeeded(now))
+      sampledAt <- IO(Instant.now())
+      live = liveStrip(sampledAt)
+    yield buildStats(result, live, sampledAt)
 
   private def refreshIfNeeded(now: Instant): IO[PeaksSnapshot] =
     cache.get.flatMap {
@@ -99,11 +103,6 @@ class OperationalStatsService(
           computedAt = now
         )
         cache.set(Some(snap)) *> IO.pure(snap)
-    }.handleErrorWith { _ =>
-      cache.get.flatMap {
-        case Some(s) => IO.pure(s)
-        case None    => IO.raiseError(RuntimeException("peak query failed and no cached value"))
-      }
     }
 
   private def liveStrip(now: Instant): Option[LiveStrip] =
@@ -113,7 +112,7 @@ class OperationalStatsService(
       Instant.ofEpochSecond(ts).toString
     }
     val backpressure = metrics.backpressureActiveValue
-    Some(LiveStrip(rate, pending, lastSuccess, backpressure))
+    Option.when(metrics.publicReadingsFresh(now.toEpochMilli))(LiveStrip(rate, pending, lastSuccess, backpressure))
 
   private def buildStats(
     peaks: PeaksSnapshot,

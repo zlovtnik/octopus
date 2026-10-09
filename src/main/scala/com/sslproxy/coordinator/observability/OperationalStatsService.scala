@@ -52,6 +52,12 @@ final case class PublicStats(
   liveStrip: Option[LiveStrip]
 )
 
+/** Read side used by `PublicStatsRoutes`; kept as a trait so the HTTP ceiling
+  * can be tested without a live database or a real refresh path.
+  */
+trait PublicStatsSource:
+  def snapshot: IO[PublicStats]
+
 object OperationalStatsService:
   private val isoFormatter = DateTimeFormatter.ISO_INSTANT
 
@@ -69,7 +75,7 @@ class OperationalStatsService private (
   refreshEvery: FiniteDuration,
   cache: Ref[IO, Option[PeaksSnapshot]],
   refreshInFlight: Ref[IO, Boolean]
-):
+) extends PublicStatsSource:
   import OperationalStatsService.*
 
   /** Never fails on peaks lookup. Returns the last good snapshot when a refresh

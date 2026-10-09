@@ -78,6 +78,21 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
         }
       }
 
+  test("uncancelable snapshot hang still returns 200 with null peaks"):
+    val hanging = new PublicStatsSource:
+      // Never completes and ignores cancellation, like a stuck blocking call.
+      def snapshot = IO.uncancelable(_ => IO.never)
+    val routes = IO.pure(new PublicStatsRoutes(hanging, List("https://rclabs.uk")))
+    get(routes, uri"/public/stats", Some("https://rclabs.uk")).map { case (status, body, _) =>
+      assertEquals(status, Status.Ok)
+      val cursor = parse(body).toOption.map(_.hcursor)
+      assert(cursor.isDefined, s"invalid JSON: $body")
+      val c = cursor.get
+      assert(c.get[String]("asOf").toOption.nonEmpty)
+      assert(c.downField("peaksComputedAt").focus.exists(_.isNull))
+      assert(c.downField("liveStrip").focus.exists(_.isNull))
+    }
+
   test("database failure still returns 200 with null peaks and no cache"):
     val source = new PeaksSource:
       def peakRecordsDay = IO.raiseError(RuntimeException("private database details"))

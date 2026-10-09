@@ -263,7 +263,7 @@ Important gates:
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK defaults | Trace sampling policy; the Kustomize base uses `traceidratio` |
 | `OCTOPUS_PUBLIC_STATS_ENABLED` | `false` | Enables the public `/public/stats` JSON endpoint for the product site |
 | `OCTOPUS_PUBLIC_STATS_ALLOWED_ORIGINS` | `[]` | CORS allowlist for `/public/stats`; comma-separated origins |
-| `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `60` | Cache TTL for peak day/week DB aggregates |
+| `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `300` | Cache TTL for peak day/week DB aggregates |
 | `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
@@ -298,10 +298,12 @@ schemas, and ingestion evidence.
 | `/public/stats` | public read-only JSON: peak day/week from `ingestion_evidence` + live pipeline strip (requires `OCTOPUS_PUBLIC_STATS_ENABLED=true`) |
 
 Public stats use `Cache-Control: no-store`. Peak aggregates share one
-single-flight background refresh and a 60-second cache by default. Callers
+single-flight background refresh and a 300-second cache by default. Callers
 never block on the database: a request returns the last good snapshot (or null
 peaks before the first successful refresh) and a failed refresh keeps that
-snapshot instead of failing the route. The live strip reports the
+snapshot instead of failing the route. The handler also applies a hard
+two-second ceiling so a stuck peaks path cannot hang the socket; on timeout it
+returns null peaks and a null live strip rather than hanging. The live strip reports the
 responding process's scheduled ingest-ledger processor, not all incoming streams.
 Its rate counts every processed batch over a full five-minute window, including
 isolated batches and idle time. It stays null for the first five minutes after

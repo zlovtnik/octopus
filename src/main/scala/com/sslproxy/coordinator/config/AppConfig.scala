@@ -122,7 +122,7 @@ final case class HttpConfig(
 final case class PublicStatsConfig(
   enabled: Boolean = false,
   allowedOrigins: List[String] = Nil,
-  peaksRefreshSeconds: Int = 60,
+  peaksRefreshSeconds: Int = 300,
   rateWindowSeconds: Int = 300
 ) derives ConfigReader
 

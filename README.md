@@ -297,9 +297,11 @@ schemas, and ingestion evidence.
 | `/actuator/prometheus` | compatibility alias for metrics |
 | `/public/stats` | public read-only JSON: peak day/week from `ingestion_evidence` + live pipeline strip (requires `OCTOPUS_PUBLIC_STATS_ENABLED=true`) |
 
-Public stats use `Cache-Control: no-store`. Peak aggregates share one refresh
-lock and a 60-second cache by default; a failed refresh returns sanitized 503
-JSON rather than republishing expired history. The live strip reports the
+Public stats use `Cache-Control: no-store`. Peak aggregates share one
+single-flight background refresh and a 60-second cache by default. Callers
+never block on the database: a request returns the last good snapshot (or null
+peaks before the first successful refresh) and a failed refresh keeps that
+snapshot instead of failing the route. The live strip reports the
 responding process's scheduled ingest-ledger processor, not all incoming streams.
 Its rate counts every processed batch over a full five-minute window, including
 isolated batches and idle time. It stays null for the first five minutes after

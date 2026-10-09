@@ -28,8 +28,20 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
       response.bodyText.compile.string.map(body => (response.status, body, response.headers))
     }
 
+  private def run(r: PublicStatsRoutes, path: Uri, origin: Option[String] = None): IO[(Status, String, Headers)] =
+    val headers = origin.map(o => Headers(Header.Raw(CIString("Origin"), o))).getOrElse(Headers.empty)
+    r.routes.orNotFound.run(Request[IO](Method.GET, path, headers = headers)).flatMap { response =>
+      response.bodyText.compile.string.map(body => (response.status, body, response.headers))
+    }
+
+  private def getWhenPeaksReady(r: PublicStatsRoutes, path: Uri): IO[(Status, String, Headers)] =
+    run(r, path).flatMap { case (status, body, headers) =>
+      if body.contains("\"peaksComputedAt\":null") then IO.sleep(20.millis) *> getWhenPeaksReady(r, path)
+      else IO.pure((status, body, headers))
+    }
+
   test("GET /public/stats returns stats JSON with expected fields"):
-    get(routes(), uri"/public/stats").map { case (status, body, _) =>
+    routes().flatMap(r => getWhenPeaksReady(r, uri"/public/stats")).map { case (status, body, _) =>
       assertEquals(status, Status.Ok)
       val cursor = parse(body).toOption.map(_.hcursor)
       assert(cursor.isDefined, s"invalid JSON: $body")
@@ -66,15 +78,20 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
         }
       }
 
-  test("database failure returns sanitized unavailable JSON and no cache"):
+  test("database failure still returns 200 with null peaks and no cache"):
     val source = new PeaksSource:
       def peakRecordsDay = IO.raiseError(RuntimeException("private database details"))
-      def peakRecordsWeek = IO.pure(None)
+      def peakRecordsWeek = IO.raiseError(RuntimeException("private database details"))
     val failed = OperationalStatsService.create(source, CoordinatorMetrics(), 60.seconds)
       .map(service => new PublicStatsRoutes(service, List("https://rclabs.uk")))
     get(failed, uri"/public/stats", Some("https://rclabs.uk")).map { case (status, body, headers) =>
-      assertEquals(status, Status.ServiceUnavailable)
-      assertEquals(body, "{\"error\":\"Metrics unavailable\"}")
+      assertEquals(status, Status.Ok)
+      val cursor = parse(body).toOption.map(_.hcursor)
+      assert(cursor.isDefined, s"invalid JSON: $body")
+      val c = cursor.get
+      assert(c.get[String]("asOf").toOption.nonEmpty)
+      assert(c.get[Long]("peakRecordsDay").toOption.isEmpty)
+      assert(c.downField("peaksComputedAt").focus.exists(_.isNull))
       assert(headers.get(CIString("Cache-Control")).map(_.head.value).contains("no-store"))
       assert(headers.get(CIString("Access-Control-Allow-Origin")).nonEmpty)
     }

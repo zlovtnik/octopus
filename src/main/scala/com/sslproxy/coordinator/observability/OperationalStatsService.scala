@@ -1,7 +1,6 @@
 package com.sslproxy.coordinator.observability
 
 import cats.effect.{IO, Ref}
-import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.postgres.PostgresRepository
 
@@ -59,42 +58,54 @@ object OperationalStatsService:
   def toIso(instant: Instant): String = isoFormatter.format(instant)
 
   def create(peaks: PeaksSource, metrics: CoordinatorMetrics, refreshEvery: FiniteDuration): IO[OperationalStatsService] =
-    Semaphore[IO](1).map(lock => new OperationalStatsService(peaks, metrics, refreshEvery, lock))
+    for
+      cache <- Ref.of[IO, Option[PeaksSnapshot]](None)
+      refreshInFlight <- Ref.of[IO, Boolean](false)
+    yield new OperationalStatsService(peaks, metrics, refreshEvery, cache, refreshInFlight)
 
 class OperationalStatsService private (
   peaks: PeaksSource,
   metrics: CoordinatorMetrics,
   refreshEvery: FiniteDuration,
-  refreshLock: Semaphore[IO]
+  cache: Ref[IO, Option[PeaksSnapshot]],
+  refreshInFlight: Ref[IO, Boolean]
 ):
   import OperationalStatsService.*
 
-  private val cache: Ref[IO, Option[PeaksSnapshot]] = Ref.unsafe(None)
-
+  /** Never fails on peaks lookup. Returns the last good snapshot when a refresh
+    * is pending or has just failed; peak fields are null only before the first
+    * successful refresh.
+    */
   def snapshot: IO[PublicStats] =
     for
       cached <- cache.get
       now <- IO(Instant.now())
-      result <- cached match
-        case Some(s) if java.time.Duration.between(s.computedAt, now).toSeconds < refreshEvery.toSeconds =>
-          IO.pure(s)
-        case _ =>
-          refreshLock.permit.use(_ => refreshIfNeeded(now))
+      _ <- startRefreshIfStale(cached, now)
       sampledAt <- IO(Instant.now())
       live = liveStrip(sampledAt)
-    yield buildStats(result, live, sampledAt)
+    yield buildStats(cached, live, sampledAt)
 
-  private def refreshIfNeeded(now: Instant): IO[PeaksSnapshot] =
-    cache.get.flatMap {
-      case Some(s) if java.time.Duration.between(s.computedAt, now).toSeconds < refreshEvery.toSeconds =>
-        IO.pure(s)
-      case _ => refresh(now)
+  private def isStale(snap: Option[PeaksSnapshot], now: Instant): Boolean =
+    snap.forall(s => java.time.Duration.between(s.computedAt, now).toSeconds >= refreshEvery.toSeconds)
+
+  private def startRefreshIfStale(cached: Option[PeaksSnapshot], now: Instant): IO[Unit] =
+    IO.whenA(isStale(cached, now)) {
+      refreshInFlight
+        .modify {
+          case true  => (true, false)
+          case false => (true, true)
+        }
+        .flatMap { shouldStart =>
+          IO.whenA(shouldStart) {
+            refresh(now).guarantee(refreshInFlight.set(false)).start.void
+          }
+        }
     }
 
-  private def refresh(now: Instant): IO[PeaksSnapshot] =
-    (peaks.peakRecordsDay, peaks.peakRecordsWeek).parTupled.flatMap {
-      case (day, week) =>
-        val snap = PeaksSnapshot(
+  private def refresh(now: Instant): IO[Unit] =
+    (peaks.peakRecordsDay, peaks.peakRecordsWeek).parTupled
+      .map { case (day, week) =>
+        PeaksSnapshot(
           peakRecordsDay = day.map(_._1),
           peakRecordsDayDate = day.map(_._2),
           peakRecordsWeek = week.map(_._1),
@@ -102,8 +113,10 @@ class OperationalStatsService private (
           peakRecordsWeekEnd = week.map(_._3),
           computedAt = now
         )
-        cache.set(Some(snap)) *> IO.pure(snap)
-    }
+      }
+      .flatMap(snap => cache.set(Some(snap)))
+      // Keep the previous snapshot (if any) when the database is slow or down.
+      .handleErrorWith(_ => IO.unit)
 
   private def liveStrip(now: Instant): Option[LiveStrip] =
     val rate = metrics.ingestProcessedRatePerSec(now.toEpochMilli)
@@ -115,17 +128,17 @@ class OperationalStatsService private (
     Option.when(metrics.publicReadingsFresh(now.toEpochMilli))(LiveStrip(rate, pending, lastSuccess, backpressure))
 
   private def buildStats(
-    peaks: PeaksSnapshot,
+    peaks: Option[PeaksSnapshot],
     live: Option[LiveStrip],
     now: Instant
   ): PublicStats =
     PublicStats(
       asOf = toIso(now),
-      peaksComputedAt = Some(toIso(peaks.computedAt)),
-      peakRecordsDay = peaks.peakRecordsDay,
-      peakRecordsDayDate = peaks.peakRecordsDayDate,
-      peakRecordsWeek = peaks.peakRecordsWeek,
-      peakRecordsWeekStart = peaks.peakRecordsWeekStart,
-      peakRecordsWeekEnd = peaks.peakRecordsWeekEnd,
+      peaksComputedAt = peaks.map(s => toIso(s.computedAt)),
+      peakRecordsDay = peaks.flatMap(_.peakRecordsDay),
+      peakRecordsDayDate = peaks.flatMap(_.peakRecordsDayDate),
+      peakRecordsWeek = peaks.flatMap(_.peakRecordsWeek),
+      peakRecordsWeekStart = peaks.flatMap(_.peakRecordsWeekStart),
+      peakRecordsWeekEnd = peaks.flatMap(_.peakRecordsWeekEnd),
       liveStrip = live
     )

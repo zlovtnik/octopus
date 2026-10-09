@@ -10,8 +10,14 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
     def peakRecordsDay = IO.pure(Some((100L, "2026-10-07")))
     def peakRecordsWeek = IO.pure(Some((200L, "2026-10-05", "2026-10-11")))
 
+  private def awaitPeaks(service: OperationalStatsService): IO[PublicStats] =
+    service.snapshot.flatMap { s =>
+      if s.peaksComputedAt.isDefined then IO.pure(s)
+      else IO.sleep(20.millis) *> awaitPeaks(service)
+    }
+
   test("snapshot returns measured peaks and no unobserved process defaults"):
-    OperationalStatsService.create(stubPeaks, CoordinatorMetrics(), 60.seconds).flatMap(_.snapshot).map { s =>
+    OperationalStatsService.create(stubPeaks, CoordinatorMetrics(), 60.seconds).flatMap(awaitPeaks).map { s =>
       assertEquals(s.peakRecordsDay, Some(100L))
       assertEquals(s.peakRecordsWeek, Some(200L))
       assertEquals(s.liveStrip, None)
@@ -27,26 +33,46 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
         def peakRecordsDay = IO(calls.incrementAndGet()) *> entered.complete(()).void *> release.get.as(Some((100L, "2026-10-07")))
         def peakRecordsWeek = IO.pure(Some((200L, "2026-10-05", "2026-10-11")))
       service <- OperationalStatsService.create(source, CoordinatorMetrics(), 60.seconds)
-      _ <- service.snapshot.background.use { first =>
-        entered.get *> List.fill(8)(service.snapshot).parSequence.background.use { others =>
-          release.complete(()) *> first.flatMap(_.embedNever) *> others.flatMap(_.embedNever).void
-        }
-      }.guarantee(release.complete(()).void)
-    yield assertEquals(calls.get(), 1)
+      first <- service.snapshot
+      _ <- entered.get
+      others <- List.fill(8)(service.snapshot).parSequence
+      _ <- release.complete(())
+      filled <- awaitPeaks(service)
+    yield
+      assertEquals(first.peakRecordsDay, None)
+      assert(others.forall(_.peakRecordsDay.isEmpty))
+      assertEquals(filled.peakRecordsDay, Some(100L))
+      assertEquals(calls.get(), 1)
 
-  test("expired peaks are never republished after a database failure"):
+  test("refresh failure serves the last good snapshot instead of raising"):
     val failNow = new java.util.concurrent.atomic.AtomicBoolean(false)
     val source = new PeaksSource:
       def peakRecordsDay = IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsDay)
-      def peakRecordsWeek = stubPeaks.peakRecordsWeek
+      def peakRecordsWeek = IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsWeek)
     for
       service <- OperationalStatsService.create(source, CoordinatorMetrics(), 0.seconds)
-      first <- service.snapshot
+      first <- awaitPeaks(service)
       _ = failNow.set(true)
-      second <- service.snapshot.attempt
+      _ <- IO.sleep(50.millis)
+      second <- service.snapshot
     yield
       assertEquals(first.peakRecordsDay, Some(100L))
-      assert(second.isLeft)
+      assertEquals(second.peakRecordsDay, Some(100L))
+      assertEquals(second.peakRecordsWeek, Some(200L))
+      assert(second.peaksComputedAt.nonEmpty)
+
+  test("first snapshot with a database failure returns null peaks without raising"):
+    val source = new PeaksSource:
+      def peakRecordsDay = IO.raiseError(RuntimeException("db down"))
+      def peakRecordsWeek = IO.raiseError(RuntimeException("db down"))
+    for
+      service <- OperationalStatsService.create(source, CoordinatorMetrics(), 60.seconds)
+      s <- service.snapshot
+    yield
+      assertEquals(s.peakRecordsDay, None)
+      assertEquals(s.peakRecordsDayDate, None)
+      assertEquals(s.peakRecordsWeek, None)
+      assertEquals(s.peaksComputedAt, None)
 
   test("live strip uses fresh observations after the five-minute window warms up"):
     val now = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() - 301_000L)
@@ -56,7 +82,7 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
     metrics.recordBackpressureActive(true)
     metrics.recordIngestInvocation(success = true)
     metrics.recordIngestProcessed(300)
-    OperationalStatsService.create(stubPeaks, metrics, 60.seconds).flatMap(_.snapshot).map { s =>
+    OperationalStatsService.create(stubPeaks, metrics, 60.seconds).flatMap(awaitPeaks).map { s =>
       assertEquals(s.liveStrip.map(_.pendingLedgerCount), Some(42L))
       assertEquals(s.liveStrip.map(_.ingestProcessedRatePerSec), Some(1.0))
       assert(s.liveStrip.exists(_.backpressureActive))

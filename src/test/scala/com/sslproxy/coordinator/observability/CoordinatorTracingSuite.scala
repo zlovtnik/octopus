@@ -28,6 +28,16 @@ class CoordinatorTracingSuite extends CatsEffectSuite:
       })
     }
 
+  test("span works before the SDK resource is acquired (no-op tracer)") {
+    // Regression: class init must not call GlobalOpenTelemetry.get(), which
+    // claims the singleton and makes setResultAsGlobal abort startup.
+    CoordinatorTracing.span("test.noop", SpanKind.INTERNAL)(IO.unit).as(())
+  }
+
+  test("tracing resource acquires without claiming GlobalOpenTelemetry") {
+    CoordinatorTracing.resource.use(_ => IO.unit)
+  }
+
   test("span records typed attributes and ends successfully") {
     withInMemorySdk { exporter =>
       CoordinatorTracing.span(

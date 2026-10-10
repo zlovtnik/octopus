@@ -5,7 +5,7 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator
 import io.opentelemetry.api.trace.{SpanKind, StatusCode, Tracer}
-import io.opentelemetry.api.{GlobalOpenTelemetry, OpenTelemetry}
+import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.context.Context
 import io.opentelemetry.context.propagation.TextMapGetter
 import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk
@@ -20,7 +20,9 @@ import java.util.concurrent.atomic.AtomicReference
 
 object CoordinatorTracing:
   private val InstrumentationName = "com.sslproxy.octopus"
-  private val otelRef = new AtomicReference[OpenTelemetry](GlobalOpenTelemetry.get())
+  // Must not touch GlobalOpenTelemetry here: .get() claims the singleton and
+  // then AutoConfiguredOpenTelemetrySdk.setResultAsGlobal() fails at runtime.
+  private val otelRef = new AtomicReference[OpenTelemetry](OpenTelemetry.noop())
   private val UntracedPaths = Set("/live", "/metrics", "/actuator/prometheus")
 
   enum Attr:
@@ -32,9 +34,11 @@ object CoordinatorTracing:
   val resource: Resource[IO, Unit] =
     Resource.make {
       IO.blocking {
+        // Keep the SDK in otelRef rather than GlobalOpenTelemetry so class-init
+        // order or a library that already called GlobalOpenTelemetry.get()
+        // cannot abort startup.
         val sdk = AutoConfiguredOpenTelemetrySdk
           .builder()
-          .setResultAsGlobal()
           .build()
           .getOpenTelemetrySdk
         otelRef.set(sdk)

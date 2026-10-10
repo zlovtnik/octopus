@@ -14,8 +14,8 @@ private[coordinator] object CoordinatorApplication:
   private val log = StructuredLogger(getClass)
 
   def resource(
-      cfg: AppConfig,
-      metrics: CoordinatorMetrics
+    cfg: AppConfig,
+    metrics: CoordinatorMetrics
   ): Resource[IO, Fiber[IO, Throwable, Unit]] =
     for
       _ <- ObservabilityModule.tracingResource
@@ -23,21 +23,41 @@ private[coordinator] object CoordinatorApplication:
       enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
       runtimeConsumerIds = RuntimeStreams.runtimeConsumerProcessorIds(cfg.runtime)
       kafka <- KafkaComponents.resource(cfg.kafka)
-      services <- Resource.eval(ServicesModule.build(
-        cfg, db, metrics, runtimeConsumerIds, kafka.producer
-      ))
+      services <- Resource.eval(
+        ServicesModule.build(
+          cfg,
+          db,
+          metrics,
+          runtimeConsumerIds,
+          kafka.producer
+        )
+      )
       retentionWorkloads <- RetentionWorkloads.resource(
-        cfg, db.maintenanceStore, services.maintenanceOwnerId,
-        services.leaseTtlSeconds, enabledProcessorIds
+        cfg,
+        db.maintenanceStore,
+        services.maintenanceOwnerId,
+        services.leaseTtlSeconds,
+        enabledProcessorIds
       )
       _ <- ServerModule.resource(
-        cfg.http, cfg.publicStats, db.transactor, metrics, services.supervisor.readiness,
-        services.statsService, cfg.postgres.connectionTimeoutMs.millis
+        cfg.http,
+        cfg.publicStats,
+        db.transactor,
+        metrics,
+        services.supervisor.readiness,
+        services.statsService,
+        cfg.postgres.connectionTimeoutMs.millis
       )
       workloads = ConsumerWorkloads.build(
-        cfg, db, metrics, services.backpressureService, kafka.producer
+        cfg,
+        db,
+        metrics,
+        services.backpressureService,
+        kafka.producer
       ) ++ ScheduledWorkloads.build(
-        cfg, services.cronScheduler, services.searchRetentionProcessor,
+        cfg,
+        services.cronScheduler,
+        services.searchRetentionProcessor,
         cfg.archive.maintenanceIntervalMs.millis
       ) ++ retentionWorkloads
       _ <- Resource.eval(IO {
@@ -54,7 +74,11 @@ private[coordinator] object CoordinatorApplication:
         )
       })
       streams = RuntimeStreams.assemble(
-        cfg, db, metrics, services, workloads, enabledProcessorIds, runtimeConsumerIds
+        cfg,
+        services,
+        workloads,
+        enabledProcessorIds,
+        runtimeConsumerIds
       )
       fiber <- Resource.make(
         db.repository.ensureAllCursors(cfg.ingest.streamNames, db.dbSemaphore) *>

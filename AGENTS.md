@@ -19,35 +19,24 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
 - `cron/` and `dispatch/` own periodic ingest/batch/dispatch and outbox
   publication. `archive/` owns MinIO payload archival. `http/` owns health
   and metrics. `observability/` owns logs, Micrometer, and OTLP.
+- Snapshot materialization lives in sibling `../octopus-metrics/`; the internal
+  `/internal/metrics/live` route supplies only in-process live readings.
 - `src/test/scala/` includes MUnit, MUnit Cats Effect, Cucumber glue in `bdd/`,
   `DocumentationContractSuite`, and `FeatureContractSuite`; features are one per `ProcessorFamily`.
 
 ## Guardrails
-- Own durable ingestion, leases, outbox, and maintained projections. Do not
-  move PostgreSQL wiring into the Rust proxy, sensor, or shared crates.
-- Atheros Search is a separate PostgreSQL client for search/vectors; keep
-  that grant boundary.
-- Preserve locked topics `sync.scan.request`, `sync.oracle.load`, and
-  `sync.oracle.result`. Keep `proxy.payload_audit` and wireless operational
-  topics retry-safe with DLQ parking for poison.
+- Keep `proxy.payload_audit` and wireless operational topics retry-safe with
+  DLQ parking for poison.
 - `OCTOPUS_CONSUMERS_ENABLED` unions `ProcessorId.kafkaConsumers` into the
   enabled set. Do not assume every running consumer ID is listed in
   `OCTOPUS_ENABLED_PROCESSORS`.
-- Canonical DDL is `sql/postgres/` only. Octopus verifies manifest checksums
-  and must not apply DDL at runtime.
-- Keep cursor advancement, batch leasing, dispatch, backlog, and result
-  handling idempotent under at-least-once delivery.
 - Every Octopus-owned `ProcessorId` needs a tagged scenario in its family feature; `FeatureContractSuite` rejects missing, unknown, and Atheros Search-owned tags.
 - Do not lower `coverage-policy.json` floors for `persistence`, `processor`, `postgres`, `dispatch`, or `config` without explicit justification and a fresh Docker-enabled report.
-- Do not commit sbt caches, IDE state, `.omx/` output, or generated local
-  runtime files.
 
 ## Commands
-- Run tests from this directory: `sbt test`.
 - Build: `sbt assembly`.
 - Coverage: `sbt jacoco`; inspect `target/scala-3.3.8/jacoco/report/html/index.html`.
 - BDD only: `sbt "testOnly com.sslproxy.coordinator.bdd.RunCucumberTest"`.
-- Root broad test target also runs coordinator tests: `make test`.
 
 ## Verification
 - Run focused sbt tests for changed packages when practical, then

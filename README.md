@@ -278,17 +278,6 @@ Important gates:
 | `OCTOPUS_PUBLIC_STATS_ALLOWED_ORIGINS` | `[]` | CORS allowlist for `/public/stats`; comma-separated origins |
 | `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `300` | Cache TTL for peak day/week DB aggregates |
 | `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
-| `OCTOPUS_STATS_PUBLISH_ENABLED` | `false` | Enables the metrics materializer worker pool that writes Redis/MinIO snapshots |
-| `OCTOPUS_STATS_WORKER_COUNT` | `3` | Metric worker pool size |
-| `OCTOPUS_STATS_PUBLISH_INTERVAL_SECONDS` | `30` | Snapshot publish cadence |
-| `OCTOPUS_STATS_PEAKS_INTERVAL_SECONDS` | `300` | Peaks and lifetime totals refresh cadence |
-| `OCTOPUS_STATS_HISTORY_INTERVAL_SECONDS` | `60` | Hourly throughput bucket refresh cadence |
-| `OCTOPUS_STATS_LIVE_INTERVAL_SECONDS` | `15` | Live-strip sample cadence |
-| `OCTOPUS_STATS_JOB_TIMEOUT_SECONDS` | `60` | Per-job timeout; a stuck job never blocks other workers |
-| `REDIS_ADDR` | `ssl-proxy-redis-runtime:6379` | Redis endpoint for the hot public stats snapshot |
-| `REDIS_PASSWORD` | empty | Redis AUTH password from the `redis-runtime` secret |
-| `MINIO_STATS_BUCKET` | `ssl-proxy-stats` | MinIO bucket for stats snapshots and history |
-| `MINIO_STATS_PREFIX` | `stats/` | Object key prefix inside the stats bucket |
 
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
@@ -319,7 +308,8 @@ schemas, and ingestion evidence.
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
 | `/actuator/prometheus` | compatibility alias for metrics |
-| `/public/stats` | internal diagnostic JSON (peaks + live strip). The public gateway path is served by `services/stats-reader` from precomputed Redis/MinIO snapshots |
+| `/public/stats` | diagnostic JSON (peaks + live strip). The gateway still routes here until the reviewed stats-reader cutover |
+| `/internal/metrics/live` | read-only in-process telemetry for the dedicated C++ metrics service; no database or store I/O |
 
 Public stats on this process use `Cache-Control: no-store`. Peak aggregates share one
 single-flight background refresh and a 300-second cache by default. Callers
@@ -329,26 +319,18 @@ snapshot instead of failing the route. The handler also applies a hard
 two-second ceiling so a stuck peaks path cannot hang the socket; on timeout it
 returns null peaks and a null live strip rather than hanging.
 
-When `OCTOPUS_STATS_PUBLISH_ENABLED=true`, a separate metrics materializer
-worker pool computes peaks, lifetime totals, hourly throughput, and the live
-strip on a timer, then publishes a JSON snapshot to Redis (`stats:current:v2`)
-and MinIO (`stats/latest.json` plus history objects). The materializer is not a
-`ProcessorId` and never affects `/ready`. The public website is served by
-`services/stats-reader`, which only reads those precomputed store objects.
+Snapshot materialization is now owned by the dedicated
+[C++ metrics service](../octopus-metrics/README.md). The Scala metrics worker,
+snapshot caches, store clients, repository interpreter, and publishing
+configuration have been removed. MinIO archival remains in this coordinator.
+The C++ service is independent of `ProcessorId` and coordinator `/ready`.
 
-[MetricsRepository](src/main/scala/com/sslproxy/coordinator/metrics/MetricsRepository.scala)
-has a [JDBC interpreter](src/main/scala/com/sslproxy/coordinator/postgres/PostgresMetricsRepository.scala)
-that reuses the managed Hikari pool and database worker permits. All JDBC work,
-including acquisition and cleanup, runs through `PostgresTransactor.withTransaction`
-on `IO.blocking`, with `POSTGRES_STATEMENT_TIMEOUT_SECS` and
-`POSTGRES_NETWORK_TIMEOUT_SECS` enforced for each read. There are no immediate
-query retries; the next scheduled refresh retries a failed measurement.
-Peaks, lifetime totals, and the two throughput windows update independently.
-Failures retain last-good values and original measurement timestamps; failures
-before the first measurement remain JSON null. A successful empty ledger yields
-zero lifetime counts and zero-filled hourly buckets. History covers 24 or 168
-complete UTC hours with an exclusive upper bound. Cached history expires when
-that window changes, so failed reads cannot invent zero activity in a new hour.
+[LiveMetricsRoutes](src/main/scala/com/sslproxy/coordinator/http/LiveMetricsRoutes.scala)
+exposes `asOf` and `liveStrip` without querying PostgreSQL or Redis/MinIO.
+The route is internal, has `Cache-Control: no-store`, and preserves the
+five-minute rate window and sixty-second observation freshness gates. Cold,
+stale, or invalid readings return a null live strip. Keep this route off the
+public gateway. The existing diagnostic `/public/stats` contract is preserved.
 
 The stats-reader rollout still requires a reviewed image digest and inclusion
 in the environment app-stack slices before switching the public gateway route;

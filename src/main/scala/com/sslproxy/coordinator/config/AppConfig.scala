@@ -35,9 +35,7 @@ final case class AppConfig(
   runtime: RuntimeConfig,
   processors: ProcessorConfig,
   archive: ArchiveConfig,
-  publicStats: PublicStatsConfig = PublicStatsConfig(),
-  statsStore: StatsStoreConfig = StatsStoreConfig(),
-  statsMaterializer: StatsMaterializerConfig = StatsMaterializerConfig()
+  publicStats: PublicStatsConfig = PublicStatsConfig()
 ) derives ConfigReader
 
 final case class PostgresConfig(
@@ -126,29 +124,6 @@ final case class PublicStatsConfig(
   allowedOrigins: List[String] = Nil,
   peaksRefreshSeconds: Int = 300,
   rateWindowSeconds: Int = 300
-) derives ConfigReader
-
-final case class StatsStoreConfig(
-  redisAddr: String = "ssl-proxy-redis-runtime:6379",
-  redisPassword: String = "",
-  redisKey: String = "stats:current:v2",
-  redisTtlSeconds: Int = 180,
-  minioEndpoint: String = "http://ssl-proxy-minio-api:9000",
-  minioAccessKey: String = "",
-  minioSecretKey: String = "",
-  minioRegion: String = "us-east-1",
-  minioBucket: String = "ssl-proxy-stats",
-  minioPrefix: String = "stats/"
-) derives ConfigReader
-
-final case class StatsMaterializerConfig(
-  enabled: Boolean = false,
-  workerCount: Int = 3,
-  publishIntervalSeconds: Int = 30,
-  peaksIntervalSeconds: Int = 300,
-  historyIntervalSeconds: Int = 60,
-  liveIntervalSeconds: Int = 15,
-  jobTimeoutSeconds: Int = 60
 ) derives ConfigReader
 
 final case class SyncConfig(
@@ -265,8 +240,6 @@ object AppConfig:
         cronErrors(config.cron) ++
         httpErrors(config.http) ++
         publicStatsErrors(config.publicStats) ++
-        statsMaterializerErrors(config.statsMaterializer) ++
-        statsStoreErrors(config.statsStore) ++
         postgresBoundErrors(config.postgres) ++
         stagedPostgresErrors ++
         runtimeErrors
@@ -435,41 +408,6 @@ object AppConfig:
       ),
       Option.when(config.rateWindowSeconds <= 0)(
         "public-stats.rate-window-seconds must be positive"
-      )
-    ).flatten
-
-  private def statsMaterializerErrors(config: StatsMaterializerConfig): List[String] =
-    List(
-      Option.when(config.workerCount <= 0)(
-        "stats-materializer.worker-count must be positive"
-      ),
-      Option.when(config.publishIntervalSeconds <= 0)(
-        "stats-materializer.publish-interval-seconds must be positive"
-      ),
-      Option.when(config.peaksIntervalSeconds <= 0)(
-        "stats-materializer.peaks-interval-seconds must be positive"
-      ),
-      Option.when(config.historyIntervalSeconds <= 0)(
-        "stats-materializer.history-interval-seconds must be positive"
-      ),
-      Option.when(config.liveIntervalSeconds <= 0)(
-        "stats-materializer.live-interval-seconds must be positive"
-      ),
-      Option.when(config.jobTimeoutSeconds <= 0)(
-        "stats-materializer.job-timeout-seconds must be positive"
-      )
-    ).flatten
-
-  private def statsStoreErrors(config: StatsStoreConfig): List[String] =
-    List(
-      Option.when(config.redisKey.trim.isEmpty)(
-        "stats-store.redis-key must not be empty"
-      ),
-      Option.when(config.redisTtlSeconds <= 0)(
-        "stats-store.redis-ttl-seconds must be positive"
-      ),
-      Option.when(config.minioBucket.trim.isEmpty)(
-        "stats-store.minio-bucket must not be empty"
       )
     ).flatten
 

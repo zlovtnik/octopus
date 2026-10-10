@@ -172,6 +172,54 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
     assert(!metrics.backpressureActiveValue)
   }
 
+  test("broker commits report processing while the scheduled ledger is empty") {
+    var now = 1000L
+    val metrics = testMetrics(() => now)
+    metrics.recordIngestProcessed(0)
+    metrics.recordBrokerRecordsCommitted(300)
+    metrics.recordBrokerRecordsCommitted(300)
+    metrics.recordBrokerRecordsCommitted(0)
+    metrics.recordBrokerRecordsCommitted(-1)
+    now = 151000L
+    metrics.recordBrokerRecordsCommitted(300)
+    assertEquals(metrics.ingestProcessedRatePerSec(now), 0.0)
+    assertEquals(metrics.brokerProcessedRatePerSec(now), 3.0)
+    assert(metrics.scrape.contains("coordinator_broker_records_committed_total 900.0"))
+    now = 301000L
+    assertEquals(metrics.brokerProcessedRatePerSec(now), 1.0)
+    now = 451000L
+    assertEquals(metrics.brokerProcessedRatePerSec(now), 0.0)
+  }
+
+  test("broker lag sums fresh partitions and stays separate from ledger backlog") {
+    var now = 1000L
+    val metrics = testMetrics(() => now)
+    def sample(group: String, partition: String, value: Double): Unit =
+      val name = new MetricName("records-lag", "consumer-fetch-manager-metrics", "lag",
+        java.util.Map.of("topic", "wireless.audit", "partition", partition))
+      val metric = new Metric:
+        def metricName(): MetricName = name
+        def metricValue(): Object = java.lang.Double.valueOf(value)
+      metrics.recordKafkaMetrics(group, Map(name -> metric))
+    assertEquals(metrics.brokerLagCountValue(now), None)
+    metrics.recordPendingLedgerCount(0)
+    sample("audit", "0", 42.0)
+    sample("scan", "1", 3.0)
+    assertEquals(metrics.brokerLagCountValue(now), Some(45L))
+    assertEquals(metrics.pendingLedgerCountValue, 0L)
+    now += 60000L
+    assertEquals(metrics.brokerLagCountValue(now), Some(45L))
+    now += 1L
+    assertEquals(metrics.brokerLagCountValue(now), None)
+    sample("audit", "0", 0.0)
+    metrics.clearKafkaMetrics("scan")
+    assertEquals(metrics.brokerLagCountValue(now), Some(0L))
+    sample("audit", "0", -1.0)
+    assertEquals(metrics.brokerLagCountValue(now), None)
+    metrics.clearKafkaMetrics("audit")
+    assertEquals(metrics.brokerLagCountValue(now), None)
+  }
+
   test("route state gauges are exported with role and route labels") {
     val metrics = testMetrics()
     metrics.recordRouteState("sync", "sync-scan-ingestion", running = true, suspended = false)

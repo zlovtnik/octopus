@@ -328,13 +328,22 @@ The C++ service is independent of `ProcessorId` and coordinator `/ready`.
 [LiveMetricsRoutes](src/main/scala/com/sslproxy/coordinator/http/LiveMetricsRoutes.scala)
 exposes `asOf` and `liveStrip` without querying PostgreSQL or Redis/MinIO.
 The route is internal, has `Cache-Control: no-store`, and preserves the
-five-minute rate window and sixty-second observation freshness gates. Cold,
+five-minute rate window and sixty-second observation freshness gates. The public
+`ingestProcessedRatePerSec` field counts broker records only after successful
+durable handling and offset commit, including scan/load/result and wireless
+consumers. Replays and parked records are committed deliveries, not distinct
+evidence rows. The scheduled ledger counter remains separate on `/metrics`.
+`pendingLedgerCount` counts pending/processing ledger rows; optional
+`brokerLagCount` sums fresh consumer fetch-position lag across this process's
+groups and partitions, excluding already-fetched records. Missing, stale or
+invalid lag is null, and these readings are not a fleet sum. Cold,
 stale, or invalid readings return a null live strip. Keep this route off the
 public gateway. The existing diagnostic `/public/stats` contract is preserved.
 
-The stats-reader rollout still requires a reviewed image digest and inclusion
-in the environment app-stack slices before switching the public gateway route;
-see the [stats-reader rollout notes](../stats-reader/README.md).
+The production app-stack includes stats-reader and routes the public gateway to
+its stored snapshots. The C++ materializer still requires its provisioned
+read-only account, store credentials and reviewed image promotion; see the
+[metrics activation notes](../octopus-metrics/README.md#kubernetes-mapping).
 
 Processor metrics include a one-hot lifecycle gauge per processor, the current
 persisted restart count, and supervised retry counters. Existing ingestion,

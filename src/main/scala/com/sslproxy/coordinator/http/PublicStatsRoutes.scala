@@ -64,6 +64,7 @@ class PublicStatsRoutes(
       Json.obj(
         "ingestProcessedRatePerSec" -> Json.fromDoubleOrNull(ls.ingestProcessedRatePerSec),
         "pendingLedgerCount" -> Json.fromLong(ls.pendingLedgerCount),
+        "brokerLagCount" -> ls.brokerLagCount.fold(Json.Null)(Json.fromLong),
         "lastIngestSuccessAt" -> ls.lastIngestSuccessAt.fold(Json.Null)(Json.fromString),
         "backpressureActive" -> Json.fromBoolean(ls.backpressureActive)
       )

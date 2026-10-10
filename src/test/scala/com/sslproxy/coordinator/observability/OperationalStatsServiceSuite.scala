@@ -81,7 +81,8 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
     metrics.recordPendingLedgerCount(42)
     metrics.recordBackpressureActive(true)
     metrics.recordIngestInvocation(success = true)
-    metrics.recordIngestProcessed(300)
+    metrics.recordIngestProcessed(0)
+    metrics.recordBrokerRecordsCommitted(300)
     OperationalStatsService.create(stubPeaks, metrics, 60.seconds).flatMap(awaitPeaks).map { s =>
       assertEquals(s.liveStrip.map(_.pendingLedgerCount), Some(42L))
       assertEquals(s.liveStrip.map(_.ingestProcessedRatePerSec), Some(1.0))

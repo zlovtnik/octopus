@@ -171,7 +171,8 @@ private[kafka] object LockedTopicConsumer:
         (process(prepared.flatten) *>
           CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit).attempt.timed.flatMap {
           case (duration, Right(_)) =>
-            IO(metrics.recordLockedBatchDuration(expectedTopic, "success", duration))
+            IO(metrics.recordLockedBatchDuration(expectedTopic, "success", duration)) *>
+              IO(metrics.recordBrokerRecordsCommitted(committables.size.toLong))
           case (duration, Left(error)) =>
             IO(metrics.recordLockedBatchDuration(expectedTopic, "error", duration)) *>
               IO.raiseError(error)

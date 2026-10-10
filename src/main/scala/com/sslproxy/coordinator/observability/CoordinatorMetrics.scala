@@ -105,6 +105,8 @@ class CoordinatorMetrics(
 
   private val processedSamples: java.util.concurrent.atomic.AtomicReference[Vector[(Long, Long)]] =
     java.util.concurrent.atomic.AtomicReference(Vector.empty)
+  private val brokerProcessedSamples: java.util.concurrent.atomic.AtomicReference[Vector[(Long, Long)]] =
+    java.util.concurrent.atomic.AtomicReference(Vector.empty)
 
   private val routeRunningGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val routeSuspendedGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
@@ -135,6 +137,11 @@ class CoordinatorMetrics(
   private val ingestProcessedCounter: Counter = Counter
     .builder("coordinator.ingest.processed")
     .description("Total events processed by ingest ledger")
+    .register(registry)
+
+  private val brokerCommittedCounter: Counter = Counter
+    .builder("coordinator.broker.records.committed")
+    .description("Total broker records durably handled and successfully committed")
     .register(registry)
 
   private val ingestDeduplicatedCounter: Counter = Counter
@@ -226,6 +233,44 @@ class CoordinatorMetrics(
     processedSamples.get().iterator
       .filter { case (at, _) => at <= nowMs && nowMs - at < 300_000L }
       .map(_._2.toDouble).sum / 300.0
+
+  // The scheduled ledger pass can be empty while locked consumers persist
+  // scan/load/result or wireless records directly. Count only successful
+  // broker commits, separately from the scheduled ledger counter.
+  def recordBrokerRecordsCommitted(count: Long): Unit =
+    if count > 0 then
+      val now = nowMillis()
+      brokerCommittedCounter.increment(count.toDouble)
+      brokerProcessedSamples.updateAndGet { samples =>
+        val recent = samples.filter(s => now - s._1 < 300_000L)
+        // Coalesce commits in the same second to bound the five-minute window.
+        val second = now / 1000L * 1000L
+        if recent.exists(_._1 == second) then
+          recent.map { case (at, records) => (at, if at == second then records + count else records) }
+        else recent :+ (second -> count)
+      }: Unit
+      processedObservedAt.set(now)
+
+  def brokerProcessedRatePerSec(nowMs: Long): Double =
+    brokerProcessedSamples.get().iterator
+      .filter { case (at, _) => at <= nowMs && nowMs - at < 300_000L }
+      .map(_._2.toDouble).sum / 300.0
+
+  // Fetch-position lag excludes records already fetched, including in-flight
+  // batches. Keep it separate from the durable pending/processing ledger.
+  def brokerLagCountValue(nowMs: Long): Option[Long] = synchronized {
+    val samples = kafkaGauges.iterator.collect {
+      case ((group, "coordinator.redpanda.consumer.lag.records", topic, partition), (value, _)) =>
+        val observedAt = Option(lagSampleAt.get((group, topic, partition))).map(_.get())
+        (value.get().doubleValue(), observedAt)
+    }.toList
+    Option.when(samples.nonEmpty && samples.forall { case (value, observedAt) =>
+      value >= 0 && value < Long.MaxValue.toDouble && value == math.floor(value) &&
+        observedAt.exists(at => at <= nowMs && nowMs - at <= 60_000L)
+    }) {
+      samples.map { case (value, _) => BigInt(value.toLong) }.sum
+    }.filter(_.isValidLong).map(_.toLong)
+  }
 
   def publicReadingsFresh(nowMs: Long): Boolean =
     def fresh(at: Long): Boolean = at > 0 && nowMs >= at && nowMs - at <= 60_000L

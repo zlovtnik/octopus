@@ -31,7 +31,8 @@ class LiveMetricsRoutesSuite extends CatsEffectSuite:
     var millis = start.toEpochMilli
     val metrics = CoordinatorMetrics.withClock(() => millis)
     millis += 301000L
-    metrics.recordIngestProcessed(600L)
+    metrics.recordIngestProcessed(0L)
+    metrics.recordBrokerRecordsCommitted(600L)
     metrics.recordPendingLedgerCount(9L)
     metrics.recordBackpressureActive(true)
     metrics.recordIngestInvocation(success = true)
@@ -41,6 +42,7 @@ class LiveMetricsRoutesSuite extends CatsEffectSuite:
       val live = json.hcursor.downField("liveStrip")
       assertEquals(live.get[Double]("ingestProcessedRatePerSec"), Right(2.0))
       assertEquals(live.get[Long]("pendingLedgerCount"), Right(9L))
+      assert(live.downField("brokerLagCount").focus.exists(_.isNull))
       assertEquals(live.get[Boolean]("backpressureActive"), Right(true))
       assertEquals(live.get[String]("lastIngestSuccessAt"), Right(at.toString))
     }

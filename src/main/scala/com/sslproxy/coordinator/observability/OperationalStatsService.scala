@@ -38,7 +38,8 @@ final case class LiveStrip(
   ingestProcessedRatePerSec: Double,
   pendingLedgerCount: Long,
   lastIngestSuccessAt: Option[String],
-  backpressureActive: Boolean
+  backpressureActive: Boolean,
+  brokerLagCount: Option[Long] = None
 )
 
 final case class PublicStats(
@@ -125,13 +126,15 @@ class OperationalStatsService private (
       .handleErrorWith(_ => IO.unit)
 
   private def liveStrip(now: Instant): Option[LiveStrip] =
-    val rate = metrics.ingestProcessedRatePerSec(now.toEpochMilli)
+    val rate = metrics.brokerProcessedRatePerSec(now.toEpochMilli)
     val pending = metrics.pendingLedgerCountValue
     val lastSuccess = metrics.ingestLastSuccessEpochSeconds.map { ts =>
       Instant.ofEpochSecond(ts).toString
     }
     val backpressure = metrics.backpressureActiveValue
-    Option.when(metrics.publicReadingsFresh(now.toEpochMilli))(LiveStrip(rate, pending, lastSuccess, backpressure))
+    Option.when(metrics.publicReadingsFresh(now.toEpochMilli))(
+      LiveStrip(rate, pending, lastSuccess, backpressure, metrics.brokerLagCountValue(now.toEpochMilli))
+    )
 
   private def buildStats(
     peaks: Option[PeaksSnapshot],

@@ -194,14 +194,26 @@ the configured batch byte limit, and partition fetch max is at most 1 MiB.
 Kafka may exceed fetch limits for its first oversized record batch, so these are
 not hard broker-allocation limits.
 
-The metrics endpoint exports Micrometer JVM memory (heap/non-heap including
-metaspace), buffer pool memory (`id="direct"`), and GC pause timers. Timer
-series appear after a collection. Consumer metrics are sampled every 10 seconds
-with a 5-second timeout: `coordinator_kafka_partition_lag_value` reports native
-Kafka fetch-position lag, tagged by group/topic/partition, and
-`coordinator_kafka_rebalances_value` reports the client rebalance total.
-Fetch-position lag is not durable committed-offset lag. Revoked-partition
-series are removed on the next sample; stopping the consumer removes its series.
+The metrics endpoint (`GET /metrics`, alias `GET /actuator/prometheus`) serves
+Prometheus text exposition format 0.0.4 from `PrometheusMeterRegistry`
+(`Content-Type: text/plain; version=0.0.4; charset=utf-8`). It includes Micrometer
+JVM memory (heap/non-heap including metaspace), buffer pool memory, and GC
+timers. Consumer metrics are sampled every 10 seconds with a 5-second timeout:
+`coordinator_redpanda_consumer_lag_records` reports native Kafka fetch-position
+lag (group/topic/partition), `coordinator_redpanda_lag_stale_seconds` reports
+sample age, `coordinator_redpanda_lag_refresh_failures_total` counts sampler
+failures, and `coordinator_kafka_rebalances_total` reports the client rebalance
+total. Fetch-position lag is not durable committed-offset lag.
+Revoked-partition series are removed on the next sample; stopping the consumer
+removes its series.
+
+Operational counters include `coordinator_ingest_processed_total`,
+`coordinator_ingest_deduplicated_total`, `coordinator_tick_failures_total`,
+`coordinator_lease_claims_total`, `coordinator_route_running` /
+`coordinator_route_suspended`, and latency histograms
+`coordinator_postgres_query_duration_seconds` and
+`coordinator_locked_batch_duration_seconds`. Structured logs carry `trace_id`
+and `span_id` whenever a span is active so log lines join Jaeger traces.
 
 ### Read-only timeout incident procedure
 

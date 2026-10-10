@@ -52,7 +52,6 @@ val http4sVersion = "0.23.34"
 val postgresJdbcVersion = "42.7.7"
 
 val hikariCpVersion = "6.2.1"
-val log4CatsVersion = "2.8.0"
 val slf4jVersion = "2.0.18"
 val pureconfigVersion = "0.17.8"
 val micrometerVersion = "1.13.2"
@@ -90,13 +89,14 @@ lazy val root = (project in file("."))
       "org.postgresql" % "postgresql" % postgresJdbcVersion,
       "com.zaxxer" % "HikariCP" % hikariCpVersion,
       "io.micrometer" % "micrometer-core" % micrometerVersion,
+      "io.micrometer" % "micrometer-registry-prometheus" % micrometerVersion,
       "io.minio" % "minio" % minioVersion,
       "redis.clients" % "jedis" % jedisVersion,
       "com.squareup.okhttp3" % "okhttp-jvm" % "5.3.2",
       "io.opentelemetry" % "opentelemetry-sdk" % openTelemetryVersion,
       "io.opentelemetry" % "opentelemetry-exporter-otlp" % openTelemetryVersion,
       "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % openTelemetryVersion,
-      "org.typelevel" %% "log4cats-slf4j" % log4CatsVersion,
+      "io.opentelemetry" % "opentelemetry-sdk-testing" % openTelemetryVersion % Test,
       "ch.qos.logback" % "logback-classic" % "1.5.38",
       "net.logstash.logback" % "logstash-logback-encoder" % "9.0",
       "org.scalameta" %% "munit" % "1.3.4" % Test,

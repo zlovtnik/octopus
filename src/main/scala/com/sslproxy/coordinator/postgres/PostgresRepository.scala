@@ -41,7 +41,8 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] = None,
-  wirelessProjection: com.sslproxy.coordinator.config.WirelessProjectionConfig = com.sslproxy.coordinator.config.WirelessProjectionConfig()):
+  wirelessProjection: com.sslproxy.coordinator.config.WirelessProjectionConfig = com.sslproxy.coordinator.config.WirelessProjectionConfig(),
+  metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None):
   import PostgresRepository.{log, stableUuid}
 
   def projectWirelessRecord(event: com.sslproxy.coordinator.processor.WirelessObservation,
@@ -1208,19 +1209,31 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     val traced = CoordinatorTracing.span(
       operation,
       SpanKind.CLIENT,
-      "db.system" -> "postgresql",
-      "db.namespace" -> "octopus_core",
-      "db.operation.name" -> operation
+      "db.system" -> CoordinatorTracing.Attr.S("postgresql"),
+      "db.namespace" -> CoordinatorTracing.Attr.S("octopus_core"),
+      "db.operation.name" -> CoordinatorTracing.Attr.S(operation)
     ) {
       PostgresRepository.retryTransientWithPermit(operation, dbSemaphore)(fa.transact(xa))
     }
-    traced.map(Right(_)).handleError { cause =>
-      val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
-      log.error("db_error", cause, "operation" -> operation)
-      PostgresErrorClass.classify(cause) match
-        case PostgresErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, sanitized))
-        case PostgresErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, sanitized))
-    }
+    traced
+      .map(Right(_))
+      .handleError { cause =>
+        val sanitized = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
+        log.error("db_error", cause, "operation" -> operation)
+        PostgresErrorClass.classify(cause) match
+          case PostgresErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, sanitized))
+          case PostgresErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, sanitized))
+      }
+      .timed
+      .map { case (duration, result) =>
+        val outcome = result match
+          case Right(_) => "success"
+          case Left(error) => error match
+            case _: DatabaseError.Retryable => "retryable"
+            case _: DatabaseError.Permanent => "permanent"
+        metrics.foreach(_.recordPostgresQuery(operation, outcome, duration))
+        result
+      }
 
   private def parseTs(s: String): Option[java.sql.Timestamp] =
     try Some(java.sql.Timestamp.from(java.time.Instant.parse(s)))

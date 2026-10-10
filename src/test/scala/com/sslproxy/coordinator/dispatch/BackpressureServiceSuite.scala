@@ -4,7 +4,6 @@ import cats.effect.{Deferred, IO}
 import com.sslproxy.coordinator.config.BackpressureConfig
 import com.sslproxy.coordinator.domain.DatabaseError
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
 
 import scala.concurrent.duration.*
@@ -17,7 +16,7 @@ class BackpressureServiceSuite extends CatsEffectSuite:
     adaptivePullMinRestartIntervalMs = 10000
   )
   private val ingestBatchSize = 1000
-  private val metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+  private val metrics = CoordinatorMetrics()
 
   private def service(pending: IO[Either[DatabaseError, Long]]): IO[BackpressureService] =
     BackpressureService.create(cfg, ingestBatchSize, pending, metrics)

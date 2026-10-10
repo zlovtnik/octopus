@@ -11,6 +11,7 @@ import io.circe.parser.parse
 import munit.CatsEffectSuite
 import org.http4s.implicits.*
 import org.http4s.{Method, Request, Status, Uri}
+import org.typelevel.ci.CIString
 
 import scala.concurrent.duration.*
 
@@ -54,6 +55,12 @@ class HealthRoutesSuite extends CatsEffectSuite:
   private def get(routes: HealthRoutes, path: Uri): IO[(Status, String)] =
     routes.routes.orNotFound.run(Request[IO](Method.GET, path)).flatMap { response =>
       response.bodyText.compile.string.map(response.status -> _)
+    }
+
+  private def getWithHeaders(routes: HealthRoutes, path: Uri): IO[(Status, String, String)] =
+    routes.routes.orNotFound.run(Request[IO](Method.GET, path)).flatMap { response =>
+      val contentType = response.headers.get(CIString("content-type")).map(_.head.value).getOrElse("")
+      response.bodyText.compile.string.map(body => (response.status, body, contentType))
     }
 
   test("completed database health checks remain healthy"):
@@ -117,9 +124,12 @@ class HealthRoutesSuite extends CatsEffectSuite:
     metrics.recordIngestProcessed(3)
     routes(metrics = metrics).use { healthRoutes =>
       List(uri"/metrics", uri"/actuator/prometheus").traverse { path =>
-        get(healthRoutes, path).map { case (status, body) =>
+        getWithHeaders(healthRoutes, path).map { case (status, body, contentType) =>
           assertEquals(status, Status.Ok)
-          assert(body.contains("coordinator_ingest_processed_total_count 3.0"), body)
+          assert(body.contains("coordinator_ingest_processed_total"), body)
+          assert(!body.contains("coordinator_ingest_processed_total_count"), body)
+          assert(contentType.contains("text/plain"), contentType)
+          assert(contentType.contains("version=0.0.4"), contentType)
         }
       }
     }

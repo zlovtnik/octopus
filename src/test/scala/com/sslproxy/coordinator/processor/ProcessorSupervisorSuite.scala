@@ -45,10 +45,15 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
       _ <- ProcessorSupervisor.create(config, RecordingProcessorStateStore(events), Some(metrics))
       scrape = metrics.scrape
     yield
-      assert(scrape.contains("coordinator_processor_lifecycle_value"))
+      assert(scrape.contains("coordinator_processor_lifecycle"))
+      assert(!scrape.contains("coordinator_processor_lifecycle_value"))
       assert(scrape.contains(s"processor=\"${ProcessorId.EventRetention.value}\""))
       assert(scrape.contains("state=\"disabled\""))
-      assert(scrape.contains("coordinator_processor_restart_count_value"))
+      assert(scrape.contains("coordinator_processor_restart_count"))
+      assert(scrape.contains("coordinator_route_running"))
+      assert(scrape.contains("coordinator_route_suspended"))
+      assert(scrape.contains("role=\"maintenance\""))
+      assert(scrape.contains(s"route=\"${ProcessorId.EventRetention.value}\""))
   }
 
   test("enabled externally owned processors are included in readiness") {

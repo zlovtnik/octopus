@@ -97,6 +97,9 @@ object ScanRequestStream:
             _ <- IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
             )
+            _ <- IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
+              IO(metrics.recordIngestDeduplicated())
+            )
             _ <- IO(
               log.info(
                 "scan_request_consumer",

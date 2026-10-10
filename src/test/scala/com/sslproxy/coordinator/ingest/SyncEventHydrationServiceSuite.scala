@@ -12,7 +12,6 @@ import com.sslproxy.coordinator.domain.{
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DbResultT, IngestionStore}
 import com.sslproxy.coordinator.postgres.{HydrationCursor, PostgresPayloadResolver, SyncEventHydrationCandidate}
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import munit.CatsEffectSuite
 
 import java.nio.file.Files
@@ -34,7 +33,7 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
         )
       }
       store = new FailingHydrationStore(candidates, calls)
-      metrics = new CoordinatorMetrics(SimpleMeterRegistry())
+      metrics = CoordinatorMetrics()
       service = new SyncEventHydrationService(
         store,
         new PostgresPayloadResolver("/unused"),
@@ -66,7 +65,7 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
           service = new SyncEventHydrationService(
             store,
             new PostgresPayloadResolver(directory.toString),
-            new CoordinatorMetrics(SimpleMeterRegistry()),
+            CoordinatorMetrics(),
             pageSize = 10,
             failureThreshold = 2,
             semaphore

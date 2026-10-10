@@ -28,7 +28,9 @@ final class CronScheduler private (
   loopCounter: Ref[IO, Long],
   workRunner: FencedWorkRunner[IO]
 ):
-  import CronScheduler.log
+  import CronScheduler.{jobFor, log}
+
+  private def recordTickFailure(job: String): IO[Unit] = IO(metrics.recordTickFailure(job))
 
   val schemaRefresher: Stream[IO, Unit] =
     Stream.awakeEvery[IO](cfg.schemaRefreshIntervalSeconds.seconds).evalMap { _ =>
@@ -231,6 +233,7 @@ final class CronScheduler private (
         .void
         .handleErrorWith { error =>
           IO(log.error("cron_fenced_tick", error, "status" -> "failed", "processor" -> processorId.value)) *>
+            recordTickFailure(jobFor(processorId)) *>
             IO.raiseError(error)
         }
     }
@@ -240,7 +243,8 @@ final class CronScheduler private (
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
         backpressureService.checkAndAct.void.handleErrorWith { err =>
-          IO(log.error("cron_backpressure", err, "status" -> "failed"))
+          IO(log.error("cron_backpressure", err, "status" -> "failed")) *>
+            recordTickFailure("maintenance")
         }
       }
 
@@ -249,7 +253,8 @@ final class CronScheduler private (
       .evalMap { _ =>
         (metrics.heartbeat() >> IO(metrics.incrementLoopCounter()) >> loopCounter.update(_ + 1))
           .handleErrorWith { err =>
-            IO(log.error("cron_metrics", err, "status" -> "failed"))
+            IO(log.error("cron_metrics", err, "status" -> "failed")) *>
+              recordTickFailure("heartbeat")
           }
       }
 
@@ -279,6 +284,7 @@ final class CronScheduler private (
                 "restart_delay_ms" -> delay.toMillis.toString
               )
             ) *>
+              recordTickFailure(CronScheduler.jobForEvent(event)) *>
               IO.sleep(delay).as(Some(((), consecutiveFailures + 1)))
         }
       }
@@ -335,6 +341,7 @@ final class CronScheduler private (
                   )
                 ) *>
                   IO(metrics.recordIngestInvocation(false)) *>
+                  recordTickFailure("ingest") *>
                   IO.raiseError(databaseFailure(err))
 
               case Right(processed) =>
@@ -352,6 +359,7 @@ final class CronScheduler private (
         IO(
           log.error("outbox_lease_recovery", "status" -> "failed", "operation" -> err.operation, "error" -> err.message)
         ) *>
+          recordTickFailure("recover") *>
           IO.raiseError(databaseFailure(err))
       case Right(count) =>
         IO.whenA(count > 0)(
@@ -373,6 +381,7 @@ final class CronScheduler private (
       projectionStore.generateRfAlerts(cfg.ingestBatchSize).value.flatMap {
         case Left(err) =>
           IO(log.error("shadow_audit", "status" -> "failed", "operation" -> err.operation, "error" -> err.message)) *>
+            recordTickFailure("maintenance") *>
             IO.raiseError(databaseFailure(err))
 
         case Right(Nil) =>
@@ -390,6 +399,22 @@ final class CronScheduler private (
 
 object CronScheduler:
   private val log = StructuredLogger(getClass)
+
+  private[cron] def jobFor(processorId: ProcessorId): String =
+    processorId match
+      case ProcessorId.SyncJobPlanner => "ingest"
+      case ProcessorId.SyncBacklogRecovery => "recover"
+      case ProcessorId.SyncLoadDispatch | ProcessorId.SyncOutboxPublisher => "dispatch"
+      case ProcessorId.SyncScanIngestion | ProcessorId.SyncLoadConsumer | ProcessorId.SyncResultConsumer => "ingest"
+      case _ => "maintenance"
+
+  private[cron] def jobForEvent(event: String): String =
+    event match
+      case "cron_ingest" | "ingest_ledger" => "ingest"
+      case "cron_recovery" | "outbox_lease_recovery" => "recover"
+      case "cron_load_dispatch" | "cron_dispatch" => "dispatch"
+      case "cron_metrics" | "heartbeat" => "heartbeat"
+      case _ => "maintenance"
   private val VerificationRetryMaxAttempts = 5
   private val VerificationRetryMaxDelay = 5.minutes
   private val MaxRestartDelay = 5.minutes
@@ -421,7 +446,7 @@ object CronScheduler:
       metrics,
       verifyCanonicalManifest,
       loopCounter,
-      new FencedWorkRunner(maintenanceStore, ownerId)
+      new FencedWorkRunner(maintenanceStore, ownerId, Some(metrics))
     )
 
   private[cron] def drainBatch(

@@ -36,5 +36,9 @@ private[coordinator] object ServerModule:
     EmberServerBuilder.default[IO]
       .withPort(httpPort)
       .withHost(host"0.0.0.0")
-      .withHttpApp((healthRoutes.routes <+> publicStatsRoutes).orNotFound)
+      .withHttpApp(
+        com.sslproxy.coordinator.observability.CoordinatorTracing
+          .serverMiddleware(healthRoutes.routes <+> publicStatsRoutes)
+          .orNotFound
+      )
       .build

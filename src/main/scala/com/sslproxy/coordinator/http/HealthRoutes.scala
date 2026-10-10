@@ -6,9 +6,10 @@ import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.postgres.PostgresTransactor
 import com.sslproxy.coordinator.processor.ProcessorReadiness
 import io.circe.Json
-import org.http4s.HttpRoutes
+import org.http4s.{Header, HttpRoutes, Response, Status}
 import org.http4s.circe.*
 import org.http4s.dsl.io.*
+import org.typelevel.ci.*
 
 import scala.concurrent.duration.*
 
@@ -18,6 +19,8 @@ class HealthRoutes(
   processorReadiness: Option[ProcessorReadiness] = None,
   databaseCheckTimeout: FiniteDuration = 5.seconds
 ):
+  private val prometheusContentType =
+    Header.Raw(ci"Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
   private def readinessResponse: IO[org.http4s.Response[IO]] =
     (
@@ -40,6 +43,13 @@ class HealthRoutes(
       else ServiceUnavailable(json)
     }
 
+  private def metricsResponse: IO[Response[IO]] =
+    IO {
+      Response[IO](Status.Ok)
+        .withEntity(metrics.scrape)
+        .withHeaders(prometheusContentType)
+    }
+
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case GET -> Root / "live" =>
       Ok(Json.obj("status" -> Json.fromString("UP")))
@@ -53,10 +63,10 @@ class HealthRoutes(
       readinessResponse
 
     case GET -> Root / "metrics" =>
-      Ok(metrics.scrape)
+      metricsResponse
 
     case GET -> Root / "actuator" / "prometheus" =>
-      Ok(metrics.scrape)
+      metricsResponse
   }
 
 object HealthRoutes:

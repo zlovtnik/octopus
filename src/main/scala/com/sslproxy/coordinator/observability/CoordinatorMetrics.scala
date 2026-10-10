@@ -2,20 +2,26 @@ package com.sslproxy.coordinator.observability
 
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.observability.StructuredLogger
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import io.micrometer.core.instrument.{Counter, Gauge, MeterRegistry}
+import io.micrometer.core.instrument.{Counter, Gauge, Meter, Timer}
 import io.micrometer.core.instrument.binder.jvm.{JvmGcMetrics, JvmMemoryMetrics}
+import io.micrometer.prometheusmetrics.{PrometheusConfig, PrometheusMeterRegistry}
 import org.apache.kafka.common.{Metric, MetricName}
 
-import java.util.concurrent.{ConcurrentHashMap, atomic}
-import scala.jdk.CollectionConverters.*
+import java.util.concurrent.{ConcurrentHashMap, TimeUnit, atomic}
+import scala.concurrent.duration.FiniteDuration
 
 import atomic.AtomicLong
 
-class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => Long = () => System.currentTimeMillis()):
+class CoordinatorMetrics(
+  private val registry: PrometheusMeterRegistry,
+  nowMillis: () => Long = () => System.currentTimeMillis()
+):
   import CoordinatorMetrics.{ProcessorLifecycleValues, log}
 
-  private val kafkaGauges = scala.collection.mutable.Map.empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], Gauge)]
+  private val kafkaGauges =
+    scala.collection.mutable.Map.empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], List[Meter])]
+  private val lagSampleAt =
+    ConcurrentHashMap[(String, String, String), AtomicLong]()
 
   def jvmMetrics: Resource[IO, Unit] =
     Resource.make(IO {
@@ -23,33 +29,67 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
       new JvmMemoryMetrics().bindTo(registry)
       gc.bindTo(registry)
       gc
-    })(gc => IO { gc.close(); registry.close() }).map(_ => ())
+    })(gc => IO(gc.close())).map(_ => ())
 
   def recordKafkaMetrics(group: String, values: Map[MetricName, Metric]): Unit = synchronized {
     val samples = values.iterator.flatMap { case (name, metric) =>
       val exported = name.name() match
-        case "records-lag" => Some("coordinator.kafka.partition.lag")
-        case "rebalance-total" => Some("coordinator.kafka.rebalances")
+        case "records-lag" => Some("coordinator.redpanda.consumer.lag.records")
+        case "rebalance-total" => Some("coordinator.kafka.rebalances.total")
         case _ => None
       exported.flatMap { metricName =>
         metric.metricValue() match
           case number: java.lang.Number if java.lang.Double.isFinite(number.doubleValue()) =>
-            Some((group, metricName, Option(name.tags().get("topic")).getOrElse(""),
-              Option(name.tags().get("partition")).getOrElse("")) -> number.doubleValue())
+            Some(
+              (group, metricName, Option(name.tags().get("topic")).getOrElse(""),
+                Option(name.tags().get("partition")).getOrElse("")) -> number.doubleValue()
+            )
           case _ => None
       }
     }.toMap
     kafkaGauges.keysIterator.filter(key => key._1 == group && !samples.contains(key)).toList.foreach { key =>
-      kafkaGauges.remove(key).foreach(value => registry.remove(value._2): Unit)
+      kafkaGauges.remove(key).foreach { case (_, meters) =>
+        meters.foreach(meter => registry.remove(meter): Unit)
+      }
+      if key._2 == "coordinator.redpanda.consumer.lag.records" then
+        lagSampleAt.remove((key._1, key._3, key._4)): Unit
     }
     samples.foreachEntry { (key, sample) =>
+      val (groupKey, metricName, topic, partition) = key
       val (holder, _) = kafkaGauges.getOrElseUpdate(key, {
         val value = new atomic.AtomicReference[java.lang.Double](sample)
-        val gauge = Gauge.builder(key._2, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
-          .tags("group", key._1, "topic", key._3, "partition", key._4).register(registry)
-        (value, gauge)
+        val tags = Array("group", groupKey, "topic", topic, "partition", partition)
+        if metricName == "coordinator.kafka.rebalances.total" then
+          val meter = Gauge
+            .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+            .tags(tags*)
+            .description("Cumulative Kafka consumer rebalance count")
+            .register(registry)
+          (value, List(meter))
+        else
+          val sampleAt = lagSampleAt.computeIfAbsent((groupKey, topic, partition), _ => new AtomicLong(nowMillis()))
+          val lagMeter = Gauge
+            .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+            .tags(tags*)
+            .description("Consumer fetch-position lag in records")
+            .register(registry)
+          val staleMeter = Gauge
+            .builder(
+              "coordinator.redpanda.lag.stale.seconds",
+              sampleAt,
+              (v: AtomicLong) =>
+                val at = v.get()
+                if at <= 0L then 0.0
+                else (nowMillis() - at).toDouble / 1000.0
+            )
+            .tags(tags*)
+            .description("Seconds since the last successful lag sample")
+            .register(registry)
+          (value, List(lagMeter, staleMeter))
       })
       holder.set(sample)
+      if metricName == "coordinator.redpanda.consumer.lag.records" then
+        lagSampleAt.computeIfAbsent((groupKey, topic, partition), _ => new AtomicLong(0L)).set(nowMillis())
     }
   }
 
@@ -71,50 +111,65 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
   private val processorLifecycleGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val processorRestartGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
   private val processorRetryCounters: ConcurrentHashMap[String, Counter] = ConcurrentHashMap()
+  private val tickFailureCounters: ConcurrentHashMap[String, Counter] = ConcurrentHashMap()
+  private val leaseClaimCounters: ConcurrentHashMap[String, Counter] = ConcurrentHashMap()
+  private val lagRefreshFailureCounters: ConcurrentHashMap[String, Counter] = ConcurrentHashMap()
 
   private val loopAttemptsCounter: Counter = Counter
-    .builder("coordinator.loop.attempts.total")
+    .builder("coordinator.loop.attempts")
     .description("Total main loop iterations")
     .register(registry)
 
-  private val ingestInvocationsCounter: Counter = Counter
-    .builder("coordinator.ingest.ledger.invocations.total")
+  private val ingestInvocationsSuccess: Counter = Counter
+    .builder("coordinator.ingest.ledger.invocations")
     .description("Total process_ingest_ledger invocations")
+    .tag("outcome", "success")
+    .register(registry)
+
+  private val ingestInvocationsFailure: Counter = Counter
+    .builder("coordinator.ingest.ledger.invocations")
+    .description("Total process_ingest_ledger invocations")
+    .tag("outcome", "failure")
     .register(registry)
 
   private val ingestProcessedCounter: Counter = Counter
-    .builder("coordinator.ingest.processed.total")
+    .builder("coordinator.ingest.processed")
     .description("Total events processed by ingest ledger")
     .register(registry)
 
+  private val ingestDeduplicatedCounter: Counter = Counter
+    .builder("coordinator.ingest.deduplicated")
+    .description("Total events skipped as durable-ledger duplicates")
+    .register(registry)
+
   private val batchesDispatchedCounter: Counter = Counter
-    .builder("coordinator.batches.dispatched.total")
+    .builder("coordinator.batches.dispatched")
     .description("Total batches dispatched")
     .register(registry)
 
   private val heartbeatCounter: Counter = Counter
-    .builder("coordinator.heartbeat.total")
+    .builder("coordinator.heartbeat")
     .description("Heartbeat counter")
     .register(registry)
 
   private val payloadAuditIngestedCounter: Counter = Counter
-    .builder("coordinator.payload.audit.ingested.total")
+    .builder("coordinator.payload.audit.ingested")
     .description("Total payload audit records ingested")
     .register(registry)
 
   private val payloadAuditDlqCounter: Counter = Counter
-    .builder("coordinator.payload.audit.dlq.total")
+    .builder("coordinator.payload.audit.dlq")
     .description("Total payload audit records sent to DLQ")
     .register(registry)
 
   private val syncEventsHydratedCounter: Counter = Counter
-    .builder("coordinator.sync.events.hydrated.total")
+    .builder("coordinator.sync.events.hydrated")
     .description("Total sync event payloads hydrated into the durable ledger")
     .register(registry)
 
   private val syncEventsBackfillFailedCounter: Counter =
     Counter
-      .builder("coordinator.sync.events.backfill.failed.total")
+      .builder("coordinator.sync.events.backfill.failed")
       .description("Total sync event payloads that failed historical hydration")
       .register(registry)
 
@@ -150,7 +205,7 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
     loopAttemptsCounter.increment()
 
   def recordIngestInvocation(success: Boolean): Unit =
-    ingestInvocationsCounter.increment()
+    if success then ingestInvocationsSuccess.increment() else ingestInvocationsFailure.increment()
     if success then ingestLastSuccessTimestamp.set(nowMillis() / 1000)
 
   def recordIngestProcessed(count: Long): Unit =
@@ -163,6 +218,9 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
     // Empty successful processing passes are observations too.
     processedObservedAt.set(now)
     ()
+
+  def recordIngestDeduplicated(count: Long = 1L): Unit =
+    if count > 0 then ingestDeduplicatedCounter.increment(count.toDouble)
 
   def ingestProcessedRatePerSec(nowMs: Long): Double =
     processedSamples.get().iterator
@@ -198,7 +256,62 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
     recordSyncEventHydrated(hydrated)
     if failed > 0 then syncEventsBackfillFailedCounter.increment(failed.toDouble)
 
-  def recordTickFailure(): Unit = ()
+  def recordTickFailure(job: String): Unit =
+    tickFailureCounters
+      .computeIfAbsent(
+        job,
+        _ =>
+          Counter
+            .builder("coordinator.tick.failures")
+            .tag("job", job)
+            .description("Total failed periodic coordinator jobs")
+            .register(registry)
+      )
+      .increment()
+
+  def recordLagRefreshFailure(group: String): Unit =
+    lagRefreshFailureCounters
+      .computeIfAbsent(
+        group,
+        _ =>
+          Counter
+            .builder("coordinator.redpanda.lag.refresh.failures")
+            .tag("consumer_group", group)
+            .description("Total failed Redpanda lag metric refreshes")
+            .register(registry)
+      )
+      .increment()
+
+  def recordLeaseClaim(result: String): Unit =
+    leaseClaimCounters
+      .computeIfAbsent(
+        result,
+        _ =>
+          Counter
+            .builder("coordinator.lease.claims")
+            .tag("result", result)
+            .description("Total processor lease claim attempts by outcome")
+            .register(registry)
+      )
+      .increment()
+
+  def recordPostgresQuery(operation: String, outcome: String, duration: FiniteDuration): Unit =
+    Timer
+      .builder("coordinator.postgres.query.duration")
+      .description("PostgreSQL durable operation duration")
+      .tags("operation", operation, "outcome", outcome)
+      .publishPercentileHistogram()
+      .register(registry)
+      .record(duration.toNanos, TimeUnit.NANOSECONDS)
+
+  def recordLockedBatchDuration(topic: String, outcome: String, duration: FiniteDuration): Unit =
+    Timer
+      .builder("coordinator.locked.batch.duration")
+      .description("Locked Kafka batch processing duration")
+      .tags("topic", topic, "outcome", outcome)
+      .publishPercentileHistogram()
+      .register(registry)
+      .record(duration.toNanos, TimeUnit.NANOSECONDS)
 
   def recordRouteState(role: String, routeId: String, running: Boolean, suspended: Boolean): Unit =
     val tagKey = s"$role:$routeId"
@@ -263,7 +376,7 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
         processorId,
         _ =>
           Counter
-            .builder("coordinator.processor.retries.total")
+            .builder("coordinator.processor.retries")
             .tag("processor", processorId)
             .description("Total supervised processor retries")
             .register(registry)
@@ -281,23 +394,7 @@ class CoordinatorMetrics(private val registry: MeterRegistry, nowMillis: () => L
         )
       )
 
-  def scrape: String =
-    registry.getMeters.asScala.toList
-      .flatMap { meter =>
-        val id = meter.getId
-        val baseName = id.getName.replace('.', '_').replace('-', '_')
-        val labels = id.getTags.asScala.toList
-          .map(tag => s"${tag.getKey}=\"${escapeLabel(tag.getValue)}\"")
-        val labelText = if labels.isEmpty then "" else labels.mkString("{", ",", "}")
-        meter.measure().asScala.map { measurement =>
-          val suffix = measurement.getStatistic.toString.toLowerCase(java.util.Locale.ROOT)
-          s"${baseName}_$suffix$labelText ${measurement.getValue}"
-        }
-      }
-      .mkString("", "\n", "\n")
-
-  private def escapeLabel(value: String): String =
-    value.replace("\\", "\\\\").replace("\n", "\\n").replace("\"", "\\\"")
+  def scrape: String = registry.scrape("text/plain;version=0.0.4;charset=utf-8")
 
 object CoordinatorMetrics:
   private val log = StructuredLogger(getClass)
@@ -309,4 +406,8 @@ object CoordinatorMetrics:
     "failed_terminal"
   )
 
-  def apply(): CoordinatorMetrics = new CoordinatorMetrics(new SimpleMeterRegistry())
+  def apply(): CoordinatorMetrics =
+    new CoordinatorMetrics(new PrometheusMeterRegistry(PrometheusConfig.DEFAULT))
+
+  def withClock(nowMillis: () => Long): CoordinatorMetrics =
+    new CoordinatorMetrics(new PrometheusMeterRegistry(PrometheusConfig.DEFAULT), nowMillis)

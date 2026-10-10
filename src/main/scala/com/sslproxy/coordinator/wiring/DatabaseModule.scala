@@ -32,7 +32,8 @@ private[coordinator] object DatabaseModule:
   def acquire(
       postgres: PostgresConfig,
       projection: WirelessProjectionConfig,
-      outboxDir: String
+      outboxDir: String,
+      metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None
   ): Resource[IO, DatabaseRuntime] =
     for
       blockingEc <- blockingExecutionContext(postgres.poolSize)
@@ -45,7 +46,7 @@ private[coordinator] object DatabaseModule:
         dbWorkerPermits(postgres.poolSize, postgres.healthcheckReserve)
       ))
     yield
-      val repository = new PostgresRepository(doobieTx, Some(dbSemaphore), projection)
+      val repository = new PostgresRepository(doobieTx, Some(dbSemaphore), projection, metrics)
       val payloadResolver = new PostgresPayloadResolver(outboxDir)
       val payloadLookup: String => IO[Option[String]] = sha =>
         IngestionSql.payloadBySha256(sha).unique.transact(doobieTx).attempt.map(_.toOption)

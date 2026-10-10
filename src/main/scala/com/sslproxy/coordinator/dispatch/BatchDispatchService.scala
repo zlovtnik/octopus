@@ -8,6 +8,7 @@ import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
 import io.opentelemetry.api.trace.SpanKind
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 /** Publishes the transactional PostgreSQL outbox. A broker acknowledgement followed
   * by a process crash can produce the same stable message key again; the
@@ -35,22 +36,25 @@ final class BatchDispatchService(
   }
 
   private def publish(record: OutboxRecord): IO[DispatchResult] =
-    val brokerRecord = ProducerRecord(
-      record.destinationTopic,
-      record.messageKey,
-      record.payload
-    )
-
     CoordinatorTracing
       .span(
         "kafka.publish.outbox",
         SpanKind.PRODUCER,
-        "messaging.system" -> "kafka",
-        "messaging.destination.name" -> record.destinationTopic,
-        "messaging.message.id" -> record.messageKey,
-        "outbox.fence" -> record.lease.fence.toString
+        "messaging.system" -> CoordinatorTracing.Attr.S("kafka"),
+        "messaging.destination.name" -> CoordinatorTracing.Attr.S(record.destinationTopic),
+        "messaging.message.id" -> CoordinatorTracing.Attr.S(record.messageKey),
+        "outbox.fence" -> CoordinatorTracing.Attr.L(record.lease.fence)
       ) {
-        producer.produce(ProducerRecords.one(brokerRecord)).flatten
+        IO {
+          val headers = new org.apache.kafka.common.header.internals.RecordHeaders()
+          CoordinatorTracing.injectCurrent(headers)
+          val fs2Headers = fs2.kafka.Headers.fromIterable(
+            headers.asScala.map(h => fs2.kafka.Header(h.key(), h.value())).toList
+          )
+          ProducerRecord(record.destinationTopic, record.messageKey, record.payload).withHeaders(fs2Headers)
+        }.flatMap { brokerRecord =>
+          producer.produce(ProducerRecords.one(brokerRecord)).flatten
+        }
       }
       .timeout((leaseSeconds.toLong * 900L).max(1L).millis)
       .attempt

@@ -4,6 +4,7 @@ import cats.effect.kernel.Async
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.DatabaseError
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, MaintenanceStore, orRaise}
 
 import java.util.UUID
@@ -12,7 +13,8 @@ import scala.concurrent.duration.*
 /** Executes one processor tick only while this runtime owns the persisted fence. */
 final class FencedWorkRunner[F[_]: Async](
   store: MaintenanceStore[F],
-  ownerId: String
+  ownerId: String,
+  metrics: Option[CoordinatorMetrics] = None
 ):
   private val ResourceType = "processor"
 
@@ -31,11 +33,19 @@ final class FencedWorkRunner[F[_]: Async](
           ttlSeconds
         )
         .orRaise
+        .attempt
         .flatMap {
-          case None => Async[F].pure(None)
-          case Some(lease) => runClaimed(processorId, lease, ttlSeconds, operation).map(Some(_))
+          case Left(error) =>
+            recordClaim("error") *> Async[F].raiseError(error)
+          case Right(None) =>
+            recordClaim("contended") *> Async[F].pure(None)
+          case Right(Some(lease)) =>
+            recordClaim("claimed") *> runClaimed(processorId, lease, ttlSeconds, operation).map(Some(_))
         }
     }
+
+  private def recordClaim(result: String): F[Unit] =
+    Async[F].delay(metrics.foreach(_.recordLeaseClaim(result)))
 
   private def runClaimed[A](
     processorId: ProcessorId,

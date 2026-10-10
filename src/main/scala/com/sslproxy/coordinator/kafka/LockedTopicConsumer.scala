@@ -23,6 +23,7 @@ import org.apache.kafka.common.TopicPartition
 
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 private[kafka] final case class LockedBrokerRecord[A](
   record: ConsumerRecord[String, String],
@@ -80,7 +81,8 @@ private[kafka] object LockedTopicConsumer:
                       cfg.dlqSuffix,
                       decode,
                       process,
-                      cfg.lockedBatchMaxBytes
+                      cfg.lockedBatchMaxBytes,
+                      metrics
                     ))
                 }
               // Partition streams live until revocation. Capping their join starves
@@ -91,8 +93,11 @@ private[kafka] object LockedTopicConsumer:
             val lag = Stream.repeatEval(
               consumer.metrics.flatMap(values => IO(metrics.recordKafkaMetrics(groupId, values)))
                 .timeout(5.seconds)
-                .handleErrorWith(error => IO(log.warn("consumer_metrics", "group" -> groupId,
-                  "error" -> ErrorSanitizer.message(error))))
+                .handleErrorWith { error =>
+                  IO(metrics.recordLagRefreshFailure(groupId)) *>
+                    IO(log.warn("consumer_metrics", "group" -> groupId,
+                      "error" -> ErrorSanitizer.message(error)))
+                }
             ).metered(10.seconds).onFinalize(IO(metrics.clearKafkaMetrics(groupId)))
             records.concurrently(assignments).concurrently(lag)
           }
@@ -120,10 +125,11 @@ private[kafka] object LockedTopicConsumer:
     dlqSuffix: String,
     decode: String => Either[Throwable, A],
     process: List[LockedBrokerRecord[A]] => IO[Unit],
-    maxBatchBytes: Int
+    maxBatchBytes: Int,
+    metrics: CoordinatorMetrics
   ): IO[Unit] =
     splitByBytes(committables, maxBatchBytes).traverse_(batch =>
-      processBoundedBatch(contract, groupId, expectedTopic, batch, producer, dlqSuffix, decode, process, maxBatchBytes)
+      processBoundedBatch(contract, groupId, expectedTopic, batch, producer, dlqSuffix, decode, process, maxBatchBytes, metrics)
     )
 
   private def processBoundedBatch[A](
@@ -135,7 +141,8 @@ private[kafka] object LockedTopicConsumer:
     dlqSuffix: String,
     decode: String => Either[Throwable, A],
     process: List[LockedBrokerRecord[A]] => IO[Unit],
-    maxBatchBytes: Int
+    maxBatchBytes: Int,
+    metrics: CoordinatorMetrics
   ): IO[Unit] =
     for
       prepared <- committables.traverse { committable =>
@@ -152,16 +159,23 @@ private[kafka] object LockedTopicConsumer:
             ).as(None)
         }
       }
-      _ <- CoordinatorTracing.span(
+      _ <- CoordinatorTracing.spanWithParent(
         "kafka.consume.durable_batch",
         SpanKind.CONSUMER,
-        "messaging.system" -> "kafka",
-        "messaging.destination.name" -> expectedTopic,
-        "messaging.consumer.group.name" -> groupId,
-        "messaging.batch.message_count" -> committables.size.toString
+        committables.headOption.map(record => CoordinatorTracing.extractParent(record.record.headers.asJava)),
+        "messaging.system" -> CoordinatorTracing.Attr.S("kafka"),
+        "messaging.destination.name" -> CoordinatorTracing.Attr.S(expectedTopic),
+        "messaging.consumer.group.name" -> CoordinatorTracing.Attr.S(groupId),
+        "messaging.batch.message_count" -> CoordinatorTracing.Attr.L(committables.size.toLong)
       ) {
-        process(prepared.flatten) *>
-          CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit
+        (process(prepared.flatten) *>
+          CommittableOffsetBatch.fromFoldable(committables.map(_.offset)).commit).attempt.timed.flatMap {
+          case (duration, Right(_)) =>
+            IO(metrics.recordLockedBatchDuration(expectedTopic, "success", duration))
+          case (duration, Left(error)) =>
+            IO(metrics.recordLockedBatchDuration(expectedTopic, "error", duration)) *>
+              IO.raiseError(error)
+        }
       }
     yield ()
 
@@ -270,10 +284,19 @@ private[kafka] object LockedTopicConsumer:
     CoordinatorTracing.span(
       "kafka.publish.dlq",
       SpanKind.PRODUCER,
-      "messaging.system" -> "kafka",
-      "messaging.destination.name" -> dlqTopic
+      "messaging.system" -> CoordinatorTracing.Attr.S("kafka"),
+      "messaging.destination.name" -> CoordinatorTracing.Attr.S(dlqTopic)
     ) {
-      producer.produce(ProducerRecords.one(ProducerRecord(dlqTopic, key, body))).flatten.void
+      IO {
+        val headers = new org.apache.kafka.common.header.internals.RecordHeaders()
+        CoordinatorTracing.injectCurrent(headers)
+        val fs2Headers = fs2.kafka.Headers.fromIterable(
+          headers.asScala.map(h => fs2.kafka.Header(h.key(), h.value())).toList
+        )
+        ProducerRecord(dlqTopic, key, body).withHeaders(fs2Headers)
+      }.flatMap { record =>
+        producer.produce(ProducerRecords.one(record)).flatten.void
+      }
     } *>
       IO(
         log.error(

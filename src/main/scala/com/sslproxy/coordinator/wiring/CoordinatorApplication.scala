@@ -19,7 +19,7 @@ private[coordinator] object CoordinatorApplication:
   ): Resource[IO, Fiber[IO, Throwable, Unit]] =
     for
       _ <- ObservabilityModule.tracingResource
-      db <- DatabaseModule.acquire(cfg.postgres, cfg.wireless.projection, cfg.sync.outboxDir)
+      db <- DatabaseModule.acquire(cfg.postgres, cfg.wireless.projection, cfg.sync.outboxDir, Some(metrics))
       enabledProcessorIds = cfg.processors.enabled.flatMap(ProcessorId.fromString(_).toOption).toSet
       runtimeConsumerIds = RuntimeStreams.runtimeConsumerProcessorIds(cfg.runtime)
       kafka <- KafkaComponents.resource(cfg.kafka)

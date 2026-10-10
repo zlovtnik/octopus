@@ -76,7 +76,7 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
 
   test("live strip uses fresh observations after the five-minute window warms up"):
     val now = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() - 301_000L)
-    val metrics = new CoordinatorMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), () => now.get())
+    val metrics = CoordinatorMetrics.withClock(() => now.get())
     now.set(System.currentTimeMillis())
     metrics.recordPendingLedgerCount(42)
     metrics.recordBackpressureActive(true)

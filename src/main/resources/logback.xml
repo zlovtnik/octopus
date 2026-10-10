@@ -9,6 +9,14 @@
       </fieldNames>
     </encoder>
   </appender>
+
+  <!-- Noisy libraries stay out of operational JSON unless LOG_LEVEL lowers them. -->
+  <logger name="doobie" level="WARN"/>
+  <logger name="org.apache.kafka" level="WARN"/>
+  <logger name="com.github.fd4s" level="WARN"/>
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+  <logger name="io.opentelemetry" level="INFO"/>
+
   <root level="${LOG_LEVEL:-INFO}">
     <appender-ref ref="STDOUT" />
   </root>

@@ -199,7 +199,17 @@ final class ProcessorSupervisor private (
     Clock[IO].realTimeInstant.flatMap { observedAt =>
       persist(stateStore.persist(id, status, observedAt)) *>
         statusesRef.update(_.updated(id, status)) *>
-        IO(metrics.foreach(_.recordProcessorState(id.value, lifecycle.value, restartCount)))
+        IO(
+          metrics.foreach { m =>
+            m.recordProcessorState(id.value, lifecycle.value, restartCount)
+            m.recordRouteState(
+              id.family.value,
+              id.value,
+              running = lifecycle == ProcessorLifecycle.Starting || lifecycle == ProcessorLifecycle.Ready,
+              suspended = lifecycle == ProcessorLifecycle.BackingOff
+            )
+          }
+        )
     }
 
   private def finishRun(
@@ -299,7 +309,17 @@ object ProcessorSupervisor:
       now <- Clock[IO].realTimeInstant
       _ <- initial.toList.traverse_ { case (id, status) =>
         supervisor.persist(stateStore.persist(id, status, now)) *>
-          IO(metrics.foreach(_.recordProcessorState(id.value, status.lifecycle.value, status.restartCount)))
+          IO(
+            metrics.foreach { m =>
+              m.recordProcessorState(id.value, status.lifecycle.value, status.restartCount)
+              m.recordRouteState(
+                id.family.value,
+                id.value,
+                running = status.lifecycle == ProcessorLifecycle.Starting || status.lifecycle == ProcessorLifecycle.Ready,
+                suspended = status.lifecycle == ProcessorLifecycle.BackingOff
+              )
+            }
+          )
       }
     yield supervisor
 

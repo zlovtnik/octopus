@@ -34,6 +34,9 @@ object WirelessHeartbeatStream:
           case Right(decision) =>
             IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
+            ) *>
+            IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
+              IO(metrics.recordIngestDeduplicated())
             ) *> IO(
               log.info(
                 "wireless_sensor_heartbeat",

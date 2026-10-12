@@ -30,7 +30,8 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
       entered <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       source = new PeaksSource:
-        def peakRecordsDay = IO(calls.incrementAndGet()) *> entered.complete(()).void *> release.get.as(Some((100L, "2026-10-07")))
+        def peakRecordsDay =
+          IO(calls.incrementAndGet()) *> entered.complete(()).void *> release.get.as(Some((100L, "2026-10-07")))
         def peakRecordsWeek = IO.pure(Some((200L, "2026-10-05", "2026-10-11")))
       service <- OperationalStatsService.create(source, CoordinatorMetrics(), 60.seconds)
       first <- service.snapshot
@@ -47,8 +48,10 @@ class OperationalStatsServiceSuite extends CatsEffectSuite:
   test("refresh failure serves the last good snapshot instead of raising"):
     val failNow = new java.util.concurrent.atomic.AtomicBoolean(false)
     val source = new PeaksSource:
-      def peakRecordsDay = IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsDay)
-      def peakRecordsWeek = IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsWeek)
+      def peakRecordsDay =
+        IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsDay)
+      def peakRecordsWeek =
+        IO.defer(if failNow.get() then IO.raiseError(RuntimeException("db down")) else stubPeaks.peakRecordsWeek)
     for
       service <- OperationalStatsService.create(source, CoordinatorMetrics(), 0.seconds)
       first <- awaitPeaks(service)

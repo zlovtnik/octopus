@@ -11,19 +11,18 @@ import scala.concurrent.duration.*
 
 private[coordinator] object RetentionWorkloads:
   private final case class EventRetentionRuntime(
-      processor: EventRetentionProcessor[IO],
-      initialize: IO[Unit]
+    processor: EventRetentionProcessor[IO],
+    initialize: IO[Unit]
   )
 
   def resource(
-      cfg: AppConfig,
-      maintenanceStore: PostgresMaintenanceStore,
-      maintenanceOwnerId: String,
-      leaseTtl: Int,
-      enabledProcessorIds: Set[ProcessorId]
+    cfg: AppConfig,
+    maintenanceStore: PostgresMaintenanceStore,
+    maintenanceOwnerId: String,
+    leaseTtl: Int,
+    enabledProcessorIds: Set[ProcessorId]
   ): Resource[IO, List[ProcessorWorkload]] =
-    if !enabledProcessorIds.contains(ProcessorId.EventRetention) then
-      Resource.pure[IO, List[ProcessorWorkload]](Nil)
+    if !enabledProcessorIds.contains(ProcessorId.EventRetention) then Resource.pure[IO, List[ProcessorWorkload]](Nil)
     else
       MinioPayloadArchive.resource(cfg.archive).map { archiveRuntime =>
         val archiver = new PayloadArchiver(
@@ -47,7 +46,8 @@ private[coordinator] object RetentionWorkloads:
         List(
           ProcessorWorkload(
             ProcessorId.EventRetention,
-            Stream.awakeEvery[IO](cfg.archive.maintenanceIntervalMs.millis)
+            Stream
+              .awakeEvery[IO](cfg.archive.maintenanceIntervalMs.millis)
               .evalMap(_ => runtime.processor.runOnce),
             startup = runtime.initialize
           )

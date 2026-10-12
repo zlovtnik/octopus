@@ -13,19 +13,22 @@ class StreamingPayloadRowsSuite extends FunSuite:
 
   test("client metadata after the array is merged into every row") {
     val payload = """{"clients":[{"sensor_id":"old","id":1},{"id":2}],"sensor_id":"parent","observed_at":"now"}"""
-    scala.util.Using.resource(StreamingPayloadRows.open(PostgresSinkTarget.WirelessClientInventory, payload, 1024)) { rows =>
-      val result = rows.toList
-      assertEquals(result.size, 2)
-      result.foreach { row =>
-        assertEquals(row.hcursor.get[String]("sensor_id"), Right("parent"))
-        assertEquals(row.hcursor.get[String]("snapshot_at"), Right("now"))
-      }
+    scala.util.Using.resource(StreamingPayloadRows.open(PostgresSinkTarget.WirelessClientInventory, payload, 1024)) {
+      rows =>
+        val result = rows.toList
+        assertEquals(result.size, 2)
+        result.foreach { row =>
+          assertEquals(row.hcursor.get[String]("sensor_id"), Right("parent"))
+          assertEquals(row.hcursor.get[String]("snapshot_at"), Right("now"))
+        }
     }
   }
 
   test("probe envelope ignores non-row fields") {
-    scala.util.Using.resource(StreamingPayloadRows.open(PostgresSinkTarget.WirelessProbeRequests,
-      """{"probes":[{"id":1}],"other":[1,2]}""", 1024)) { rows =>
+    scala.util.Using.resource(
+      StreamingPayloadRows
+        .open(PostgresSinkTarget.WirelessProbeRequests, """{"probes":[{"id":1}],"other":[1,2]}""", 1024)
+    ) { rows =>
       assertEquals(rows.toList, List(Json.obj("id" -> Json.fromInt(1))))
     }
   }

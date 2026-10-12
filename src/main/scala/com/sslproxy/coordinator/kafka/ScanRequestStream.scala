@@ -54,22 +54,24 @@ object ScanRequestStream:
         }
         // In projection-only mode wireless.audit owns durable processing. The
         // companion discovery request must not hydrate or persist its payload.
-        resolved <- configured.filterNot(locked => wirelessProjectionOnly && locked.decoded.streamName == "wireless.audit").traverse { locked =>
-          IO.blocking(payloadResolver.resolve(locked.decoded)).attempt.flatMap {
-            case Right(record) => IO.pure(Some((locked, locked.decoded, record)))
-            case Left(error) if isNonRetriableResolutionError(error) =>
-              LockedTopicConsumer
-                .parkNonRetriable(
-                  producer,
-                  cfg.scanTopic + cfg.dlqSuffix,
-                  cfg.scanConsumer,
-                  locked.record,
-                  error
-                )
-                .as(None)
-            case Left(error) => IO.raiseError(error)
+        resolved <- configured
+          .filterNot(locked => wirelessProjectionOnly && locked.decoded.streamName == "wireless.audit")
+          .traverse { locked =>
+            IO.blocking(payloadResolver.resolve(locked.decoded)).attempt.flatMap {
+              case Right(record) => IO.pure(Some((locked, locked.decoded, record)))
+              case Left(error) if isNonRetriableResolutionError(error) =>
+                LockedTopicConsumer
+                  .parkNonRetriable(
+                    producer,
+                    cfg.scanTopic + cfg.dlqSuffix,
+                    cfg.scanConsumer,
+                    locked.record,
+                    error
+                  )
+                  .as(None)
+              case Left(error) => IO.raiseError(error)
+            }
           }
-        }
         handled <- resolved.flatten.traverse { case (locked, request, record) =>
           store.recordScanRequestWithEvidence(record, locked.metadata).value.flatMap {
             case Right(decision) => IO.pure(Some((locked, request, decision)))

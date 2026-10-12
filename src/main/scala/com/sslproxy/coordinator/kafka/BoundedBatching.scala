@@ -16,8 +16,13 @@ private[kafka] object BoundedBatching:
       def emit(values: Vector[A]): Pull[IO, Chunk[A], Unit] =
         if values.isEmpty then Pull.done else Pull.output1(Chunk.from(values))
 
-      def consume(chunk: Chunk[A], index: Int, next: Pull.Timed[IO, A], values: Vector[A], weight: Long)
-          : Pull[IO, Chunk[A], Unit] =
+      def consume(
+        chunk: Chunk[A],
+        index: Int,
+        next: Pull.Timed[IO, A],
+        values: Vector[A],
+        weight: Long
+      ): Pull[IO, Chunk[A], Unit] =
         if index == chunk.size then loop(next, values, weight)
         else
           val value = chunk(index)

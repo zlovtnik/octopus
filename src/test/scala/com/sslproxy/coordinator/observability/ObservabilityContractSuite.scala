@@ -38,13 +38,15 @@ class ObservabilityContractSuite extends FunSuite:
     metrics.recordTickFailure("ingest")
     metrics.recordLagRefreshFailure("scan-v1")
     metrics.recordLeaseClaim("claimed")
-    metrics.recordPostgresQuery("postgres.check_connectivity", "success", scala.concurrent.duration.DurationInt(1).millis)
+    metrics.recordPostgresQuery(
+      "postgres.check_connectivity",
+      "success",
+      scala.concurrent.duration.DurationInt(1).millis
+    )
     metrics.recordLockedBatchDuration("sync.scan.request", "success", scala.concurrent.duration.DurationInt(1).millis)
     metrics.recordRouteState("sync", "sync-scan-ingestion", running = true, suspended = false)
     metrics.recordProcessorState("sync-scan-ingestion", "ready", 0)
-    metrics
-      .scrape
-      .linesIterator
+    metrics.scrape.linesIterator
       .map(_.trim)
       .filter(line => line.nonEmpty && !line.startsWith("#"))
       .flatMap { line =>

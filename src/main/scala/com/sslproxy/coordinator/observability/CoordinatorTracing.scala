@@ -171,10 +171,12 @@ object CoordinatorTracing:
     W3CTraceContextPropagator.getInstance().extract(Context.current(), headers, kafkaHeaderGetter)
 
   def injectCurrent(headers: RecordHeaders): Unit =
-    W3CTraceContextPropagator.getInstance().inject(
-      Context.current(),
-      headers,
-      (carrier: RecordHeaders, key: String, value: String) => {
-        val _ = carrier.add(key, value.getBytes(StandardCharsets.UTF_8))
-      }
-    )
+    W3CTraceContextPropagator
+      .getInstance()
+      .inject(
+        Context.current(),
+        headers,
+        (carrier: RecordHeaders, key: String, value: String) => {
+          val _ = carrier.add(key, value.getBytes(StandardCharsets.UTF_8))
+        }
+      )

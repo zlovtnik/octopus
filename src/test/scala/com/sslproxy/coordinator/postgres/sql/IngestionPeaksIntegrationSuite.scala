@@ -22,9 +22,11 @@ class IngestionPeaksIntegrationSuite extends FunSuite:
     .waitingFor(
       new WaitAllStrategy()
         .withStrategy(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2))
-        .withStrategy(Wait.forSuccessfulCommand(
-          "pg_isready -h 127.0.0.1 -p 5432 -U postgres -d octopus_peaks_test"
-        ))
+        .withStrategy(
+          Wait.forSuccessfulCommand(
+            "pg_isready -h 127.0.0.1 -p 5432 -U postgres -d octopus_peaks_test"
+          )
+        )
     )
 
   private lazy val available = DockerClientFactory.instance().isDockerAvailable
@@ -32,13 +34,16 @@ class IngestionPeaksIntegrationSuite extends FunSuite:
   override def afterAll(): Unit = if available then database.stop()
 
   test("real PostgreSQL computes UTC days and Monday-Sunday weeks across boundaries"):
-    if !available && sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true") then fail("Docker is required for PostgreSQL integration tests")
+    if !available && sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true") then
+      fail("Docker is required for PostgreSQL integration tests")
     assume(available, "Docker is unavailable")
-    Using.resource(DriverManager.getConnection(
-      database.getJdbcUrl,
-      database.getUsername,
-      database.getPassword
-    )) { connection =>
+    Using.resource(
+      DriverManager.getConnection(
+        database.getJdbcUrl,
+        database.getUsername,
+        database.getPassword
+      )
+    ) { connection =>
       Using.resource(connection.createStatement()) { statement =>
         statement.execute("SET TIME ZONE 'America/Los_Angeles'"): Unit
         statement.execute("CREATE SCHEMA octopus_core"): Unit

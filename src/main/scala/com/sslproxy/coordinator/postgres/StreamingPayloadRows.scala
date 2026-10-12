@@ -26,7 +26,8 @@ private[postgres] object StreamingPayloadRows:
     new Rows(target, payload, maxRowBytes)
 
   final class Rows(target: PostgresSinkTarget, payload: String, maxRowBytes: Int)
-      extends Iterator[Json] with AutoCloseable:
+      extends Iterator[Json]
+      with AutoCloseable:
     private val arrayField = target match
       case PostgresSinkTarget.WirelessProbeRequests => Some("probes")
       case PostgresSinkTarget.WirelessClientInventory => Some("clients")
@@ -92,8 +93,10 @@ private[postgres] object StreamingPayloadRows:
       val end = input.currentLocation().getCharOffset.toInt
       require(end - start <= maxRowBytes, s"PostgreSQL row exceeds $maxRowBytes bytes")
       val text = payload.substring(start, end)
-      require(text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxRowBytes,
-        s"PostgreSQL row exceeds $maxRowBytes bytes")
+      require(
+        text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxRowBytes,
+        s"PostgreSQL row exceeds $maxRowBytes bytes"
+      )
       io.circe.parser.parse(text).fold(error => throw IllegalArgumentException("invalid payload row", error), identity)
 
     def close(): Unit = parser.close()

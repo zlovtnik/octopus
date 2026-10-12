@@ -10,18 +10,24 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
 
   test("JVM bindings export heap, metaspace, direct buffers and GC timers") {
     val metrics = testMetrics()
-    metrics.jvmMetrics.use { _ => IO {
-      val output = metrics.scrape
-      assert(output.contains("jvm_memory_used_bytes"), output)
-      assert(output.contains("# TYPE"), output)
-      assert(output.contains("# HELP"), output)
-    }}
+    metrics.jvmMetrics.use { _ =>
+      IO {
+        val output = metrics.scrape
+        assert(output.contains("jvm_memory_used_bytes"), output)
+        assert(output.contains("# TYPE"), output)
+        assert(output.contains("# HELP"), output)
+      }
+    }
   }
 
   test("partition lag gauges are replaced on revocation and removed on shutdown") {
     val metrics = testMetrics()
-    val name = new MetricName("records-lag", "consumer-fetch-manager-metrics", "lag",
-      java.util.Map.of("topic", "sync.scan.request", "partition", "7"))
+    val name = new MetricName(
+      "records-lag",
+      "consumer-fetch-manager-metrics",
+      "lag",
+      java.util.Map.of("topic", "sync.scan.request", "partition", "7")
+    )
     val metric = new Metric:
       def metricName(): MetricName = name
       def metricValue(): Object = java.lang.Double.valueOf(42.0)
@@ -89,7 +95,11 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
 
   test("postgres and locked-batch histograms export bucket, sum and count") {
     val metrics = testMetrics()
-    metrics.recordPostgresQuery("postgres.mark_wireless_backlog_synced", "success", scala.concurrent.duration.DurationInt(12).millis)
+    metrics.recordPostgresQuery(
+      "postgres.mark_wireless_backlog_synced",
+      "success",
+      scala.concurrent.duration.DurationInt(12).millis
+    )
     metrics.recordLockedBatchDuration("sync.scan.request", "success", scala.concurrent.duration.DurationInt(30).millis)
     val output = metrics.scrape
     assert(output.contains("coordinator_postgres_query_duration_seconds_bucket"), output)
@@ -195,8 +205,12 @@ class CoordinatorMetricsSuite extends CatsEffectSuite:
     var now = 1000L
     val metrics = testMetrics(() => now)
     def sample(group: String, partition: String, value: Double): Unit =
-      val name = new MetricName("records-lag", "consumer-fetch-manager-metrics", "lag",
-        java.util.Map.of("topic", "wireless.audit", "partition", partition))
+      val name = new MetricName(
+        "records-lag",
+        "consumer-fetch-manager-metrics",
+        "lag",
+        java.util.Map.of("topic", "wireless.audit", "partition", partition)
+      )
       val metric = new Metric:
         def metricName(): MetricName = name
         def metricValue(): Object = java.lang.Double.valueOf(value)

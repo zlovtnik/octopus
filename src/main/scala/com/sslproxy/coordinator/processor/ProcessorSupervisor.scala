@@ -315,7 +315,8 @@ object ProcessorSupervisor:
               m.recordRouteState(
                 id.family.value,
                 id.value,
-                running = status.lifecycle == ProcessorLifecycle.Starting || status.lifecycle == ProcessorLifecycle.Ready,
+                running =
+                  status.lifecycle == ProcessorLifecycle.Starting || status.lifecycle == ProcessorLifecycle.Ready,
                 suspended = status.lifecycle == ProcessorLifecycle.BackingOff
               )
             }

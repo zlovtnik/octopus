@@ -19,17 +19,20 @@ class CoordinatorMetrics(
   import CoordinatorMetrics.{ProcessorLifecycleValues, log}
 
   private val kafkaGauges =
-    scala.collection.mutable.Map.empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], List[Meter])]
+    scala.collection.mutable.Map
+      .empty[(String, String, String, String), (atomic.AtomicReference[java.lang.Double], List[Meter])]
   private val lagSampleAt =
     ConcurrentHashMap[(String, String, String), AtomicLong]()
 
   def jvmMetrics: Resource[IO, Unit] =
-    Resource.make(IO {
-      val gc = new JvmGcMetrics()
-      new JvmMemoryMetrics().bindTo(registry)
-      gc.bindTo(registry)
-      gc
-    })(gc => IO(gc.close())).map(_ => ())
+    Resource
+      .make(IO {
+        val gc = new JvmGcMetrics()
+        new JvmMemoryMetrics().bindTo(registry)
+        gc.bindTo(registry)
+        gc
+      })(gc => IO(gc.close()))
+      .map(_ => ())
 
   def recordKafkaMetrics(group: String, values: Map[MetricName, Metric]): Unit = synchronized {
     val samples = values.iterator.flatMap { case (name, metric) =>
@@ -41,8 +44,12 @@ class CoordinatorMetrics(
         metric.metricValue() match
           case number: java.lang.Number if java.lang.Double.isFinite(number.doubleValue()) =>
             Some(
-              (group, metricName, Option(name.tags().get("topic")).getOrElse(""),
-                Option(name.tags().get("partition")).getOrElse("")) -> number.doubleValue()
+              (
+                group,
+                metricName,
+                Option(name.tags().get("topic")).getOrElse(""),
+                Option(name.tags().get("partition")).getOrElse("")
+              ) -> number.doubleValue()
             )
           case _ => None
       }
@@ -51,42 +58,43 @@ class CoordinatorMetrics(
       kafkaGauges.remove(key).foreach { case (_, meters) =>
         meters.foreach(meter => registry.remove(meter): Unit)
       }
-      if key._2 == "coordinator.redpanda.consumer.lag.records" then
-        lagSampleAt.remove((key._1, key._3, key._4)): Unit
+      if key._2 == "coordinator.redpanda.consumer.lag.records" then lagSampleAt.remove((key._1, key._3, key._4)): Unit
     }
     samples.foreachEntry { (key, sample) =>
       val (groupKey, metricName, topic, partition) = key
-      val (holder, _) = kafkaGauges.getOrElseUpdate(key, {
-        val value = new atomic.AtomicReference[java.lang.Double](sample)
-        val tags = Array("group", groupKey, "topic", topic, "partition", partition)
-        if metricName == "coordinator.kafka.rebalances.total" then
-          val meter = Gauge
-            .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
-            .tags(tags*)
-            .description("Cumulative Kafka consumer rebalance count")
-            .register(registry)
-          (value, List(meter))
-        else
-          val sampleAt = lagSampleAt.computeIfAbsent((groupKey, topic, partition), _ => new AtomicLong(nowMillis()))
-          val lagMeter = Gauge
-            .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
-            .tags(tags*)
-            .description("Consumer fetch-position lag in records")
-            .register(registry)
-          val staleMeter = Gauge
-            .builder(
-              "coordinator.redpanda.lag.stale.seconds",
-              sampleAt,
-              (v: AtomicLong) =>
-                val at = v.get()
-                if at <= 0L then 0.0
-                else (nowMillis() - at).toDouble / 1000.0
-            )
-            .tags(tags*)
-            .description("Seconds since the last successful lag sample")
-            .register(registry)
-          (value, List(lagMeter, staleMeter))
-      })
+      val (holder, _) = kafkaGauges.getOrElseUpdate(
+        key, {
+          val value = new atomic.AtomicReference[java.lang.Double](sample)
+          val tags = Array("group", groupKey, "topic", topic, "partition", partition)
+          if metricName == "coordinator.kafka.rebalances.total" then
+            val meter = Gauge
+              .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+              .tags(tags*)
+              .description("Cumulative Kafka consumer rebalance count")
+              .register(registry)
+            (value, List(meter))
+          else
+            val sampleAt = lagSampleAt.computeIfAbsent((groupKey, topic, partition), _ => new AtomicLong(nowMillis()))
+            val lagMeter = Gauge
+              .builder(metricName, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+              .tags(tags*)
+              .description("Consumer fetch-position lag in records")
+              .register(registry)
+            val staleMeter = Gauge
+              .builder(
+                "coordinator.redpanda.lag.stale.seconds",
+                sampleAt,
+                (v: AtomicLong) =>
+                  val at = v.get()
+                  if at <= 0L then 0.0
+                  else (nowMillis() - at).toDouble / 1000.0
+              )
+              .tags(tags*)
+              .description("Seconds since the last successful lag sample")
+              .register(registry)
+            (value, List(lagMeter, staleMeter))
+        }
+      )
       holder.set(sample)
       if metricName == "coordinator.redpanda.consumer.lag.records" then
         lagSampleAt.computeIfAbsent((groupKey, topic, partition), _ => new AtomicLong(0L)).set(nowMillis())
@@ -230,9 +238,12 @@ class CoordinatorMetrics(
     if count > 0 then ingestDeduplicatedCounter.increment(count.toDouble)
 
   def ingestProcessedRatePerSec(nowMs: Long): Double =
-    processedSamples.get().iterator
+    processedSamples
+      .get()
+      .iterator
       .filter { case (at, _) => at <= nowMs && nowMs - at < 300_000L }
-      .map(_._2.toDouble).sum / 300.0
+      .map(_._2.toDouble)
+      .sum / 300.0
 
   // The scheduled ledger pass can be empty while locked consumers persist
   // scan/load/result or wireless records directly. Count only successful
@@ -252,9 +263,12 @@ class CoordinatorMetrics(
       processedObservedAt.set(now)
 
   def brokerProcessedRatePerSec(nowMs: Long): Double =
-    brokerProcessedSamples.get().iterator
+    brokerProcessedSamples
+      .get()
+      .iterator
       .filter { case (at, _) => at <= nowMs && nowMs - at < 300_000L }
-      .map(_._2.toDouble).sum / 300.0
+      .map(_._2.toDouble)
+      .sum / 300.0
 
   // Fetch-position lag excludes records already fetched, including in-flight
   // batches. Keep it separate from the durable pending/processing ledger.
@@ -264,18 +278,21 @@ class CoordinatorMetrics(
         val observedAt = Option(lagSampleAt.get((group, topic, partition))).map(_.get())
         (value.get().doubleValue(), observedAt)
     }.toList
-    Option.when(samples.nonEmpty && samples.forall { case (value, observedAt) =>
-      value >= 0 && value < Long.MaxValue.toDouble && value == math.floor(value) &&
+    Option
+      .when(samples.nonEmpty && samples.forall { case (value, observedAt) =>
+        value >= 0 && value < Long.MaxValue.toDouble && value == math.floor(value) &&
         observedAt.exists(at => at <= nowMs && nowMs - at <= 60_000L)
-    }) {
-      samples.map { case (value, _) => BigInt(value.toLong) }.sum
-    }.filter(_.isValidLong).map(_.toLong)
+      }) {
+        samples.map { case (value, _) => BigInt(value.toLong) }.sum
+      }
+      .filter(_.isValidLong)
+      .map(_.toLong)
   }
 
   def publicReadingsFresh(nowMs: Long): Boolean =
     def fresh(at: Long): Boolean = at > 0 && nowMs >= at && nowMs - at <= 60_000L
     nowMs - startedAt >= 300_000L &&
-      fresh(pendingObservedAt.get()) && fresh(backpressureObservedAt.get()) && fresh(processedObservedAt.get())
+    fresh(pendingObservedAt.get()) && fresh(backpressureObservedAt.get()) && fresh(processedObservedAt.get())
 
   def pendingLedgerCountValue: Long = pendingLedgerGauge.get()
 

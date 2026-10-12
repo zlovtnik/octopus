@@ -21,21 +21,25 @@ class MainSuite extends CatsEffectSuite:
     assertEquals(DatabaseModule.dbWorkerPermits(1, 1), 1L)
 
   test("database executor keeps daemon thread naming and shuts down on release"):
-    DatabaseModule.blockingExecutionContext(2).use { ec =>
-      IO {
-        val thread = Thread.currentThread()
-        assertEquals(thread.getName, "doobie-postgres-pool")
-        assert(thread.isDaemon)
-        assert(!ec.isShutdown)
-        ec
-      }.evalOn(ec)
-    }.map(ec => assert(ec.isShutdown))
+    DatabaseModule
+      .blockingExecutionContext(2)
+      .use { ec =>
+        IO {
+          val thread = Thread.currentThread()
+          assertEquals(thread.getName, "doobie-postgres-pool")
+          assert(thread.isDaemon)
+          assert(!ec.isShutdown)
+          ec
+        }.evalOn(ec)
+      }
+      .map(ec => assert(ec.isShutdown))
 
   test("database executor shuts down when later resource acquisition fails"):
     for
       acquired <- Deferred[IO, ExecutionContextExecutorService]
       failure = new IllegalStateException("later acquisition failed")
-      outcome <- DatabaseModule.blockingExecutionContext(2)
+      outcome <- DatabaseModule
+        .blockingExecutionContext(2)
         .evalTap(ec => acquired.complete(ec).void)
         .flatMap(_ => Resource.eval(IO.raiseError[Unit](failure)))
         .use(_ => IO.unit)
@@ -48,9 +52,12 @@ class MainSuite extends CatsEffectSuite:
   test("database executor shuts down when application use is cancelled"):
     for
       acquired <- Deferred[IO, ExecutionContextExecutorService]
-      fiber <- DatabaseModule.blockingExecutionContext(2).use { ec =>
-        acquired.complete(ec) *> IO.never[Unit]
-      }.start
+      fiber <- DatabaseModule
+        .blockingExecutionContext(2)
+        .use { ec =>
+          acquired.complete(ec) *> IO.never[Unit]
+        }
+        .start
       _ <- (for
         ec <- acquired.get
         _ <- fiber.cancel

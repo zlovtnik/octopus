@@ -10,10 +10,10 @@ import scala.concurrent.duration.*
 
 private[coordinator] object ScheduledWorkloads:
   def build(
-      cfg: AppConfig,
-      cronScheduler: CronScheduler,
-      searchRetentionProcessor: SearchRetentionProcessor[IO],
-      maintenanceInterval: FiniteDuration
+    cfg: AppConfig,
+    cronScheduler: CronScheduler,
+    searchRetentionProcessor: SearchRetentionProcessor[IO],
+    maintenanceInterval: FiniteDuration
   ): List[ProcessorWorkload] =
     List(
       ProcessorWorkload(
@@ -115,9 +115,7 @@ private[coordinator] object ScheduledWorkloads:
           .awakeEvery[IO](
             maintenanceInterval
           )
-          .evalMap(_ =>
-            searchRetentionProcessor.runOnce
-          )
+          .evalMap(_ => searchRetentionProcessor.runOnce)
       ),
       ProcessorWorkload(
         ProcessorId.StaleWorkerCleanup,

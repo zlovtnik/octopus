@@ -13,9 +13,14 @@ import fs2.kafka.KafkaProducer
 import scala.concurrent.duration.*
 
 object WirelessAuditStream:
-  def run(cfg: KafkaCfg, projection: WirelessProjectionConfig, repository: PostgresRepository,
-    metrics: CoordinatorMetrics, backpressure: BackpressureService,
-    producer: KafkaProducer[IO, String, String]): Stream[IO, Unit] =
+  def run(
+    cfg: KafkaCfg,
+    projection: WirelessProjectionConfig,
+    repository: PostgresRepository,
+    metrics: CoordinatorMetrics,
+    backpressure: BackpressureService,
+    producer: KafkaProducer[IO, String, String]
+  ): Stream[IO, Unit] =
     if !projection.enabled then Stream.never[IO]
     else
       val consumer = LockedTopicConsumer.stream(
@@ -28,30 +33,34 @@ object WirelessAuditStream:
         producer,
         WirelessObservation.decode
       ) { records =>
-        records.traverse_(record => repository.projectWirelessRecord(record.decoded, record.metadata).flatMap {
-          case Right(_) => IO.unit
-          // Decode failures are parked by LockedTopicConsumer. Permanent storage
-          // failures are parked to the DLQ so the processor does not dead-end.
-          // Coordinate conflicts and retryable storage errors fail closed without
-          // committing: a contradictory receipt must not be skipped.
-          case Left(error) if isCoordinateConflict(error) =>
-            IO.raiseError(RuntimeException(error.message, error.cause))
-          case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
-            LockedTopicConsumer.parkNonRetriable(
-              producer,
-              cfg.wirelessAuditTopic + cfg.dlqSuffix,
-              cfg.wirelessAuditConsumer,
-              record.record,
-              error.cause
-            )
-          case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
-        })
+        records.traverse_(record =>
+          repository.projectWirelessRecord(record.decoded, record.metadata).flatMap {
+            case Right(_) => IO.unit
+            // Decode failures are parked by LockedTopicConsumer. Permanent storage
+            // failures are parked to the DLQ so the processor does not dead-end.
+            // Coordinate conflicts and retryable storage errors fail closed without
+            // committing: a contradictory receipt must not be skipped.
+            case Left(error) if isCoordinateConflict(error) =>
+              IO.raiseError(RuntimeException(error.message, error.cause))
+            case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
+              LockedTopicConsumer.parkNonRetriable(
+                producer,
+                cfg.wirelessAuditTopic + cfg.dlqSuffix,
+                cfg.wirelessAuditConsumer,
+                record.record,
+                error.cause
+              )
+            case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
+          }
+        )
       }
       // Expiry claims rows with SKIP LOCKED; safe across coordinator instances.
-      val retention = Stream.repeatEval(repository.expireWirelessProjections(2000).flatMap {
-        case Right(_) => IO.unit
-        case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
-      }).metered(1.minute)
+      val retention = Stream
+        .repeatEval(repository.expireWirelessProjections(2000).flatMap {
+          case Right(_) => IO.unit
+          case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
+        })
+        .metered(1.minute)
       consumer.concurrently(retention)
 
   private[kafka] def isCoordinateConflict(error: DatabaseError): Boolean =

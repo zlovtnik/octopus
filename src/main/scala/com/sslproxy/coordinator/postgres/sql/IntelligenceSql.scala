@@ -19,7 +19,12 @@ object IntelligenceSql:
     case Event
         extends VectorKind("search_vectors_event", "search_vectors_event_embedding_hnsw_idx", "event", "event_event")
     case Device
-        extends VectorKind("search_vectors_device", "search_vectors_device_embedding_hnsw_idx", "device", "device_device")
+        extends VectorKind(
+          "search_vectors_device",
+          "search_vectors_device_embedding_hnsw_idx",
+          "device",
+          "device_device"
+        )
     case Behaviour
         extends VectorKind(
           "search_vectors_behaviour",
@@ -212,16 +217,15 @@ object IntelligenceSql:
              embedded_at = EXCLUDED.embedded_at,
              scan_started_at = CURRENT_TIMESTAMP,
              completed_at = NULL
-           WHERE similarity_scan_state.embedded_at IS DISTINCT FROM EXCLUDED.embedded_at"""
-      .update.run.flatMap { restarted =>
+           WHERE similarity_scan_state.embedded_at IS DISTINCT FROM EXCLUDED.embedded_at""".update.run.flatMap {
+      restarted =>
         if restarted == 0 then ().pure[ConnectionIO]
-        else
-          sql"""DELETE FROM atheros_search.similarity_pairs
+        else sql"""DELETE FROM atheros_search.similarity_pairs
                  WHERE pair_kind = $pairKind
                    AND embedding_model = $embeddingModel
                    AND (left_document_id = CAST($documentId AS uuid)
                      OR right_document_id = CAST($documentId AS uuid))""".update.run.void
-      }
+    }
 
   def markSimilarityAnchor(kind: VectorKind, vectorId: Long, embeddedAt: java.sql.Timestamp): ConnectionIO[Int] =
     val embeddingKind = kind.embeddingKind

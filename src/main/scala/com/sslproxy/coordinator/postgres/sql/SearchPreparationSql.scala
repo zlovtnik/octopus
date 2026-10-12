@@ -19,7 +19,8 @@ object SearchPreparationSql:
       case SearchDocumentKind.ProxyEvent => proxyEventCandidates(limit)
       case SearchDocumentKind.ProxyBlockedHostWindow => proxyBlockedHostWindowCandidates(limit)
       case SearchDocumentKind.DeviceProfile | SearchDocumentKind.ApProfile | SearchDocumentKind.IdentitySummary |
-          SearchDocumentKind.ObservationWindow => compactCandidates(kind, limit)
+          SearchDocumentKind.ObservationWindow =>
+        compactCandidates(kind, limit)
 
   private def compactCandidates(kind: SearchDocumentKind, limit: Int): Query0[SearchDocumentSource] =
     val base = kind match
@@ -46,9 +47,35 @@ object SearchPreparationSql:
         ON doc.source_kind = ${kind.sourceKind} AND doc.source_key = source.key AND doc.status = 'active'
       WHERE doc.document_id IS NULL OR doc.updated_at < source.updated_at
       ORDER BY source.updated_at, source.key LIMIT ${limit.max(1)}""")
-      .query[(String, Option[String], Option[String], Option[String], java.sql.Timestamp, Option[String], Option[String], String)]
-      .map(row => SearchDocumentSource(kind, row._1, row._2, row._3, row._4, row._5, row._6, row._7,
-        None, 0, false, row._8, row._8))
+      .query[
+        (
+          String,
+          Option[String],
+          Option[String],
+          Option[String],
+          java.sql.Timestamp,
+          Option[String],
+          Option[String],
+          String
+        )
+      ]
+      .map(row =>
+        SearchDocumentSource(
+          kind,
+          row._1,
+          row._2,
+          row._3,
+          row._4,
+          row._5,
+          row._6,
+          row._7,
+          None,
+          0,
+          false,
+          row._8,
+          row._8
+        )
+      )
 
   private def eventCandidates(limit: Int): Query0[SearchDocumentSource] =
     sql"""SELECT frame.dedupe_key, frame.source_mac, frame.location_id, frame.sensor_id,
@@ -457,7 +484,9 @@ object SearchPreparationSql:
     if document.kind == SearchDocumentKind.ObservationWindow then
       sql"""SELECT 1 FROM atheros_search.wireless_observation_summaries
         WHERE summary_id = ${document.sourceKey}::uuid AND expires_at > CURRENT_TIMESTAMP FOR UPDATE"""
-        .query[Int].option.flatMap {
+        .query[Int]
+        .option
+        .flatMap {
           case Some(_) => persistCurrent(document)
           case None => ().pure[ConnectionIO]
         }
@@ -483,8 +512,8 @@ object SearchPreparationSql:
     for
       // Compact entities use a stable document ID. Fence stale workers and
       // remove their old vectors before replacing the current source version.
-      _ <- if document.kind.compact then
-        sql"""SELECT document_id FROM atheros_search.search_documents
+      _ <-
+        if document.kind.compact then sql"""SELECT document_id FROM atheros_search.search_documents
           WHERE document_id = ${document.documentId} AND normalized_sha256 <> ${document.normalizedSha256}
           FOR UPDATE""".query[String].option.flatMap(_.traverse_(WirelessStreamSql.deleteDocument))
         else ().pure[ConnectionIO]

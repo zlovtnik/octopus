@@ -55,20 +55,22 @@ class PublicStatsRoutes(
       fiber <- statsService.snapshot.start
       result <- IO.race(fiber.joinWithNever, IO.sleep(snapshotTimeout)).flatMap {
         case Left(stats) => IO.pure(stats)
-        case Right(_)    => fiber.cancel.start.void.as(emptyStats)
+        case Right(_) => fiber.cancel.start.void.as(emptyStats)
       }
     yield result
 
   private def statsJson(s: PublicStats): Json =
-    val liveStripJson = s.liveStrip.map { ls =>
-      Json.obj(
-        "ingestProcessedRatePerSec" -> Json.fromDoubleOrNull(ls.ingestProcessedRatePerSec),
-        "pendingLedgerCount" -> Json.fromLong(ls.pendingLedgerCount),
-        "brokerLagCount" -> ls.brokerLagCount.fold(Json.Null)(Json.fromLong),
-        "lastIngestSuccessAt" -> ls.lastIngestSuccessAt.fold(Json.Null)(Json.fromString),
-        "backpressureActive" -> Json.fromBoolean(ls.backpressureActive)
-      )
-    }.getOrElse(Json.Null)
+    val liveStripJson = s.liveStrip
+      .map { ls =>
+        Json.obj(
+          "ingestProcessedRatePerSec" -> Json.fromDoubleOrNull(ls.ingestProcessedRatePerSec),
+          "pendingLedgerCount" -> Json.fromLong(ls.pendingLedgerCount),
+          "brokerLagCount" -> ls.brokerLagCount.fold(Json.Null)(Json.fromLong),
+          "lastIngestSuccessAt" -> ls.lastIngestSuccessAt.fold(Json.Null)(Json.fromString),
+          "backpressureActive" -> Json.fromBoolean(ls.backpressureActive)
+        )
+      }
+      .getOrElse(Json.Null)
 
     Json.obj(
       "asOf" -> Json.fromString(s.asOf),
@@ -91,9 +93,14 @@ class PublicStatsRoutes(
               Header.Raw(CIString("Cache-Control"), "no-store")
             resp.withHeaders(Headers(all.map(h => h: org.http4s.Header.ToRaw)*))
           }
-        }.handleErrorWith { _ =>
+        }
+        .handleErrorWith { _ =>
           ServiceUnavailable(Json.obj("error" -> Json.fromString("Metrics unavailable"))).map(
-            _.withHeaders(Headers((corsHeaders(origin) :+ Header.Raw(CIString("Cache-Control"), "no-store")).map(h => h: Header.ToRaw)*))
+            _.withHeaders(
+              Headers(
+                (corsHeaders(origin) :+ Header.Raw(CIString("Cache-Control"), "no-store")).map(h => h: Header.ToRaw)*
+              )
+            )
           )
         }
 

@@ -58,7 +58,9 @@ class LiveMetricsRoutesSuite extends CatsEffectSuite:
     val at = Instant.ofEpochMilli(millis)
     List(at, at.plusSeconds(61)).foldLeft(IO.unit) { (previous, sampledAt) =>
       previous *> new LiveMetricsRoutes(metrics, IO.pure(sampledAt)).routes.orNotFound
-        .run(Request[IO](Method.GET, uri)).flatMap(_.as[Json]).map { json =>
+        .run(Request[IO](Method.GET, uri))
+        .flatMap(_.as[Json])
+        .map { json =>
           assert(json.hcursor.downField("liveStrip").focus.exists(_.isNull))
         }
     }

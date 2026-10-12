@@ -22,7 +22,11 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
   private def routes(allowedOrigins: List[String] = List("https://rclabs.uk")): IO[PublicStatsRoutes] =
     stubService.map(service => new PublicStatsRoutes(service, allowedOrigins))
 
-  private def get(routes: IO[PublicStatsRoutes], path: Uri, origin: Option[String] = None): IO[(Status, String, Headers)] =
+  private def get(
+    routes: IO[PublicStatsRoutes],
+    path: Uri,
+    origin: Option[String] = None
+  ): IO[(Status, String, Headers)] =
     val headers = origin.map(o => Headers(Header.Raw(CIString("Origin"), o))).getOrElse(Headers.empty)
     routes.flatMap(_.routes.orNotFound.run(Request[IO](Method.GET, path, headers = headers))).flatMap { response =>
       response.bodyText.compile.string.map(body => (response.status, body, response.headers))
@@ -68,13 +72,29 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
     }
 
   test("OPTIONS /public/stats responds with CORS headers for allowed origin"):
-    routes().flatMap(_.routes.orNotFound
-      .run(Request[IO](Method.OPTIONS, uri"/public/stats", headers = Headers(Header.Raw(CIString("Origin"), "https://rclabs.uk")))))
+    routes()
+      .flatMap(
+        _.routes.orNotFound
+          .run(
+            Request[IO](
+              Method.OPTIONS,
+              uri"/public/stats",
+              headers = Headers(Header.Raw(CIString("Origin"), "https://rclabs.uk"))
+            )
+          )
+      )
       .flatMap { response =>
         IO {
           assertEquals(response.status, Status.NoContent)
-          assert(response.headers.get(CIString("Access-Control-Allow-Origin")).map(_.head.value).contains("https://rclabs.uk"))
-          assert(response.headers.get(CIString("Access-Control-Allow-Methods")).map(_.head.value).contains("GET, OPTIONS"))
+          assert(
+            response.headers
+              .get(CIString("Access-Control-Allow-Origin"))
+              .map(_.head.value)
+              .contains("https://rclabs.uk")
+          )
+          assert(
+            response.headers.get(CIString("Access-Control-Allow-Methods")).map(_.head.value).contains("GET, OPTIONS")
+          )
         }
       }
 
@@ -97,7 +117,8 @@ class PublicStatsRoutesSuite extends CatsEffectSuite:
     val source = new PeaksSource:
       def peakRecordsDay = IO.raiseError(RuntimeException("private database details"))
       def peakRecordsWeek = IO.raiseError(RuntimeException("private database details"))
-    val failed = OperationalStatsService.create(source, CoordinatorMetrics(), 60.seconds)
+    val failed = OperationalStatsService
+      .create(source, CoordinatorMetrics(), 60.seconds)
       .map(service => new PublicStatsRoutes(service, List("https://rclabs.uk")))
     get(failed, uri"/public/stats", Some("https://rclabs.uk")).map { case (status, body, headers) =>
       assertEquals(status, Status.Ok)

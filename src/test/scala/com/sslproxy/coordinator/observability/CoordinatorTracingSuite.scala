@@ -15,7 +15,8 @@ class CoordinatorTracingSuite extends CatsEffectSuite:
   private def withInMemorySdk[A](body: InMemorySpanExporter => IO[A]): IO[A] =
     IO {
       val exporter = InMemorySpanExporter.create()
-      val provider = SdkTracerProvider.builder()
+      val provider = SdkTracerProvider
+        .builder()
         .addSpanProcessor(SimpleSpanProcessor.create(exporter))
         .build()
       val sdk = OpenTelemetrySdk.builder().setTracerProvider(provider).build()
@@ -71,12 +72,12 @@ class CoordinatorTracingSuite extends CatsEffectSuite:
       CoordinatorTracing
         .span("test.error", SpanKind.INTERNAL)(IO.raiseError(RuntimeException("boom")))
         .attempt *> IO {
-          val spans = exporter.getFinishedSpanItems
-          assertEquals(spans.size(), 1)
-          val span = spans.get(0)
-          assertEquals(span.getStatus.getStatusCode, StatusCode.ERROR)
-          assert(span.getEvents.size() >= 1)
-        }
+        val spans = exporter.getFinishedSpanItems
+        assertEquals(spans.size(), 1)
+        val span = spans.get(0)
+        assertEquals(span.getStatus.getStatusCode, StatusCode.ERROR)
+        assert(span.getEvents.size() >= 1)
+      }
     }
   }
 
@@ -96,19 +97,21 @@ class CoordinatorTracingSuite extends CatsEffectSuite:
 
   test("W3C inject and extract round-trip through Kafka headers") {
     withInMemorySdk { _ =>
-      CoordinatorTracing.span("test.propagate", SpanKind.PRODUCER) {
-        IO {
-          val headers = new RecordHeaders()
-          CoordinatorTracing.injectCurrent(headers)
-          headers
+      CoordinatorTracing
+        .span("test.propagate", SpanKind.PRODUCER) {
+          IO {
+            val headers = new RecordHeaders()
+            CoordinatorTracing.injectCurrent(headers)
+            headers
+          }
         }
-      }.flatMap { headers =>
-        IO {
-          val parent = CoordinatorTracing.extractParent(headers)
-          assert(parent != null)
-          val spanContext = io.opentelemetry.api.trace.Span.fromContext(parent).getSpanContext
-          assert(spanContext.isValid)
+        .flatMap { headers =>
+          IO {
+            val parent = CoordinatorTracing.extractParent(headers)
+            assert(parent != null)
+            val spanContext = io.opentelemetry.api.trace.Span.fromContext(parent).getSpanContext
+            assert(spanContext.isValid)
+          }
         }
-      }
     }
   }

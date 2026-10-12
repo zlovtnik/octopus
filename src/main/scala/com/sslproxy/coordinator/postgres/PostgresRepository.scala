@@ -40,13 +40,19 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import scala.concurrent.duration.*
 
-class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] = None,
-  wirelessProjection: com.sslproxy.coordinator.config.WirelessProjectionConfig = com.sslproxy.coordinator.config.WirelessProjectionConfig(),
-  metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None):
+class PostgresRepository(
+  xa: Transactor[IO],
+  dbSemaphore: Option[Semaphore[IO]] = None,
+  wirelessProjection: com.sslproxy.coordinator.config.WirelessProjectionConfig =
+    com.sslproxy.coordinator.config.WirelessProjectionConfig(),
+  metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None
+):
   import PostgresRepository.{log, stableUuid}
 
-  def projectWirelessRecord(event: com.sslproxy.coordinator.processor.WirelessObservation,
-    metadata: BrokerRecordMetadata): IO[Either[DatabaseError, Boolean]] =
+  def projectWirelessRecord(
+    event: com.sslproxy.coordinator.processor.WirelessObservation,
+    metadata: BrokerRecordMetadata
+  ): IO[Either[DatabaseError, Boolean]] =
     runDb("postgres.project_wireless_stream") {
       com.sslproxy.coordinator.postgres.sql.WirelessStreamSql.project(event, metadata, wirelessProjection)
     }
@@ -660,9 +666,11 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
 
   def buildSearchDocuments(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.build_search_documents") {
-      SearchPreparationSql.supportedKinds.filter(kind =>
-        if wirelessProjection.projectionOnly then kind.compact || kind.sourceTable == "proxy_events"
-        else !kind.compact || wirelessProjection.enabled)
+      SearchPreparationSql.supportedKinds
+        .filter(kind =>
+          if wirelessProjection.projectionOnly then kind.compact || kind.sourceTable == "proxy_events"
+          else !kind.compact || wirelessProjection.enabled
+        )
         .traverse { kind =>
           SearchPreparationSql.candidates(kind, limit).to[List].flatMap { sources =>
             sources
@@ -690,9 +698,11 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
     embeddingModel: String
   ): IO[Either[DatabaseError, Int]] =
     runDb("postgres.prepare_embedding_jobs") {
-      SearchPreparationSql.supportedKinds.filter(kind =>
-        if wirelessProjection.projectionOnly then kind.compact || kind.sourceTable == "proxy_events"
-        else !kind.compact || wirelessProjection.enabled)
+      SearchPreparationSql.supportedKinds
+        .filter(kind =>
+          if wirelessProjection.projectionOnly then kind.compact || kind.sourceTable == "proxy_events"
+          else !kind.compact || wirelessProjection.enabled
+        )
         .traverse { kind =>
           SearchPreparationSql.documentsMissingEmbeddingJobs(kind, embeddingModel, limit).to[List].flatMap {
             documents =>
@@ -1037,11 +1047,13 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
 
   def reconcileWirelessProjections(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.reconcile_wireless_projections") {
-      if wirelessProjection.projectionOnly then 0.pure[ConnectionIO] else for
-        findings <- MaintenanceSql.reconcileMissingWirelessChildren(limit)
-        _ <- WirelessProcessorSql.normalize(limit)
-        resolved <- MaintenanceSql.ResolveWirelessFindings.run
-      yield findings + resolved
+      if wirelessProjection.projectionOnly then 0.pure[ConnectionIO]
+      else
+        for
+          findings <- MaintenanceSql.reconcileMissingWirelessChildren(limit)
+          _ <- WirelessProcessorSql.normalize(limit)
+          resolved <- MaintenanceSql.ResolveWirelessFindings.run
+        yield findings + resolved
     }
 
   def lookupDeviceByMac(mac: String): IO[Either[DatabaseError, Option[String]]] =
@@ -1228,9 +1240,10 @@ class PostgresRepository(xa: Transactor[IO], dbSemaphore: Option[Semaphore[IO]] 
       .map { case (duration, result) =>
         val outcome = result match
           case Right(_) => "success"
-          case Left(error) => error match
-            case _: DatabaseError.Retryable => "retryable"
-            case _: DatabaseError.Permanent => "permanent"
+          case Left(error) =>
+            error match
+              case _: DatabaseError.Retryable => "retryable"
+              case _: DatabaseError.Permanent => "permanent"
         metrics.foreach(_.recordPostgresQuery(operation, outcome, duration))
         result
       }

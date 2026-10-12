@@ -17,12 +17,12 @@ object PostgresPeaksSource:
     def peakRecordsDay: IO[Option[(Long, String)]] =
       repo.peakRecordsDay().flatMap {
         case Right(v) => IO.pure(v)
-        case Left(e)  => IO.raiseError(RuntimeException(s"peak day query failed: $e"))
+        case Left(e) => IO.raiseError(RuntimeException(s"peak day query failed: $e"))
       }
     def peakRecordsWeek: IO[Option[(Long, String, String)]] =
       repo.peakRecordsWeek().flatMap {
         case Right(v) => IO.pure(v)
-        case Left(e)  => IO.raiseError(RuntimeException(s"peak week query failed: $e"))
+        case Left(e) => IO.raiseError(RuntimeException(s"peak week query failed: $e"))
       }
 
 final case class PeaksSnapshot(
@@ -64,7 +64,11 @@ object OperationalStatsService:
 
   def toIso(instant: Instant): String = isoFormatter.format(instant)
 
-  def create(peaks: PeaksSource, metrics: CoordinatorMetrics, refreshEvery: FiniteDuration): IO[OperationalStatsService] =
+  def create(
+    peaks: PeaksSource,
+    metrics: CoordinatorMetrics,
+    refreshEvery: FiniteDuration
+  ): IO[OperationalStatsService] =
     for
       cache <- Ref.of[IO, Option[PeaksSnapshot]](None)
       refreshInFlight <- Ref.of[IO, Boolean](false)
@@ -99,7 +103,7 @@ class OperationalStatsService private (
     IO.whenA(isStale(cached, now)) {
       refreshInFlight
         .modify {
-          case true  => (true, false)
+          case true => (true, false)
           case false => (true, true)
         }
         .flatMap { shouldStart =>

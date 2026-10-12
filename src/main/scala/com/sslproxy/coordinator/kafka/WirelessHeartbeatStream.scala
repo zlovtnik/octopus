@@ -35,17 +35,17 @@ object WirelessHeartbeatStream:
             IO.whenA(decision.disposition == IngestionDisposition.Processed)(
               IO(metrics.recordSyncEventHydrated())
             ) *>
-            IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
-              IO(metrics.recordIngestDeduplicated())
-            ) *> IO(
-              log.info(
-                "wireless_sensor_heartbeat",
-                "status" -> decision.disposition.databaseValue,
-                "group" -> locked.metadata.consumerGroup,
-                "partition" -> locked.metadata.partition.toString,
-                "offset" -> locked.metadata.offset.toString
+              IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
+                IO(metrics.recordIngestDeduplicated())
+              ) *> IO(
+                log.info(
+                  "wireless_sensor_heartbeat",
+                  "status" -> decision.disposition.databaseValue,
+                  "group" -> locked.metadata.consumerGroup,
+                  "partition" -> locked.metadata.partition.toString,
+                  "offset" -> locked.metadata.offset.toString
+                )
               )
-            )
           case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
             LockedTopicConsumer.parkNonRetriable(
               producer,

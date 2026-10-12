@@ -119,7 +119,12 @@ object PostgresTransformService:
       )
     }
 
-  private def blockedEvent(index: Int, rowOffset: Long, row: Json, proxyRow: ProxyEventInsert): Option[BlockedEventInsert] =
+  private def blockedEvent(
+    index: Int,
+    rowOffset: Long,
+    row: Json,
+    proxyRow: ProxyEventInsert
+  ): Option[BlockedEventInsert] =
     if boolFlag(row, "blocked") == 0L then None
     else
       val blockedBytes = optionalLong(row, "blocked_bytes")

@@ -28,8 +28,7 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
       sink,
       PostgresClock,
       _ => IO.raiseError(AssertionError("payload lookup must not run")),
-      _ =>
-        IO.raiseError(IllegalArgumentException("unauthorized coordinator load"))
+      _ => IO.raiseError(IllegalArgumentException("unauthorized coordinator load"))
     )
     handler.handle(proxyEventsLoad).attempt.map { result =>
       assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
@@ -192,113 +191,112 @@ class PostgresLoadHandlerSuite extends CatsEffectSuite:
 
   private class FailingProxyEventSink(cause: Throwable) extends PostgresSink:
     override def withLoadTransaction[A](
-        use: PostgresLoadTransaction => IO[A]
+      use: PostgresLoadTransaction => IO[A]
     ): IO[A] =
       use(
         new PostgresLoadTransaction:
           override def insertChunk(
-              _batchId: String,
-              _target: PostgresSinkTarget,
-              _rows: PostgresRowSet,
-              _rowOffset: Long
+            _batchId: String,
+            _target: PostgresSinkTarget,
+            _rows: PostgresRowSet,
+            _rowOffset: Long
           ): IO[Long] = IO.raiseError(cause)
       )
 
     override def insertProxyEvents(
-        _batchId: String,
-        _rows: List[ProxyEventInsert],
-        _blockedRows: List[BlockedEventInsert],
-        _rowOffset: Long
+      _batchId: String,
+      _rows: List[ProxyEventInsert],
+      _blockedRows: List[BlockedEventInsert],
+      _rowOffset: Long
     ): IO[Long] = IO.raiseError(cause)
 
     override def insertProxyPayloadAudit(
-        _batchId: String,
-        _rows: List[ProxyPayloadAuditInsert]
+      _batchId: String,
+      _rows: List[ProxyPayloadAuditInsert]
     ): IO[Long] = unexpected
 
     override def insertWirelessAuditFrames(
-        _batchId: String,
-        _rows: List[WirelessAuditFrameInsert]
+      _batchId: String,
+      _rows: List[WirelessAuditFrameInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessBandwidth(
-        _batchId: String,
-        _rows: List[WirelessBandwidthInsert]
+      _batchId: String,
+      _rows: List[WirelessBandwidthInsert]
     ): IO[Long] = unexpected
 
     override def insertWirelessRogueAp(
-        _batchId: String,
-        _rows: List[WirelessRogueApInsert]
+      _batchId: String,
+      _rows: List[WirelessRogueApInsert]
     ): IO[Long] = unexpected
 
     override def insertWirelessDeauthFlood(
-        _batchId: String,
-        _rows: List[WirelessDeauthFloodInsert]
+      _batchId: String,
+      _rows: List[WirelessDeauthFloodInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessSignalAnomaly(
-        _batchId: String,
-        _rows: List[WirelessSignalAnomalyInsert]
+      _batchId: String,
+      _rows: List[WirelessSignalAnomalyInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessPmfAttack(
-        _batchId: String,
-        _rows: List[WirelessPmfAttackInsert]
+      _batchId: String,
+      _rows: List[WirelessPmfAttackInsert]
     ): IO[Long] = unexpected
 
     override def insertWirelessClientInventory(
-        _batchId: String,
-        _rows: List[WirelessClientInventoryInsert]
+      _batchId: String,
+      _rows: List[WirelessClientInventoryInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessProbeRequests(
-        _batchId: String,
-        _rows: List[WirelessProbeRequestInsert]
+      _batchId: String,
+      _rows: List[WirelessProbeRequestInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessAttackSequence(
-        _batchId: String,
-        _rows: List[WirelessAttackSequenceInsert]
+      _batchId: String,
+      _rows: List[WirelessAttackSequenceInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessSequenceAlert(
-        _batchId: String,
-        _rows: List[WirelessSequenceAlertInsert]
+      _batchId: String,
+      _rows: List[WirelessSequenceAlertInsert]
     ): IO[Long] =
       unexpected
 
     override def insertWirelessHandshakeAlert(
-        _batchId: String,
-        _rows: List[WirelessHandshakeAlertInsert]
+      _batchId: String,
+      _rows: List[WirelessHandshakeAlertInsert]
     ): IO[Long] =
       unexpected
 
     private def unexpected: IO[Long] =
       IO.raiseError(IllegalStateException("unexpected sink target"))
 
-  private final class FailingSecondChunkSink(cause: Throwable)
-      extends FailingProxyEventSink(cause):
+  private final class FailingSecondChunkSink(cause: Throwable) extends FailingProxyEventSink(cause):
     var transactionCount = 0
     var chunkCount = 0
     var committedHosts = List.empty[String]
 
     override def withLoadTransaction[A](
-        use: PostgresLoadTransaction => IO[A]
+      use: PostgresLoadTransaction => IO[A]
     ): IO[A] =
       val stagedHosts = ListBuffer.empty[String]
       transactionCount += 1
       val transaction = new PostgresLoadTransaction:
         override def insertChunk(
-            _batchId: String,
-            _target: PostgresSinkTarget,
-            rows: PostgresRowSet,
-            _rowOffset: Long
+          _batchId: String,
+          _target: PostgresSinkTarget,
+          rows: PostgresRowSet,
+          _rowOffset: Long
         ): IO[Long] =
           IO.defer {
             chunkCount += 1

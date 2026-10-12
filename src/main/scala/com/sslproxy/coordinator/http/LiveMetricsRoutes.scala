@@ -14,23 +14,22 @@ import java.time.Instant
   * Reads in-process measurements only; never queries PostgreSQL or stores.
   */
 final class LiveMetricsRoutes(metrics: CoordinatorMetrics, now: IO[Instant] = IO.realTimeInstant):
-  val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
-    case GET -> Root / "internal" / "metrics" / "live" =>
-      now.flatMap { at =>
-        val rate = metrics.brokerProcessedRatePerSec(at.toEpochMilli)
-        val pending = metrics.pendingLedgerCountValue
-        val live =
-          if metrics.publicReadingsFresh(at.toEpochMilli) && rate.isFinite && rate >= 0 && pending >= 0 then
-            Json.obj(
-              "ingestProcessedRatePerSec" -> Json.fromDoubleOrNull(rate),
-              "pendingLedgerCount" -> Json.fromLong(pending),
-              "brokerLagCount" -> metrics.brokerLagCountValue(at.toEpochMilli).fold(Json.Null)(Json.fromLong),
-              "lastIngestSuccessAt" -> metrics.ingestLastSuccessEpochSeconds
-                .fold(Json.Null)(ts => Json.fromString(Instant.ofEpochSecond(ts).toString)),
-              "backpressureActive" -> Json.fromBoolean(metrics.backpressureActiveValue)
-            )
-          else Json.Null
-        Ok(Json.obj("asOf" -> Json.fromString(at.toString), "liveStrip" -> live))
-          .map(_.putHeaders(Header.Raw(ci"Cache-Control", "no-store")))
-      }
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO] { case GET -> Root / "internal" / "metrics" / "live" =>
+    now.flatMap { at =>
+      val rate = metrics.brokerProcessedRatePerSec(at.toEpochMilli)
+      val pending = metrics.pendingLedgerCountValue
+      val live =
+        if metrics.publicReadingsFresh(at.toEpochMilli) && rate.isFinite && rate >= 0 && pending >= 0 then
+          Json.obj(
+            "ingestProcessedRatePerSec" -> Json.fromDoubleOrNull(rate),
+            "pendingLedgerCount" -> Json.fromLong(pending),
+            "brokerLagCount" -> metrics.brokerLagCountValue(at.toEpochMilli).fold(Json.Null)(Json.fromLong),
+            "lastIngestSuccessAt" -> metrics.ingestLastSuccessEpochSeconds
+              .fold(Json.Null)(ts => Json.fromString(Instant.ofEpochSecond(ts).toString)),
+            "backpressureActive" -> Json.fromBoolean(metrics.backpressureActiveValue)
+          )
+        else Json.Null
+      Ok(Json.obj("asOf" -> Json.fromString(at.toString), "liveStrip" -> live))
+        .map(_.putHeaders(Header.Raw(ci"Cache-Control", "no-store")))
+    }
   }

@@ -64,41 +64,51 @@ private[kafka] object LockedTopicConsumer:
 
             val records = Stream.eval(Semaphore[IO](partitionConcurrency.toLong)).flatMap { permits =>
               consumer.partitionedStream.map { partitionStream =>
-                BoundedBatching.groupWithin(
-                  partitionStream.evalTap(_ => awaitConsumerPermit),
-                  cfg.lockedBatchSize,
-                  cfg.lockedBatchMaxBytes,
-                  cfg.lockedBatchWindowMs.millis
-                )(record => record.record.serializedValueSize.getOrElse(utf8Bytes(Option(record.record.value).getOrElse(""))).toLong)
-                .evalMap { committables =>
-                  awaitConsumerPermit *>
-                    permits.permit.use(_ => processBatch(
-                      contract,
-                      groupId,
-                      topic,
-                      committables.toList,
-                      producer,
-                      cfg.dlqSuffix,
-                      decode,
-                      process,
-                      cfg.lockedBatchMaxBytes,
-                      metrics
-                    ))
-                }
-              // Partition streams live until revocation. Capping their join starves
-              // every partition beyond the cap; bound batch work with permits instead.
+                BoundedBatching
+                  .groupWithin(
+                    partitionStream.evalTap(_ => awaitConsumerPermit),
+                    cfg.lockedBatchSize,
+                    cfg.lockedBatchMaxBytes,
+                    cfg.lockedBatchWindowMs.millis
+                  )(record =>
+                    record.record.serializedValueSize
+                      .getOrElse(utf8Bytes(Option(record.record.value).getOrElse("")))
+                      .toLong
+                  )
+                  .evalMap { committables =>
+                    awaitConsumerPermit *>
+                      permits.permit.use(_ =>
+                        processBatch(
+                          contract,
+                          groupId,
+                          topic,
+                          committables.toList,
+                          producer,
+                          cfg.dlqSuffix,
+                          decode,
+                          process,
+                          cfg.lockedBatchMaxBytes,
+                          metrics
+                        )
+                      )
+                  }
+                // Partition streams live until revocation. Capping their join starves
+                // every partition beyond the cap; bound batch work with permits instead.
               }.parJoinUnbounded
             }
 
-            val lag = Stream.repeatEval(
-              consumer.metrics.flatMap(values => IO(metrics.recordKafkaMetrics(groupId, values)))
-                .timeout(5.seconds)
-                .handleErrorWith { error =>
-                  IO(metrics.recordLagRefreshFailure(groupId)) *>
-                    IO(log.warn("consumer_metrics", "group" -> groupId,
-                      "error" -> ErrorSanitizer.message(error)))
-                }
-            ).metered(10.seconds).onFinalize(IO(metrics.clearKafkaMetrics(groupId)))
+            val lag = Stream
+              .repeatEval(
+                consumer.metrics
+                  .flatMap(values => IO(metrics.recordKafkaMetrics(groupId, values)))
+                  .timeout(5.seconds)
+                  .handleErrorWith { error =>
+                    IO(metrics.recordLagRefreshFailure(groupId)) *>
+                      IO(log.warn("consumer_metrics", "group" -> groupId, "error" -> ErrorSanitizer.message(error)))
+                  }
+              )
+              .metered(10.seconds)
+              .onFinalize(IO(metrics.clearKafkaMetrics(groupId)))
             records.concurrently(assignments).concurrently(lag)
           }
         }
@@ -129,7 +139,18 @@ private[kafka] object LockedTopicConsumer:
     metrics: CoordinatorMetrics
   ): IO[Unit] =
     splitByBytes(committables, maxBatchBytes).traverse_(batch =>
-      processBoundedBatch(contract, groupId, expectedTopic, batch, producer, dlqSuffix, decode, process, maxBatchBytes, metrics)
+      processBoundedBatch(
+        contract,
+        groupId,
+        expectedTopic,
+        batch,
+        producer,
+        dlqSuffix,
+        decode,
+        process,
+        maxBatchBytes,
+        metrics
+      )
     )
 
   private def processBoundedBatch[A](

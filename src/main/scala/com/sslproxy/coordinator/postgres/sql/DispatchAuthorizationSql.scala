@@ -31,8 +31,8 @@ object DispatchAuthorizationSql:
       }
 
   def authorizeResult(
-      result: PostgresResult,
-      messageKey: Option[String]
+    result: PostgresResult,
+    messageKey: Option[String]
   ): ConnectionIO[Unit] =
     sql"""SELECT o.payload::text
            FROM outbox_events o JOIN sync_batches b ON b.batch_id = o.source_id
@@ -48,16 +48,14 @@ object DispatchAuthorizationSql:
       .option
       .flatMap { stored =>
         requireAuthorized(
-          stored.exists(payload =>
-            decode[PostgresResult](payload).contains(result)
-          ),
+          stored.exists(payload => decode[PostgresResult](payload).contains(result)),
           "result"
         )
       }
 
   private def requireAuthorized(
-      allowed: Boolean,
-      kind: String
+    allowed: Boolean,
+    kind: String
   ): ConnectionIO[Unit] =
     if allowed then ().pure[ConnectionIO]
     else

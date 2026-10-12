@@ -6,8 +6,21 @@ import java.time.Instant
 
 class WirelessObservationSuite extends FunSuite:
   private val now = Instant.parse("2026-10-07T16:00:00Z")
-  private val calibration = SensorCalibration("sensor-1", "lab", "review-1", -40, 1, 2, 3,
-    List(2412), List(1), 3, 4, now.minusSeconds(3600), now.plusSeconds(3600))
+  private val calibration = SensorCalibration(
+    "sensor-1",
+    "lab",
+    "review-1",
+    -40,
+    1,
+    2,
+    3,
+    List(2412),
+    List(1),
+    3,
+    4,
+    now.minusSeconds(3600),
+    now.plusSeconds(3600)
+  )
   private val samples = List(-59, -60, -61).foldLeft(RadioSamples())(_.add(_))
 
   test("stable calibrated transmitter samples produce a labeled estimate with uncertainty") {
@@ -39,9 +52,12 @@ class WirelessObservationSuite extends FunSuite:
   }
 
   test("wire decoder handles nested radio and omits multicast device identities") {
-    val decoded = WirelessObservation.decode("""{"schema_version":2,"sensor_id":"s","observed_at":"2026-10-07T16:00:00Z",
+    val decoded = WirelessObservation
+      .decode("""{"schema_version":2,"sensor_id":"s","observed_at":"2026-10-07T16:00:00Z",
       "mac":{"source_mac":"FF:FF:FF:FF:FF:FF","bssid":"02:00:00:00:00:01","transmitter_mac":"02:00:00:00:00:02"},
-      "rf":{"signal_dbm":-60,"frequency_mhz":2412,"channel_number":1},"payload":"must not persist"}""").toOption.get
+      "rf":{"signal_dbm":-60,"frequency_mhz":2412,"channel_number":1},"payload":"must not persist"}""")
+      .toOption
+      .get
     assertEquals(decoded.sourceMac, None)
     assertEquals(decoded.signalDbm, Some(-60))
     assertEquals(decoded.bssid, Some("02:00:00:00:00:01"))

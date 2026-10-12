@@ -40,13 +40,14 @@ final class PostgresTransactor private (
 
   override def withLoadTransaction[A](use: PostgresLoadTransaction => IO[A]): IO[A] =
     withTransactionIO { conn =>
-      use(new PostgresLoadTransaction:
-        override def insertChunk(
-          batchId: String,
-          target: PostgresSinkTarget,
-          rows: PostgresRowSet,
-          rowOffset: Long
-        ): IO[Long] = IO.blocking(doInsertChunk(conn, batchId, target, rows, rowOffset))
+      use(
+        new PostgresLoadTransaction:
+          override def insertChunk(
+            batchId: String,
+            target: PostgresSinkTarget,
+            rows: PostgresRowSet,
+            rowOffset: Long
+          ): IO[Long] = IO.blocking(doInsertChunk(conn, batchId, target, rows, rowOffset))
       )
     }
 
@@ -98,8 +99,7 @@ final class PostgresTransactor private (
   private def suppressCleanup(error: Throwable)(cleanup: => Unit): IO[Unit] =
     IO.blocking {
       try cleanup
-      catch
-        case scala.util.control.NonFatal(cleanupError) if cleanupError ne error => error.addSuppressed(cleanupError)
+      catch case scala.util.control.NonFatal(cleanupError) if cleanupError ne error => error.addSuppressed(cleanupError)
     }
 
   private def suppressClose(error: Throwable)(state: TransactionConnection): IO[Unit] =
@@ -318,120 +318,120 @@ final class PostgresTransactor private (
     blockedRows: List[BlockedEventInsert],
     rowOffset: Long
   ): Long =
-      val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
-      try
-        val blockedBySequence = blockedRows.map(row => row.rowSequence -> row).toMap
-        val now = Timestamp.from(Instant.now())
-        val allRows = rows.zipWithIndex.map { case (r, idx) =>
-          val blocked = blockedBySequence.get(rowOffset + idx)
-          val eventParams = Seq[Any](
-            r.eventId,
-            ts(r.eventTime),
-            r.eventType,
-            r.host,
-            optStr(r.peerIp),
-            optStr(r.wgPubkey),
-            optStr(r.deviceId.flatMap(value => scala.util.Try(java.util.UUID.fromString(value).toString).toOption)),
-            r.bytesUp,
-            r.bytesDown,
-            optLong(r.statusCode),
-            r.blocked,
-            r.classification,
-            optStr(r.correlationId),
-            optStr(r.parentEventId),
-            r.rawJson,
-            batchId,
-            rowOffset + idx + 1L,
-            ts(r.eventTime),
-            optStr(r.wgPubkey),
-            optStr(r.deviceId),
-            r.identitySource,
-            optStr(r.peerHostname),
-            optStr(r.clientUa),
-            optStr(r.obfuscationProfile),
-            optLong(r.eventSequence),
-            optLong(r.durationMs),
-            optStr(r.reason),
-            r.rawJson
-          )
-          val rollupParams = blocked match
-            case Some(value) =>
-              Seq[Any](
-                value.host,
-                1L,
-                value.blockedBytes,
-                value.frequencyHz.getOrElse(0.0d),
-                value.verdict,
-                optStr(value.category),
-                value.riskScore.getOrElse(0.0d),
-                value.tarpitHeldMs,
-                optLong(value.iatMs),
-                value.consecutiveBlocks.getOrElse(0L),
-                optStr(value.lastVerdict),
-                optStr(value.tlsVer),
-                optStr(value.alpn),
-                optStr(value.ja3Lite),
-                optStr(value.resolvedIp),
-                optStr(value.asnOrg),
-                now,
-                now,
-                true
-              )
-            case None =>
-              Seq[Any](
-                r.host,
-                0L,
-                0L,
-                0.0d,
-                "BLOCKED",
-                null,
-                0.0d,
-                0L,
-                null,
-                0L,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                now,
-                now,
-                false
-              )
-          eventParams ++ rollupParams
-        }
-        executeBatch(stmt, allRows): Unit
-        rows.size.toLong
-      finally stmt.close()
+    val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
+    try
+      val blockedBySequence = blockedRows.map(row => row.rowSequence -> row).toMap
+      val now = Timestamp.from(Instant.now())
+      val allRows = rows.zipWithIndex.map { case (r, idx) =>
+        val blocked = blockedBySequence.get(rowOffset + idx)
+        val eventParams = Seq[Any](
+          r.eventId,
+          ts(r.eventTime),
+          r.eventType,
+          r.host,
+          optStr(r.peerIp),
+          optStr(r.wgPubkey),
+          optStr(r.deviceId.flatMap(value => scala.util.Try(java.util.UUID.fromString(value).toString).toOption)),
+          r.bytesUp,
+          r.bytesDown,
+          optLong(r.statusCode),
+          r.blocked,
+          r.classification,
+          optStr(r.correlationId),
+          optStr(r.parentEventId),
+          r.rawJson,
+          batchId,
+          rowOffset + idx + 1L,
+          ts(r.eventTime),
+          optStr(r.wgPubkey),
+          optStr(r.deviceId),
+          r.identitySource,
+          optStr(r.peerHostname),
+          optStr(r.clientUa),
+          optStr(r.obfuscationProfile),
+          optLong(r.eventSequence),
+          optLong(r.durationMs),
+          optStr(r.reason),
+          r.rawJson
+        )
+        val rollupParams = blocked match
+          case Some(value) =>
+            Seq[Any](
+              value.host,
+              1L,
+              value.blockedBytes,
+              value.frequencyHz.getOrElse(0.0d),
+              value.verdict,
+              optStr(value.category),
+              value.riskScore.getOrElse(0.0d),
+              value.tarpitHeldMs,
+              optLong(value.iatMs),
+              value.consecutiveBlocks.getOrElse(0L),
+              optStr(value.lastVerdict),
+              optStr(value.tlsVer),
+              optStr(value.alpn),
+              optStr(value.ja3Lite),
+              optStr(value.resolvedIp),
+              optStr(value.asnOrg),
+              now,
+              now,
+              true
+            )
+          case None =>
+            Seq[Any](
+              r.host,
+              0L,
+              0L,
+              0.0d,
+              "BLOCKED",
+              null,
+              0.0d,
+              0L,
+              null,
+              0L,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              now,
+              now,
+              false
+            )
+        eventParams ++ rollupParams
+      }
+      executeBatch(stmt, allRows): Unit
+      rows.size.toLong
+    finally stmt.close()
 
   // ── proxy_payload_audit ───────────────────────────────────────
   override def insertProxyPayloadAudit(batchId: String, rows: List[ProxyPayloadAuditInsert]): IO[Long] =
     withTransactionRetry("insert_proxy_payload_audit")(conn => doInsertProxyPayloadAudit(conn, rows))
 
   private def doInsertProxyPayloadAudit(conn: Connection, rows: List[ProxyPayloadAuditInsert]): Long =
-      val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyPayloadAudit)
-      try
-        val params = rows.map(r =>
-          Seq[Any](
-            r.correlationId,
-            r.host,
-            r.direction,
-            ts(r.capturedAt),
-            r.byteOffset,
-            optStr(r.payloadObjectKey),
-            optStr(r.contentType),
-            optStr(r.httpMethod),
-            optLong(r.httpStatus),
-            optStr(r.httpPath),
-            r.isEncrypted,
-            r.truncated,
-            optStr(r.peerIp),
-            optStr(r.notes)
-          )
+    val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyPayloadAudit)
+    try
+      val params = rows.map(r =>
+        Seq[Any](
+          r.correlationId,
+          r.host,
+          r.direction,
+          ts(r.capturedAt),
+          r.byteOffset,
+          optStr(r.payloadObjectKey),
+          optStr(r.contentType),
+          optStr(r.httpMethod),
+          optLong(r.httpStatus),
+          optStr(r.httpPath),
+          r.isEncrypted,
+          r.truncated,
+          optStr(r.peerIp),
+          optStr(r.notes)
         )
-        executeBatch(stmt, params)
-      finally stmt.close()
+      )
+      executeBatch(stmt, params)
+    finally stmt.close()
 
   // ── wireless_audit_frames + sensor upsert ─────────────────────
   override def insertWirelessAuditFrames(batchId: String, rows: List[WirelessAuditFrameInsert]): IO[Long] =
@@ -445,51 +445,51 @@ final class PostgresTransactor private (
   ): Long =
     if rows.isEmpty then 0L
     else
-        upsertWirelessSensors(conn, rows)
+      upsertWirelessSensors(conn, rows)
 
-        val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessAuditFrames)
-        try
-          val params = rows.map(r =>
-            Seq[Any](
-              batchId,
-              r.rowSequence,
-              r.eventType,
-              ts(r.observedAt),
-              r.sensorId,
-              r.locationId,
-              r.iface,
-              r.channel,
-              bandForChannel(r.channel),
-              optStr(r.frameType),
-              r.frameSubtype,
-              optStr(r.bssid),
-              optStr(r.sourceMac),
-              optStr(r.destinationMac),
-              optStr(r.transmitterMac),
-              optStr(r.receiverMac),
-              optStr(r.destinationBssid),
-              optStr(r.ssid),
-              optLong(r.signalDbm),
-              optLong(r.sequenceNumber),
-              r.rawLen,
-              r.isRetry,
-              r.isMoreData,
-              r.isPowerSave,
-              r.isProtected,
-              r.isToDs,
-              r.isFromDs,
-              r.isHandshake,
-              r.securityFlags,
-              optStr(r.deviceId),
-              optStr(r.username),
-              r.identitySource,
-              optStr(r.tags),
-              optStr(r.anomalyReasons),
-              optStr(r.rawJson)
-            )
+      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessAuditFrames)
+      try
+        val params = rows.map(r =>
+          Seq[Any](
+            batchId,
+            r.rowSequence,
+            r.eventType,
+            ts(r.observedAt),
+            r.sensorId,
+            r.locationId,
+            r.iface,
+            r.channel,
+            bandForChannel(r.channel),
+            optStr(r.frameType),
+            r.frameSubtype,
+            optStr(r.bssid),
+            optStr(r.sourceMac),
+            optStr(r.destinationMac),
+            optStr(r.transmitterMac),
+            optStr(r.receiverMac),
+            optStr(r.destinationBssid),
+            optStr(r.ssid),
+            optLong(r.signalDbm),
+            optLong(r.sequenceNumber),
+            r.rawLen,
+            r.isRetry,
+            r.isMoreData,
+            r.isPowerSave,
+            r.isProtected,
+            r.isToDs,
+            r.isFromDs,
+            r.isHandshake,
+            r.securityFlags,
+            optStr(r.deviceId),
+            optStr(r.username),
+            r.identitySource,
+            optStr(r.tags),
+            optStr(r.anomalyReasons),
+            optStr(r.rawJson)
           )
-          executeBatch(stmt, params)
-        finally stmt.close()
+        )
+        executeBatch(stmt, params)
+      finally stmt.close()
 
   private def upsertWirelessSensors(conn: Connection, rows: List[WirelessAuditFrameInsert]): Unit =
     val sensors = rows.foldLeft(Map.empty[String, WirelessAuditFrameInsert]) { (acc, row) =>
@@ -523,45 +523,45 @@ final class PostgresTransactor private (
     batchId: String,
     rows: List[WirelessBandwidthInsert]
   ): Long =
-      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessBandwidthWindows)
-      try
-        val params = rows.map(r =>
-          Seq[Any](
-            batchId,
-            r.rowSequence,
-            r.schemaVersion,
-            ts(r.windowStart),
-            ts(r.windowEnd),
-            r.sensorId,
-            r.locationId,
-            r.iface,
-            r.channel,
-            bandForChannel(r.channel),
-            r.sourceMac,
-            r.destinationBssid,
-            optStr(r.ssid),
-            r.bytes,
-            r.frameCount,
-            r.retryCount,
-            r.moreDataCount,
-            r.powerSaveCount,
-            optLong(r.strongestSignalDbm),
-            r.histUnder100,
-            r.hist100500,
-            r.hist5001000,
-            r.hist10001500,
-            optLong(r.interArrivalP50Ms),
-            r.externalBssid,
-            r.thresholdExceeded,
-            optLong(r.wallClockDeltaMs),
-            r.windowIsPartial,
-            r.publishedAt.map(ts).orNull
-          )
+    val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessBandwidthWindows)
+    try
+      val params = rows.map(r =>
+        Seq[Any](
+          batchId,
+          r.rowSequence,
+          r.schemaVersion,
+          ts(r.windowStart),
+          ts(r.windowEnd),
+          r.sensorId,
+          r.locationId,
+          r.iface,
+          r.channel,
+          bandForChannel(r.channel),
+          r.sourceMac,
+          r.destinationBssid,
+          optStr(r.ssid),
+          r.bytes,
+          r.frameCount,
+          r.retryCount,
+          r.moreDataCount,
+          r.powerSaveCount,
+          optLong(r.strongestSignalDbm),
+          r.histUnder100,
+          r.hist100500,
+          r.hist5001000,
+          r.hist10001500,
+          optLong(r.interArrivalP50Ms),
+          r.externalBssid,
+          r.thresholdExceeded,
+          optLong(r.wallClockDeltaMs),
+          r.windowIsPartial,
+          r.publishedAt.map(ts).orNull
         )
-        val inserted = executeBatch(stmt, params)
-        mergeBandwidthAlerts(conn, batchId, rows): Unit
-        inserted
-      finally stmt.close()
+      )
+      val inserted = executeBatch(stmt, params)
+      mergeBandwidthAlerts(conn, batchId, rows): Unit
+      inserted
+    finally stmt.close()
 
   private def mergeBandwidthAlerts(conn: Connection, batchId: String, rows: List[WirelessBandwidthInsert]): Long =
     val exceeded = rows.filter(_.thresholdExceeded)
@@ -841,9 +841,7 @@ final class PostgresTransactor private (
     alertType: String,
     rows: List[WirelessAlertRow]
   ): IO[Long] =
-    withTransactionRetry(s"merge_wireless_$alertType")(conn =>
-      doMergeWirelessAlerts(conn, batchId, alertType, rows)
-    )
+    withTransactionRetry(s"merge_wireless_$alertType")(conn => doMergeWirelessAlerts(conn, batchId, alertType, rows))
 
   private def doMergeWirelessAlerts(
     conn: Connection,
@@ -852,48 +850,48 @@ final class PostgresTransactor private (
     rows: List[WirelessAlertRow]
   ): Long =
     val now = Timestamp.from(Instant.now())
-      val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
-      try
-        val params = rows.map { row =>
-          val sourceEventId = PostgresTransactor.wirelessAlertSourceEventId(batchId, row.rowSequence)
-          val alertId = PostgresTransactor.wirelessAlertId(sourceEventId, alertType)
-          val evidence = PostgresTransactor.wirelessAlertEvidence(
-            alertType,
-            row.sensorId,
-            row.locationId,
-            row.primaryMac,
-            row.secondaryMac,
-            row.ssid,
-            row.signalDbm,
-            row.detailsJson
-          )
-          Seq[Any](
-            alertId,
-            alertType,
-            row.subjectKind,
-            row.subjectId,
-            row.severity,
-            evidence,
-            sourceEventId,
-            batchId,
-            row.rowSequence,
-            ts(row.detectedAt),
-            row.sensorId,
-            row.locationId,
-            optStr(row.iface),
-            optLong(row.channel),
-            optStr(row.primaryMac),
-            optStr(row.secondaryMac),
-            optStr(row.ssid),
-            optLong(row.signalDbm),
-            row.detailsJson,
-            optStr(row.rawJson),
-            now,
-            now
-          )
-        }
-        executeBatch(stmt, params)
-      finally stmt.close()
+    val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessAlerts)
+    try
+      val params = rows.map { row =>
+        val sourceEventId = PostgresTransactor.wirelessAlertSourceEventId(batchId, row.rowSequence)
+        val alertId = PostgresTransactor.wirelessAlertId(sourceEventId, alertType)
+        val evidence = PostgresTransactor.wirelessAlertEvidence(
+          alertType,
+          row.sensorId,
+          row.locationId,
+          row.primaryMac,
+          row.secondaryMac,
+          row.ssid,
+          row.signalDbm,
+          row.detailsJson
+        )
+        Seq[Any](
+          alertId,
+          alertType,
+          row.subjectKind,
+          row.subjectId,
+          row.severity,
+          evidence,
+          sourceEventId,
+          batchId,
+          row.rowSequence,
+          ts(row.detectedAt),
+          row.sensorId,
+          row.locationId,
+          optStr(row.iface),
+          optLong(row.channel),
+          optStr(row.primaryMac),
+          optStr(row.secondaryMac),
+          optStr(row.ssid),
+          optLong(row.signalDbm),
+          row.detailsJson,
+          optStr(row.rawJson),
+          now,
+          now
+        )
+      }
+      executeBatch(stmt, params)
+    finally stmt.close()
 
   private def bandForChannel(channel: Long): String =
     if channel >= 1 && channel <= 14 then "2.4GHz"
@@ -902,65 +900,61 @@ final class PostgresTransactor private (
 
   // ── wireless_client_inventory ─────────────────────────────────
   override def insertWirelessClientInventory(batchId: String, rows: List[WirelessClientInventoryInsert]): IO[Long] =
-    withTransactionRetry("insert_wireless_client_inventory")(conn =>
-      doInsertWirelessClientInventory(conn, rows)
-    )
+    withTransactionRetry("insert_wireless_client_inventory")(conn => doInsertWirelessClientInventory(conn, rows))
 
   private def doInsertWirelessClientInventory(
     conn: Connection,
     rows: List[WirelessClientInventoryInsert]
   ): Long =
-      val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessClientInventory)
-      try
-        val params = rows.map(r =>
-          Seq[Any](
-            r.sensorId,
-            r.locationId,
-            ts(r.snapshotAt),
-            r.clientMac,
-            optStr(r.bssid),
-            optStr(r.ssid),
-            optStr(r.deviceId),
-            optStr(r.username),
-            optStr(r.identitySource),
-            ts(r.lastSeen),
-            ts(r.firstSeen),
-            optLong(r.signalDbm),
-            r.isAuthorized,
-            ts(r.snapshotAt)
-          )
+    val stmt = conn.prepareStatement(BatchSinkSql.UpsertWirelessClientInventory)
+    try
+      val params = rows.map(r =>
+        Seq[Any](
+          r.sensorId,
+          r.locationId,
+          ts(r.snapshotAt),
+          r.clientMac,
+          optStr(r.bssid),
+          optStr(r.ssid),
+          optStr(r.deviceId),
+          optStr(r.username),
+          optStr(r.identitySource),
+          ts(r.lastSeen),
+          ts(r.firstSeen),
+          optLong(r.signalDbm),
+          r.isAuthorized,
+          ts(r.snapshotAt)
         )
-        executeBatch(stmt, params)
-      finally stmt.close()
+      )
+      executeBatch(stmt, params)
+    finally stmt.close()
 
   // ── wireless_probe_requests ───────────────────────────────────
   override def insertWirelessProbeRequests(batchId: String, rows: List[WirelessProbeRequestInsert]): IO[Long] =
-    withTransactionRetry("insert_wireless_probe_requests")(conn =>
-      doInsertWirelessProbeRequests(conn, batchId, rows)
-    )
+    withTransactionRetry("insert_wireless_probe_requests")(conn => doInsertWirelessProbeRequests(conn, batchId, rows))
 
   private def doInsertWirelessProbeRequests(
     conn: Connection,
     batchId: String,
     rows: List[WirelessProbeRequestInsert]
   ): Long =
-      val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessProbeRequests)
-      try
-        val params = rows.map(r =>
-          Seq[Any](
-            batchId,
-            r.rowSequence,
-            r.clientMac,
-            r.ssid,
-            optStr(r.knownBssid),
-            ts(r.firstSeen),
-            ts(r.lastSeen),
-            r.probeCount,
-            ts(r.firstSeen)
-          )
+    val stmt = conn.prepareStatement(BatchSinkSql.InsertWirelessProbeRequests)
+    try
+      val params = rows.map(r =>
+        Seq[Any](
+          batchId,
+          r.rowSequence,
+          r.clientMac,
+          r.ssid,
+          optStr(r.knownBssid),
+          ts(r.firstSeen),
+          ts(r.lastSeen),
+          r.probeCount,
+          ts(r.firstSeen)
         )
-        executeBatch(stmt, params)
-      finally stmt.close()
+      )
+      executeBatch(stmt, params)
+    finally stmt.close()
 
   def preflightCheck(requiredTables: List[String]): IO[List[String]] =
     if requiredTables.isEmpty then IO.pure(List.empty)
@@ -1088,10 +1082,12 @@ object PostgresTransactor:
     signalDbm: Option[Long],
     detailsJson: String
   ): String =
-    val details = circeParser.parse(detailsJson).fold(
-      error => throw IllegalArgumentException(s"invalid wireless alert details JSON: ${error.message}"),
-      identity
-    )
+    val details = circeParser
+      .parse(detailsJson)
+      .fold(
+        error => throw IllegalArgumentException(s"invalid wireless alert details JSON: ${error.message}"),
+        identity
+      )
     Json
       .obj(
         "event_type" -> Json.fromString(alertType),

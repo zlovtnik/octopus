@@ -12,28 +12,28 @@ import java.util.concurrent.{Executors, ThreadFactory}
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
 
 private[coordinator] final case class DatabaseRuntime(
-    transactor: PostgresTransactor,
-    doobieTx: Transactor[IO],
-    dbSemaphore: Semaphore[IO],
-    repository: PostgresRepository,
-    ingestionStore: PostgresIngestionStore,
-    outboxStore: PostgresOutboxStore,
-    projectionStore: PostgresProjectionStore,
-    maintenanceStore: PostgresMaintenanceStore,
-    resultStore: PostgresResultStore,
-    processorStateStore: PostgresProcessorStateStore,
-    loadHandler: PostgresLoadHandler,
-    payloadResolver: PostgresPayloadResolver,
-    payloadLookup: String => IO[Option[String]],
-    preflight: PostgresSchemaPreflight
+  transactor: PostgresTransactor,
+  doobieTx: Transactor[IO],
+  dbSemaphore: Semaphore[IO],
+  repository: PostgresRepository,
+  ingestionStore: PostgresIngestionStore,
+  outboxStore: PostgresOutboxStore,
+  projectionStore: PostgresProjectionStore,
+  maintenanceStore: PostgresMaintenanceStore,
+  resultStore: PostgresResultStore,
+  processorStateStore: PostgresProcessorStateStore,
+  loadHandler: PostgresLoadHandler,
+  payloadResolver: PostgresPayloadResolver,
+  payloadLookup: String => IO[Option[String]],
+  preflight: PostgresSchemaPreflight
 )
 
 private[coordinator] object DatabaseModule:
   def acquire(
-      postgres: PostgresConfig,
-      projection: WirelessProjectionConfig,
-      outboxDir: String,
-      metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None
+    postgres: PostgresConfig,
+    projection: WirelessProjectionConfig,
+    outboxDir: String,
+    metrics: Option[com.sslproxy.coordinator.observability.CoordinatorMetrics] = None
   ): Resource[IO, DatabaseRuntime] =
     for
       blockingEc <- blockingExecutionContext(postgres.poolSize)
@@ -42,9 +42,11 @@ private[coordinator] object DatabaseModule:
       doobieTx = Transactor.fromDataSource[IO](transactor.dataSource, blockingEc)
       preflight = new PostgresSchemaPreflight(transactor, postgres)
       _ <- Resource.eval(preflight.validate())
-      dbSemaphore <- Resource.eval(Semaphore[IO](
-        dbWorkerPermits(postgres.poolSize, postgres.healthcheckReserve)
-      ))
+      dbSemaphore <- Resource.eval(
+        Semaphore[IO](
+          dbWorkerPermits(postgres.poolSize, postgres.healthcheckReserve)
+        )
+      )
     yield
       val repository = new PostgresRepository(doobieTx, Some(dbSemaphore), projection, metrics)
       val payloadResolver = new PostgresPayloadResolver(outboxDir)
@@ -77,7 +79,7 @@ private[coordinator] object DatabaseModule:
       )
 
   private[coordinator] def blockingExecutionContext(
-      poolSize: Int
+    poolSize: Int
   ): Resource[IO, ExecutionContextExecutorService] =
     Resource.make(IO {
       ExecutionContext.fromExecutorService(
@@ -93,8 +95,8 @@ private[coordinator] object DatabaseModule:
     })(ec => IO.blocking(ec.shutdown()))
 
   private[coordinator] def dbWorkerPermits(
-      poolSize: Int,
-      healthcheckReserve: Int
+    poolSize: Int,
+    healthcheckReserve: Int
   ): Long =
     // Schema introspection and health checks use the transactor directly.
     // Keep the configured capacity available when admitted worker traffic is busy.

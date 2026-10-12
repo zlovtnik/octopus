@@ -14,12 +14,14 @@ class ProcessorWorkloadWiringSuite extends FunSuite:
       "wiring/workloads/RetentionWorkloads.scala",
       "wiring/RuntimeStreams.scala"
     )
-    val source = sources.map { path =>
-      Files.readString(
-        java.nio.file.Path.of(s"src/main/scala/com/sslproxy/coordinator/$path"),
-        StandardCharsets.UTF_8
-      )
-    }.mkString("\n")
+    val source = sources
+      .map { path =>
+        Files.readString(
+          java.nio.file.Path.of(s"src/main/scala/com/sslproxy/coordinator/$path"),
+          StandardCharsets.UTF_8
+        )
+      }
+      .mkString("\n")
 
     ProcessorId.octopusOwned.foreach { id =>
       val caseName = id.productPrefix

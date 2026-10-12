@@ -17,7 +17,8 @@ class HealthRoutes(
   transactor: PostgresTransactor,
   metrics: CoordinatorMetrics,
   processorReadiness: Option[ProcessorReadiness] = None,
-  databaseCheckTimeout: FiniteDuration = 5.seconds
+  databaseCheckTimeout: FiniteDuration = 5.seconds,
+  additionalReadiness: IO[Boolean] = IO.pure(true)
 ):
   private val prometheusContentType =
     Header.Raw(ci"Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -28,15 +29,17 @@ class HealthRoutes(
       HealthRoutes.withTimeout(
         processorReadiness.fold(IO.pure(true))(_.ready),
         databaseCheckTimeout
-      )
-    ).parTupled.flatMap { case (databaseHealthy, processorsHealthy) =>
-      val healthy = databaseHealthy && processorsHealthy
+      ),
+      HealthRoutes.withTimeout(additionalReadiness, databaseCheckTimeout)
+    ).parTupled.flatMap { case (databaseHealthy, processorsHealthy, dqHealthy) =>
+      val healthy = databaseHealthy && processorsHealthy && dqHealthy
       val status = if healthy then "UP" else "DOWN"
       val json = Json.obj(
         "status" -> Json.fromString(status),
         "components" -> Json.obj(
           "postgres" -> Json.obj("status" -> Json.fromString(if databaseHealthy then "UP" else "DOWN")),
-          "processors" -> Json.obj("status" -> Json.fromString(if processorsHealthy then "UP" else "DOWN"))
+          "processors" -> Json.obj("status" -> Json.fromString(if processorsHealthy then "UP" else "DOWN")),
+          "dq" -> Json.obj("status" -> Json.fromString(if dqHealthy then "UP" else "DOWN"))
         )
       )
       if healthy then Ok(json)

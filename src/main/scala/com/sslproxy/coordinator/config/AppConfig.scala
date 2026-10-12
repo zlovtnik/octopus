@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.config
 import cats.data.NonEmptyList
 import com.sslproxy.coordinator.config.StringListConfigReader.given
 import com.sslproxy.coordinator.processor.ProcessorId
+import com.sslproxy.coordinator.dq.DqConfig
 import com.typesafe.config.Config
 import pureconfig.error.ConfigReaderFailures
 import pureconfig.{ConfigCursor, ConfigReader}
@@ -35,7 +36,8 @@ final case class AppConfig(
   runtime: RuntimeConfig,
   processors: ProcessorConfig,
   archive: ArchiveConfig,
-  publicStats: PublicStatsConfig = PublicStatsConfig()
+  publicStats: PublicStatsConfig = PublicStatsConfig(),
+  dq: DqConfig = DqConfig()
 ) derives ConfigReader
 
 final case class PostgresConfig(
@@ -216,7 +218,7 @@ object AppConfig:
 
   def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
     val isDevelopment = config.runtime.environment == "development"
-    val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty
+    val runtimeActive = config.runtime.anyEnabled || config.processors.enabled.nonEmpty || config.dq.enabled
     val stagedPostgresErrors =
       if config.postgres.enabled then enabledPostgresErrors(config.postgres, isDevelopment)
       else List.empty
@@ -232,6 +234,13 @@ object AppConfig:
         ).flatten ++
         ingestErrors(config.ingest) ++
         archiveErrors(config.archive, config.processors) ++
+        config.dq.errors ++
+        List(
+          Option.when(config.dq.enabled && (config.archive.endpoint.trim.isEmpty ||
+            config.archive.accessKey.trim.isEmpty || config.archive.secretKey.trim.isEmpty))(
+            "enabled DQ requires MINIO_ENDPOINT, MINIO_ACCESS_KEY_ID and MINIO_SECRET_ACCESS_KEY"
+          )
+        ).flatten ++
         kafkaErrors(
           config.kafka
         ) ++

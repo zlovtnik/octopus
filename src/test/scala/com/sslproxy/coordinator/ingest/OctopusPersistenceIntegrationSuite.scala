@@ -22,15 +22,15 @@ import com.sslproxy.coordinator.postgres.sql.{
 }
 import com.sslproxy.coordinator.postgres.{
   BlockedEventInsert,
-  PostgresPayloadResolver,
+  PostgresClock,
   PostgresLoad,
   PostgresLoadHandler,
-  PostgresTransformService,
-  PostgresClock,
+  PostgresPayloadResolver,
   PostgresRepository,
   PostgresResult,
   PostgresSchemaPreflight,
   PostgresTransactor,
+  PostgresTransformService,
   ProxyEventInsert,
   WirelessBandwidthInsert,
   WirelessRogueApInsert,

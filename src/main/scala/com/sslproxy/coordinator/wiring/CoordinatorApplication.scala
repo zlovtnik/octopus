@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.wiring
 
-import cats.effect.{IO, Resource}
 import cats.effect.kernel.Fiber
+import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}

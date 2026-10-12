@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.wiring
 
-import cats.effect.{IO, Resource}
 import cats.effect.std.Semaphore
+import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.{PostgresConfig, WirelessProjectionConfig}
 import com.sslproxy.coordinator.postgres.*
 import com.sslproxy.coordinator.postgres.sql.{DispatchAuthorizationSql, IngestionSql}

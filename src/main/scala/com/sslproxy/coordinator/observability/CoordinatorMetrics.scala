@@ -2,8 +2,8 @@ package com.sslproxy.coordinator.observability
 
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.observability.StructuredLogger
-import io.micrometer.core.instrument.{Counter, Gauge, Meter, Timer}
 import io.micrometer.core.instrument.binder.jvm.{JvmGcMetrics, JvmMemoryMetrics}
+import io.micrometer.core.instrument.{Counter, Gauge, Meter, Timer}
 import io.micrometer.prometheusmetrics.{PrometheusConfig, PrometheusMeterRegistry}
 import org.apache.kafka.common.{Metric, MetricName}
 

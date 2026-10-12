@@ -1,8 +1,9 @@
 package com.sslproxy.coordinator.config
 
-import io.circe.{Decoder, parser}
 import io.circe.generic.semiauto.deriveDecoder
+import io.circe.{Decoder, parser}
 import pureconfig.ConfigReader
+
 import java.time.Instant
 
 final case class SensorCalibration(

@@ -4,8 +4,8 @@ import cats.effect.IO
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.circe.Json
 import munit.CatsEffectSuite
-import org.http4s.{Method, Request, Status, Uri}
 import org.http4s.circe.*
+import org.http4s.{Method, Request, Status, Uri}
 import org.typelevel.ci.*
 
 import java.time.Instant

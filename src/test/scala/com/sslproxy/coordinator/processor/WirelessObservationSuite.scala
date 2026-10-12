@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.processor
 
 import com.sslproxy.coordinator.config.{SensorCalibration, WirelessProjectionConfig}
 import munit.FunSuite
+
 import java.time.Instant
 
 class WirelessObservationSuite extends FunSuite:

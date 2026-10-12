@@ -3,9 +3,9 @@ package com.sslproxy.coordinator.http
 import cats.effect.IO
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import io.circe.Json
-import org.http4s.{Header, HttpRoutes}
 import org.http4s.circe.*
 import org.http4s.dsl.io.*
+import org.http4s.{Header, HttpRoutes}
 import org.typelevel.ci.*
 
 import java.time.Instant

@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import fs2.Stream
 import munit.CatsEffectSuite
+
 import scala.concurrent.duration.*
 
 class BoundedBatchingSuite extends CatsEffectSuite:

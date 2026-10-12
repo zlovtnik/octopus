@@ -1,8 +1,9 @@
 package com.sslproxy.coordinator.observability
 
-import cats.effect.{IO, Deferred}
+import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import munit.CatsEffectSuite
+
 import scala.concurrent.duration.*
 
 class OperationalStatsServiceSuite extends CatsEffectSuite:

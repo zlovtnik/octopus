@@ -10,8 +10,8 @@ import com.sslproxy.coordinator.kafka.{
   WirelessHeartbeatStream
 }
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.wiring.DatabaseRuntime
 import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorWorkload}
+import com.sslproxy.coordinator.wiring.DatabaseRuntime
 import fs2.kafka.KafkaProducer
 
 private[coordinator] object ConsumerWorkloads:

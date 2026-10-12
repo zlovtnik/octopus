@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
 import fs2.{Chunk, Pull, Stream}
+
 import scala.concurrent.duration.FiniteDuration
 
 private[kafka] object BoundedBatching:

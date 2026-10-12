@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.processor
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.SensorCalibration
 import io.circe.{Json, parser}
+
 import java.time.Instant
 
 final case class WirelessObservation(

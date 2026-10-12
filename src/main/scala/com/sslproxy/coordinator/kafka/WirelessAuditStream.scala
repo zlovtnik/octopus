@@ -10,6 +10,7 @@ import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresRepository
 import com.sslproxy.coordinator.processor.WirelessObservation
 import fs2.Stream
 import fs2.kafka.KafkaProducer
+
 import scala.concurrent.duration.*
 
 object WirelessAuditStream:

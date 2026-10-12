@@ -3,9 +3,9 @@ package com.sslproxy.coordinator.observability
 import cats.data.{Kleisli, OptionT}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator
 import io.opentelemetry.api.trace.{SpanKind, StatusCode, Tracer}
-import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.context.Context
 import io.opentelemetry.context.propagation.TextMapGetter
 import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk

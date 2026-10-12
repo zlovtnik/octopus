@@ -3,9 +3,9 @@ package com.sslproxy.coordinator.postgres.sql
 import munit.FunSuite
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.PostgreSQLContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.containers.wait.strategy.WaitAllStrategy
+import org.testcontainers.containers.wait.strategy.{Wait, WaitAllStrategy}
 import org.testcontainers.utility.DockerImageName
+
 import java.sql.DriverManager
 import scala.util.Using
 

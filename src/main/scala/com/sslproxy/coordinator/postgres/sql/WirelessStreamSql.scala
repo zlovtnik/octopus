@@ -4,12 +4,13 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{SensorCalibration, WirelessProjectionConfig}
 import com.sslproxy.coordinator.domain.BrokerRecordMetadata
 import com.sslproxy.coordinator.processor.{CalibratedRange, RadioSamples, WirelessObservation}
-import doobie.{ConnectionIO, FC}
 import doobie.implicits.*
+import doobie.{ConnectionIO, FC}
 import io.circe.{Json, parser}
+
+import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 import java.time.Instant
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 object WirelessStreamSql:

@@ -6,9 +6,9 @@ import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.postgres.PostgresTransactor
 import com.sslproxy.coordinator.processor.ProcessorReadiness
 import io.circe.Json
-import org.http4s.{Header, HttpRoutes, Response, Status}
 import org.http4s.circe.*
 import org.http4s.dsl.io.*
+import org.http4s.{Header, HttpRoutes, Response, Status}
 import org.typelevel.ci.*
 
 import scala.concurrent.duration.*

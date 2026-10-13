@@ -35,16 +35,26 @@ final class DqRetention private[dq](
       .`object`(key).versionId(version).build())
   }
 
+  private def expireReference(reference: Json): IO[Unit] =
+    IO {
+      val artifactId = DqArtifacts.required(reference, "artifact_id")
+      val version = DqArtifacts.required(reference, "version_id")
+      (artifactId, DqRetention.objectKey(reference, config), version)
+    }.attempt.flatMap {
+      case Right((artifactId, key, version)) =>
+        remove(key, version) *> database(DqRetentionSql.forgetArtifact(artifactId, version)).void
+      case Left(error: DqPermanentError) =>
+        database(DqRetentionSql.forgetInvalidArtifact(config.installationId, config.namespace, reference)).void *>
+          IO(log.warn("dq_retention", "status" -> "invalid_reference_discarded", "error_code" -> error.code))
+      case Left(error) => IO.raiseError(error)
+    }
+
   private def expiredBatch: IO[Int] =
     for
       reopened <- database(DqRetentionSql.reopenArtifacts(config.installationId, config.namespace, 100))
       closed <- database(DqRetentionSql.closeArtifacts(config.installationId, config.namespace, 100))
       references <- database(DqRetentionSql.expiredArtifacts(config.installationId, config.namespace, 100))
-      _ <- references.traverse_ { reference =>
-        val version = DqArtifacts.required(reference, "version_id")
-        val key = DqRetention.objectKey(reference, config)
-        remove(key, version) *> database(DqRetentionSql.forgetArtifact(DqArtifacts.required(reference, "artifact_id"), version)).void
-      }
+      _ <- references.traverse_(expireReference)
       pruned <- database(DqRetentionSql.pruneRuns(config.installationId, config.namespace, 100))
       evidence <- database(DqRetentionSql.pruneEvidence(config.installationId, config.namespace, 1000))
     yield reopened + closed + references.size + pruned + evidence

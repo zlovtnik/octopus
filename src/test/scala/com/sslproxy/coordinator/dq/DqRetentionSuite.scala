@@ -92,6 +92,25 @@ class DqRetentionSuite extends CatsEffectSuite:
     yield ()
   }
 
+  test("invalid expired references are discarded so retention can continue pruning") {
+    val namespace = "invalid-reference"
+    for
+      _ <- seed("invalid-reference-run",namespace,"failed",Json.obj())
+      _ <- DqRetentionSql.closeArtifacts("retention-test",namespace,100).transact(xa)
+      _ <- sql"""UPDATE octopus_core.dq_artifacts SET reference=jsonb_set(reference,'{uri}',to_jsonb('s3://other-bucket/invalid'::TEXT))
+        WHERE artifact_id='invalid-reference-run'""".update.run.transact(xa)
+      references <- DqRetentionSql.expiredArtifacts("retention-test",namespace,100).transact(xa)
+      _ = assertEquals(references.size,1)
+      _ = intercept[DqPermanentError](DqRetention.objectKey(references.head,DqConfig(installationId="retention-test",namespace=namespace)))
+      removed <- DqRetentionSql.forgetInvalidArtifact("retention-test",namespace,references.head).transact(xa)
+      _ = assertEquals(removed,1)
+      remaining <- DqRetentionSql.expiredArtifacts("retention-test",namespace,100).transact(xa)
+      _ = assertEquals(remaining,Nil)
+      pruned <- DqRetentionSql.pruneRuns("retention-test",namespace,100).transact(xa)
+      _ = assertEquals(pruned,1)
+    yield ()
+  }
+
   test("active and legacy applied runs without review references fail closed for retention") {
     for
       _ <- seed("active-run","safe","running",Json.obj())

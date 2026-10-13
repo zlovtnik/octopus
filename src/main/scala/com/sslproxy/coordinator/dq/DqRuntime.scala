@@ -87,7 +87,7 @@ final class DqRuntime(
 
   private def publish(item: DqOutbox): IO[Unit] =
     val raw = DqJson.canonical(item.payload)
-    IO(DqJson.bounded(item.payload)) *>
+    (IO(DqJson.bounded(item.payload)) *>
       DqRuntime.traced("dq.publish", item.payload, SpanKind.PRODUCER) {
         IO {
           val headers = new org.apache.kafka.common.header.internals.RecordHeaders()
@@ -96,10 +96,10 @@ final class DqRuntime(
           ProducerRecord(item.topic, item.key, raw).withHeaders(converted)
         }.flatMap(record => producer.produce(ProducerRecords.one(record)).flatten.void)
       }
-        .attempt.flatMap {
-          case Right(_) => database(store.acknowledgeOutbox(item)).void
-          case Left(error) => database(store.failOutbox(item)) *> IO.raiseError(error)
-        }
+    ).attempt.flatMap {
+      case Right(_) => database(store.acknowledgeOutbox(item)).void
+      case Left(error) => database(store.failOutbox(item)) *> IO.raiseError(error)
+    }
 
   private def admission(scope: String, operation: String, key: String, candidate: Option[String]): Json =
     val parameters = Json.obj(
@@ -146,12 +146,14 @@ final class DqRuntime(
       _ <- database(store.expireAttempts)
       // Start a lease immediately before doing its work. Leasing a whole batch
       // before serial processing spends the later items' lease while they wait.
-      _ <- DqRuntime.drain(config.batchSize,database(store.claimPreparation(owner,config.leaseSeconds,1)).map(_.headOption))(prepare)
-      _ <- DqRuntime.drain(config.batchSize,database(store.claimOutput(owner,config.leaseSeconds,1)).map(_.headOption))(applyOutput)
-      _ <- DqRuntime.drain(config.batchSize,database(store.claimOutbox(owner,config.leaseSeconds,1)).map(_.headOption))(publish)
+      _ <- DqRuntime.attemptStages(List(
+        DqRuntime.drain(config.batchSize,database(store.claimPreparation(owner,config.leaseSeconds,1)).map(_.headOption))(prepare),
+        DqRuntime.drain(config.batchSize,database(store.claimOutput(owner,config.leaseSeconds,1)).map(_.headOption))(applyOutput),
+        DqRuntime.drain(config.batchSize,database(store.claimOutbox(owner,config.leaseSeconds,1)).map(_.headOption))(publish),
       // Drain previously admitted work before discovery. A full admission queue
       // must never prevent preparation, application or outbox progress.
-      _ <- discover
+        discover
+      ))
     yield ()
 
   private def guardedTick: IO[Unit] = tick.attempt.flatMap {
@@ -213,6 +215,9 @@ final class DqRuntime(
         .metered(5.seconds))
 
 object DqRuntime:
+  private[dq] def attemptStages(stages: List[IO[Unit]]): IO[Unit] =
+    stages.traverse(_.attempt).flatMap(_.collectFirst { case Left(error) => error }.fold(IO.unit)(IO.raiseError))
+
   private[dq] def drain[A](limit: Int, claim: IO[Option[A]])(consume: A => IO[Unit]): IO[Unit] =
     Monad[IO].tailRecM[Int,Unit](0) { processed =>
       if processed >= limit then IO.pure(Right(()))

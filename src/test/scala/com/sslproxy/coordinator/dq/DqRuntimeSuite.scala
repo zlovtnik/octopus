@@ -33,3 +33,18 @@ class DqRuntimeSuite extends CatsEffectSuite:
       _ = assertEquals(observed,1)
     yield ()
   }
+
+  test("stage failures do not skip later runtime stages") {
+    for
+      events <- Ref.of[IO,Vector[String]](Vector.empty)
+      result <- DqRuntime.attemptStages(List(
+        events.update(_ :+ "preparation") *> IO.raiseError(new IllegalStateException("preparation_failed")),
+        events.update(_ :+ "output"),
+        events.update(_ :+ "outbox") *> IO.raiseError(new IllegalStateException("outbox_failed")),
+        events.update(_ :+ "discovery")
+      )).attempt
+      observed <- events.get
+      _ = assertEquals(result.left.toOption.map(_.getMessage),Some("preparation_failed"))
+      _ = assertEquals(observed,Vector("preparation","output","outbox","discovery"))
+    yield ()
+  }

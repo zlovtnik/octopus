@@ -75,6 +75,10 @@ object DqRetentionSql:
     sql"""DELETE FROM octopus_core.dq_artifacts WHERE artifact_id=$id
       AND reference->>'version_id'=$version AND retained_until<=CURRENT_TIMESTAMP""".update.run
 
+  def forgetInvalidArtifact(installation: String, namespace: String, reference: Json): ConnectionIO[Int] =
+    sql"""DELETE FROM octopus_core.dq_artifacts WHERE installation_id=$installation AND namespace=$namespace
+      AND reference=${reference.noSpaces}::JSONB AND retained_until<=CURRENT_TIMESTAMP""".update.run
+
   def pruneRuns(installation: String, namespace: String, limit: Int): ConnectionIO[Int] =
     for
       ids <- sql"""SELECT r.run_id FROM octopus_core.dq_runs r

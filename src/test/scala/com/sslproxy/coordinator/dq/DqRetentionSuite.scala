@@ -1,7 +1,9 @@
 package com.sslproxy.coordinator.dq
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
+import com.sslproxy.coordinator.config.ArchiveConfig
 import com.sslproxy.coordinator.postgres.sql.{DqMetricsSql, DqRetentionSql, IdentityGraphSql}
 import doobie.Transactor
 import doobie.implicits.*
@@ -11,6 +13,9 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.containers.wait.strategy.{Wait, WaitAllStrategy}
 import org.testcontainers.utility.DockerImageName
 
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.sql.DriverManager
 import scala.util.Using
@@ -37,6 +42,25 @@ class DqRetentionSuite extends CatsEffectSuite:
   override def afterAll(): Unit = database.stop()
   private lazy val xa = Transactor.fromDriverManager[IO]("org.postgresql.Driver",database.getJdbcUrl,
     database.getUsername,database.getPassword,None)
+
+  private def emptyObjectStore: Resource[IO,String] =
+    Resource.make(IO.blocking {
+      val server = HttpServer.create(new InetSocketAddress("127.0.0.1",0),0)
+      server.createContext("/", exchange =>
+        val response = """<?xml version="1.0" encoding="UTF-8"?>
+          |<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          |  <Name>dq-artifacts</Name><Prefix></Prefix><KeyMarker></KeyMarker><VersionIdMarker></VersionIdMarker>
+          |  <MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+          |</ListVersionsResult>""".stripMargin.getBytes(StandardCharsets.UTF_8)
+        exchange.getResponseHeaders.set("Content-Type","application/xml")
+        exchange.sendResponseHeaders(200,response.length.toLong)
+        val body = exchange.getResponseBody
+        try body.write(response)
+        finally body.close()
+      )
+      server.start()
+      server
+    })(server => IO.blocking(server.stop(0))).map(server => s"http://127.0.0.1:${server.getAddress.getPort}")
 
   private def seed(id: String, namespace: String, status: String, summary: Json, applied: Boolean = false): IO[Unit] =
     (sql"""INSERT INTO octopus_core.dq_runs(run_id,installation_id,namespace,processor_id,processor_version,
@@ -89,6 +113,27 @@ class DqRetentionSuite extends CatsEffectSuite:
       _ <- sql"UPDATE octopus_core.dq_outbox SET status='published' WHERE outbox_id='retention-pending'".update.run.transact(xa)
       removed <- DqRetentionSql.pruneRuns("retention-test",namespace,100).transact(xa)
       _ = assertEquals(removed,1)
+    yield ()
+  }
+
+  test("invalid expired references are discarded so retention can continue pruning") {
+    val namespace = "invalid-reference"
+    for
+      _ <- seed("invalid-reference-run",namespace,"failed",Json.obj())
+      _ <- DqRetentionSql.closeArtifacts("retention-test",namespace,100).transact(xa)
+      _ <- sql"""UPDATE octopus_core.dq_artifacts SET reference=jsonb_set(reference,'{uri}',to_jsonb('s3://other-bucket/invalid'::TEXT))
+        WHERE artifact_id='invalid-reference-run'""".update.run.transact(xa)
+      semaphore <- Semaphore[IO](1)
+      _ <- emptyObjectStore.use { endpoint =>
+        val config = DqConfig(installationId="retention-test",namespace=namespace)
+        val store = new DqStore(xa,DqSettings("retention-test",namespace,Map.empty,"p1",Set.empty))
+        val storage = ArchiveConfig(endpoint=endpoint,accessKey="access-key",secretKey="secret-key")
+        DqRetention.resource(config,storage,store,semaphore).use(_.collect)
+      }
+      artifactExists <- sql"SELECT EXISTS(SELECT 1 FROM octopus_core.dq_artifacts WHERE artifact_id='invalid-reference-run')".query[Boolean].unique.transact(xa)
+      _ = assert(!artifactExists)
+      runExists <- sql"SELECT EXISTS(SELECT 1 FROM octopus_core.dq_runs WHERE run_id='invalid-reference-run')".query[Boolean].unique.transact(xa)
+      _ = assert(!runExists)
     yield ()
   }
 

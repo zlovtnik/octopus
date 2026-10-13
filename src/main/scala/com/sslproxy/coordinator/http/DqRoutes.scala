@@ -137,7 +137,11 @@ final class DqRoutes(
         }
       )
     case req @ GET -> Root / "internal" / "dq" / "v1" / "dispatches" =>
-      execute(req)(p => service(p) *> queryScope(req) *> store.dispatches)
+      execute(req)(p => service(p) *> queryScope(req) *> IO {
+        req.uri.query.params.get("limit").fold(32)(value =>
+          value.toIntOption.filter(limit => limit >= 1 && limit <= 100)
+            .getOrElse(throw DqError(400,"invalid_dispatch_limit")))
+      }.flatMap(store.dispatches(_)))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "runs" / runId / "attempts" / "reserve" =>
       execute(req)(p =>
         service(p) *> body(req).flatMap(store.reserve(runId, _))

@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.dq
 
-import io.circe.{Json, Printer}
+import io.circe.{Json, JsonNumber, JsonObject, Printer}
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Instant
@@ -46,8 +46,40 @@ final case class DqError(status: Int, code: String)
     extends RuntimeException(code)
 
 object DqJson:
-  private val canonicalPrinter = Printer.noSpaces.copy(sortKeys = true)
-  def canonical(value: Json): String = canonicalPrinter.print(value)
+  val DispatchPageBytes: Int = 1024 * 1024
+  /** Keep the ordered prefix within the dispatch HTTP response budget. The
+    * actual Circe HTTP encoding uses noSpaces; mutation/broker limits stay 64K.
+    */
+  def dispatchPage(items: List[Json]): Json =
+    val (selected,_,_) = items.foldLeft((Vector.empty[Json],12,true)) {
+      case ((prefix,size,true),item) =>
+        val next = size + item.noSpaces.getBytes(StandardCharsets.UTF_8).length + (if prefix.isEmpty then 0 else 1)
+        if next <= DispatchPageBytes then (prefix :+ item,next,true)
+        else if prefix.isEmpty then throw DqError(503,"dispatch_item_too_large")
+        else (prefix,size,false)
+      case (state,_) => state
+    }
+    Json.obj("items" -> Json.fromValues(selected))
+
+  private val canonicalPrinter = Printer.noSpaces
+  private def normalized(value: Json, depth: Int): Json =
+    if depth > 128 then throw DqError(400,"json_depth_exceeded")
+    value.asNumber match
+      case Some(number) =>
+        val decimal = number.toBigDecimal.getOrElse(throw DqError(400,"invalid_number")).bigDecimal.stripTrailingZeros()
+        if decimal.scale().toLong.abs > 65536L || decimal.precision() > 65536 then throw DqError(413,"number_too_large")
+        Json.fromJsonNumber(JsonNumber.fromDecimalStringUnsafe(decimal.toPlainString))
+      case None => value.asArray match
+        case Some(values) => Json.fromValues(values.map(normalized(_,depth+1)))
+        case None => value.mapObject { obj =>
+          val ordered = obj.toIterable.toVector.sortWith { (left,right) =>
+            java.util.Arrays.compare(left._1.codePoints().toArray,right._1.codePoints().toArray) < 0
+          }
+          JsonObject.fromIterable(ordered.map { case (key,item) => key -> normalized(item,depth+1) })
+        }
+  def canonical(value: Json): String = canonicalPrinter.print(normalized(value,0))
+    .replace(new String(Character.toChars(0x2028)),"\\u2028")
+    .replace(new String(Character.toChars(0x2029)),"\\u2029")
   def sha256(value: Json): String = digest(canonical(value))
   def digest(value: String): String =
     MessageDigest
@@ -128,13 +160,43 @@ object DqJson:
     "maxItems",
     "default"
   )
-  def checkSchema(schema: Json): Unit =
+  def checkSchema(schema: Json): Unit = checkSchemaAt(schema, 0)
+  private def checkSchemaAt(schema: Json, depth: Int): Unit =
     val obj =
       schema.asObject.getOrElse(throw DqError(400, "invalid_parameter_schema"))
+    if depth > 16 then throw DqError(400, "schema_depth_exceeded")
     if !obj.keys.forall(schemaKeywords) then
       throw DqError(400, "unsupported_schema_keyword")
-    obj("properties").flatMap(_.asObject).foreach(_.values.foreach(checkSchema))
-    obj("items").foreach(checkSchema)
+    def reject(): Nothing = throw DqError(400, "invalid_parameter_schema")
+    List("$schema", "$id", "title", "description").foreach { key =>
+      obj(key).foreach(value => if !value.isString then reject())
+    }
+    obj("$schema").foreach { value =>
+      if !value.asString.contains("https://json-schema.org/draft/2020-12/schema") then reject()
+    }
+    obj("type").foreach { value =>
+      if !value.asString.exists(Set("object", "array", "string", "boolean", "integer", "number", "null")) then reject()
+    }
+    obj("additionalProperties").foreach(value => if !value.isBoolean then reject())
+    obj("properties").foreach { value =>
+      value.asObject.getOrElse(reject()).values.foreach(checkSchemaAt(_, depth + 1))
+    }
+    obj("required").foreach { value =>
+      val names = value.asArray.getOrElse(reject())
+      if !names.forall(_.isString) || names.distinct.size != names.size then reject()
+    }
+    obj("enum").foreach { value =>
+      val values = value.asArray.getOrElse(reject())
+      if values.isEmpty || values.distinct.size != values.size then reject()
+    }
+    List("minimum", "maximum").foreach { key =>
+      obj(key).foreach(value => if value.asNumber.flatMap(_.toBigDecimal).isEmpty then reject())
+    }
+    List("minLength", "maxLength", "minItems", "maxItems").foreach { key =>
+      obj(key).foreach(value => if !value.asNumber.flatMap(_.toInt).exists(_ >= 0) then reject())
+    }
+    obj("items").foreach(checkSchemaAt(_, depth + 1))
+    obj("pattern").foreach(value => if !value.isString then reject())
     obj("pattern").flatMap(_.asString).foreach { value =>
       if value.length > 256 || scala.util.Try(value.r).isFailure then
         throw DqError(400, "invalid_schema_pattern")
@@ -146,7 +208,7 @@ object DqJson:
       case "array"   => value.isArray
       case "string"  => value.isString
       case "boolean" => value.isBoolean
-      case "integer" => value.asNumber.flatMap(_.toLong).isDefined
+      case "integer" => value.asNumber.flatMap(_.toBigDecimal).exists(_.isWhole)
       case "number"  => value.isNumber
       case "null"    => value.isNull
       case _         => false
@@ -175,10 +237,11 @@ object DqJson:
       }
     }
     value.asString.foreach { str =>
-      if c.get[Int]("minLength").toOption.exists(str.length < _) || c
+      val length = str.codePointCount(0, str.length)
+      if c.get[Int]("minLength").toOption.exists(length < _) || c
           .get[Int]("maxLength")
           .toOption
-          .exists(str.length > _) ||
+          .exists(length > _) ||
         c.get[String]("pattern")
           .toOption
           .exists(pattern => !pattern.r.findFirstIn(str).isDefined)

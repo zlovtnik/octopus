@@ -46,7 +46,7 @@ object DqApply:
       snapshot.hcursor.get[String]("operation").contains(proposal.operation) &&
       snapshot.hcursor.get[String]("policy_version").contains(proposal.policy_version) &&
       snapshot.hcursor.get[String]("authorized_scope").toOption == scope &&
-      required(run, "processor_id") == "atheros.dedup" && required(run, "processor_version") == "0.1.0"
+      required(run, "processor_id") == "atheros.dedup"
     val strictFields = exactFields(output, fields) &&
       output.hcursor.downField("summary").focus.exists(exactFields(_, summaryFields)) &&
       output.hcursor.get[Vector[Json]]("candidates").exists(_.forall(exactFields(_, candidateFields))) &&
@@ -96,8 +96,8 @@ object DqApply:
     val pairs = snapshot.hcursor.get[Vector[Json]]("pairs").getOrElse(Vector.empty)
     val legacy = pairs.foldLeft(Map.empty[(String, String), Double]) { (current, pair) =>
       val key = (required(pair, "mac_a"), required(pair, "mac_b"))
-      if current.contains(key) then current
-      else current.updated(key, pair.hcursor.get[Double]("confidence").fold(_ => throw DqPermanentError("source_confidence_invalid"), identity))
+      val confidence = pair.hcursor.get[Double]("confidence").fold(_ => throw DqPermanentError("source_confidence_invalid"), identity)
+      current.updated(key,current.get(key).fold(confidence)(_.max(confidence)))
     }
     val proposed = proposal.candidates.map(value => (value.mac_a, value.mac_b) -> value.confidence).toMap
     Json.obj(
@@ -137,7 +137,8 @@ object DqApply:
               }.void
             summary = Json.obj(
               "candidate_count" -> Json.fromInt(proposal.candidates.size),
-              "reconciliation_count" -> Json.fromInt(proposal.reconciliations.size)
+              "reconciliation_count" -> Json.fromInt(proposal.reconciliations.size),
+              "review_candidate_ids" -> Json.fromValues((ids ++ proposal.reconciliations.map(_.candidate_id)).distinct.sorted.map(Json.fromString))
             ).deepMerge(if shadow then Json.obj("shadow_comparison" -> shadowComparison(snapshot, proposal)) else Json.obj())
             done <- store.completeOutputTx(proposal.run_id, proposal.attempt_id, proposal.fence, owner,
               proposal.source_revision_digest, !shadow, summary)

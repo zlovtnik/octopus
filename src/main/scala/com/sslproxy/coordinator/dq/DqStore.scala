@@ -39,7 +39,7 @@ final class DqStore(val xa: Transactor[IO], val settings: DqSettings):
   def replay(principal: DqPrincipal, runId: String, request: Json): IO[Json] =
     commit(sql.replay(principal, runId, request))
   def heartbeat(request: Json): IO[Json] = commit(sql.heartbeat(request))
-  def dispatches: IO[Json] = commit(sql.dispatches)
+  def dispatches(limit: Int = 32): IO[Json] = commit(sql.dispatches(limit))
   def reserve(runId: String, request: Json): IO[Json] = commit(
     sql.reserve(runId, request)
   )

@@ -77,13 +77,13 @@ final class DqControlSql(val settings: DqSettings):
         "fence" -> attempt.get[Long]("fence").toOption.fold(Json.Null)(Json.fromLong),
         "occurred_at" -> Json.fromString(java.time.Instant.now().toString), "correlation_id" -> Json.fromString(runId),
         "source_revision_digest" -> field(r,"source_revision_digest"), "parameters" -> field(r,"parameters"),
-        "artifacts" -> field(r,"input_refs"), "traceparent" -> r.hcursor.downField("traceparent").focus.getOrElse(Json.Null),
+        "artifacts" -> field(r,if Set("succeeded","failed").contains(eventType) then "output_refs" else "input_refs"), "traceparent" -> r.hcursor.downField("traceparent").focus.getOrElse(Json.Null),
         "tracestate" -> r.hcursor.downField("tracestate").focus.getOrElse(Json.Null),
         "error_code" -> r.hcursor.downField("error_code").focus.getOrElse(Json.Null))
       enqueue(topic, settings.installationId + "/" + settings.namespace + "/" + runId, envelope)
     }
   def catalog(principal: DqPrincipal): ConnectionIO[Json] =
-    principal.requireRole(Set("viewer","operator","admin","automation"))
+    principal.requireRole(Set("viewer","operator","admin","automation","service"))
     sql"""SELECT v.manifest::TEXT FROM octopus_core.dq_processors p JOIN octopus_core.dq_processor_versions v
       USING (installation_id,namespace,processor_id)
       WHERE p.installation_id=${settings.installationId} AND p.namespace=${settings.namespace}
@@ -100,6 +100,7 @@ final class DqControlSql(val settings: DqSettings):
     principal.requireRole(Set("processor_owner","admin"))
     scoped(principal,value,settings)
     val processorId = text(value,"processor_id")
+    if processorId != "atheros.dedup" then throw DqError(400,"unsupported_processor")
     val version = text(value,"version")
     val digest = text(value,"implementation_digest")
     val manifestHash = text(value,"manifest_sha256")
@@ -173,9 +174,12 @@ final class DqControlSql(val settings: DqSettings):
               if processorId == "atheros.dedup" && (text(parameters,"policy_version") != settings.policyVersion ||
                 int(parameters,"max_candidates") < 1 || int(parameters,"max_candidates") > 1000) then throw DqError(400,"invalid_dedup_parameters")
             }
-            count <- sql"""SELECT COUNT(*) FROM octopus_core.dq_runs WHERE installation_id=${settings.installationId}
-              AND namespace=${settings.namespace} AND status NOT IN ('succeeded','failed','cancelled')""".query[Long].unique
-            _ <- if count >= settings.maxQueued then doobie.free.connection.raiseError[Unit](DqError(429,"admission_capacity")) else ().pure[ConnectionIO]
+            counts <- sql"""SELECT COUNT(*),COUNT(*) FILTER (WHERE authorized_scope=$authorizedScope)
+              FROM octopus_core.dq_runs WHERE installation_id=${settings.installationId}
+              AND namespace=${settings.namespace} AND status NOT IN ('succeeded','failed','cancelled')""".query[(Long,Long)].unique
+            scopeQuota = math.max(1,settings.maxQueued / math.max(1,settings.scopeModes.size))
+            _ <- if counts._1 >= settings.maxQueued || counts._2 >= scopeQuota then
+              doobie.free.connection.raiseError[Unit](DqError(429,"admission_capacity")) else ().pure[ConnectionIO]
             runId = id
             until <- doobie.free.connection.delay {
               val at = deadline(request)
@@ -190,6 +194,10 @@ final class DqControlSql(val settings: DqSettings):
               authorized_scope,operation,idempotency_key,request_fingerprint,document,manifest,policy_version,execution_mode,status,deadline_at)
               VALUES ($runId,${settings.installationId},${settings.namespace},$processorId,$version,$authorizedScope,$operation,$key,
               $fingerprint,${canonical(doc)}::JSONB,${canonical(pinned)}::JSONB,${settings.policyVersion},$mode,'queued',$until::TIMESTAMPTZ)""".update.run
+            _ <- if operation=="reconcile_decision" then
+              DqProjectionSql.recordDecision(settings.installationId,settings.namespace,authorizedScope,
+                settings.policyVersion,mode,text(parameters,"candidate_id"),runId).void
+              else ().pure[ConnectionIO]
             _ <- audit(principal.actor,"invoke",Some(runId),Json.obj("request_fingerprint" -> Json.fromString(fingerprint)))
             result <- run(runId)
           yield result
@@ -246,16 +254,17 @@ final class DqControlSql(val settings: DqSettings):
           AND dq_workers.concurrency=EXCLUDED.concurrency""".update.run
       _ <- if changed != 1 then conflict("immutable_worker_identity") else ().pure[ConnectionIO]
     yield Json.obj("accepted" -> Json.True)
-  def dispatches: ConnectionIO[Json] =
+  def dispatches(limit: Int): ConnectionIO[Json] =
+    if limit < 1 || limit > 100 then throw DqError(400,"invalid_dispatch_limit")
     sql"""SELECT run_id FROM octopus_core.dq_runs r WHERE installation_id=${settings.installationId}
       AND namespace=${settings.namespace} AND deadline_at>CURRENT_TIMESTAMP AND
       ((status IN ('preparing','retrying') AND jsonb_array_length(input_refs)>0 AND next_attempt_at<=CURRENT_TIMESTAMP AND work_owner IS NULL)
         OR (status='running' AND EXISTS(SELECT 1 FROM octopus_core.dq_attempts a WHERE a.attempt_id=r.current_attempt_id
           AND a.status='reserved' AND a.lease_expires_at>CURRENT_TIMESTAMP)))
-      ORDER BY created_at,run_id LIMIT 100""".query[String].to[List].flatMap(_.traverse { runId =>
+      ORDER BY created_at,run_id LIMIT $limit""".query[String].to[List].flatMap(_.traverse { runId =>
       run(runId).flatMap(r => manifest(text(r,"processor_id"),text(r,"processor_version")).map(m =>
         Json.obj("run" -> r,"manifest" -> m,"attempt" -> r.hcursor.downField("current_attempt").focus.getOrElse(Json.Null))))
-    }).map(items => Json.obj("items" -> Json.fromValues(items)))
+    }).map(dispatchPage)
   private def policy(r: Json): Boolean = settings.mode(scope(field(r,"parameters"))).contains(text(r,"execution_mode")) &&
     text(r,"policy_version") == settings.policyVersion && settings.approvedDigests.contains(text(r,"implementation_digest"))
   private def currentPolicy(r: Json): ConnectionIO[Boolean] =
@@ -514,11 +523,12 @@ final class DqControlSql(val settings: DqSettings):
       throw DqError(400,"invalid_receipt")
     for
       _ <- sql"SELECT pg_advisory_xact_lock(hashtextextended($eventId,0))".query[Unit].unique
-      same <- sql"""SELECT payload_sha256 FROM octopus_core.dq_receipts WHERE consumer_group=$group AND topic=$topic
-        AND partition_id=$partition AND offset_id=$offset""".query[String].option
+      same <- sql"""SELECT payload_sha256,quarantine_reason FROM octopus_core.dq_receipts WHERE consumer_group=$group AND topic=$topic
+        AND partition_id=$partition AND offset_id=$offset""".query[(String,Option[String])].option
       duplicate <- sql"SELECT EXISTS(SELECT 1 FROM octopus_core.dq_receipts WHERE event_id=$eventId AND payload_sha256=$payloadHash)".query[Boolean].unique
       conflictEvent <- sql"SELECT EXISTS(SELECT 1 FROM octopus_core.dq_receipts WHERE event_id=$eventId AND payload_sha256<>$payloadHash)".query[Boolean].unique
-      reason = if same.exists(_!=payloadHash) || conflictEvent then Some("receipt_integrity_conflict") else quarantine
+      reason = if same.exists(_._1!=payloadHash) || conflictEvent then Some("receipt_integrity_conflict")
+        else same.flatMap(_._2).orElse(quarantine)
       result <- if same.isDefined then
         reason.traverse_(why => audit("broker-consumer","receipt_conflict",None,Json.obj("event_id" -> Json.fromString(eventId),
           "payload_sha256" -> Json.fromString(payloadHash),"error_code" -> Json.fromString(why)))) *>

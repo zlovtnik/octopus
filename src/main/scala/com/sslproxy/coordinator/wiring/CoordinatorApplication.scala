@@ -4,7 +4,7 @@ import cats.effect.kernel.Fiber
 import cats.effect.{IO, Ref, Resource}
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.kafka.KafkaComponents
-import com.sslproxy.coordinator.dq.{DqArtifacts, DqRuntime, DqStore}
+import com.sslproxy.coordinator.dq.{DqArtifacts, DqRetention, DqRuntime, DqStore}
 import com.sslproxy.coordinator.http.DqRoutes
 import fs2.Stream
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
@@ -33,8 +33,10 @@ private[coordinator] object CoordinatorApplication:
       dqReady <- Resource.eval(Ref.of[IO, Boolean](!cfg.dq.enabled))
       dqArtifacts <- if cfg.dq.enabled then DqArtifacts.resource(cfg.dq, cfg.archive).map(Some(_))
         else Resource.pure[IO, Option[DqArtifacts]](None)
+      dqRetention <- if cfg.dq.enabled then DqRetention.resource(cfg.dq,cfg.archive,dqStore,db.dbSemaphore).map(Some(_))
+        else Resource.pure[IO, Option[DqRetention]](None)
       dqRuntime = dqArtifacts.map(artifacts => new DqRuntime(cfg.dq, cfg.kafka, dqStore,
-        artifacts, db.dbSemaphore, kafka.producer, cfg.processors.behaviorSimilarityThreshold, dqReady))
+        artifacts, db.dbSemaphore, kafka.producer, cfg.processors.behaviorSimilarityThreshold, dqReady, metrics))
       _ <- Resource.eval(dqRuntime.fold(IO.unit)(_.initialize))
       dqRoutes = dqArtifacts.fold(org.http4s.HttpRoutes.empty[IO])(artifacts =>
         new DqRoutes(dqStore, cfg.dq.controlToken, artifacts.authorizedAccess).routes)
@@ -97,6 +99,7 @@ private[coordinator] object CoordinatorApplication:
         enabledProcessorIds,
         runtimeConsumerIds
       ).merge(dqRuntime.fold(Stream.empty[IO].covaryOutput[Unit])(_.stream))
+        .merge(dqRetention.fold(Stream.empty[IO].covaryOutput[Unit])(_.stream))
       fiber <- Resource.make(
         db.repository.ensureAllCursors(cfg.ingest.streamNames, db.dbSemaphore) *>
           streams.compile.drain.start

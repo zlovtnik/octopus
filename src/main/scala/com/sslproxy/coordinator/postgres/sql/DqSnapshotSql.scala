@@ -34,7 +34,9 @@ object DqSnapshotSql:
                  SELECT 1 FROM atheros_search.merge_candidates candidate
                  WHERE candidate.mac_a = LEAST(pair.left_source_mac, pair.right_source_mac)
                    AND candidate.mac_b = GREATEST(pair.left_source_mac, pair.right_source_mac)
-                   AND candidate.confidence >= pair.cosine_similarity
+                   AND (candidate.confidence >= pair.cosine_similarity OR candidate.status <> 'pending'
+                     OR EXISTS (SELECT 1 FROM atheros_search.merge_decisions decision
+                       WHERE decision.candidate_id = candidate.candidate_id))
                )
              ORDER BY pair.computed_at, pair.pair_id LIMIT $limit
            ), selected_candidates AS MATERIALIZED (

@@ -12,6 +12,9 @@ import io.opentelemetry.api.trace.SpanKind
 
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 final class DqPermanentError(val code: String)
@@ -27,22 +30,34 @@ trait DqArtifacts:
 object DqArtifacts:
   val CanonicalPrinter: Printer = Printer.noSpaces.copy(sortKeys = true)
   def bytes(value: Json): Array[Byte] =
-    CanonicalPrinter.print(value).getBytes(StandardCharsets.UTF_8)
+    DqJson.canonical(value).getBytes(StandardCharsets.UTF_8)
   def digest(value: Json): String = Sha256Utils.sha256Hex(bytes(value))
+
+  private[dq] def httpClient(leaseSeconds: Int): OkHttpClient =
+    // Each request is bounded well below the database lease. Retries belong to
+    // the durable DQ state machine rather than an invisible HTTP retry loop.
+    val seconds = math.max(1, leaseSeconds / 8).min(10).toLong
+    new OkHttpClient.Builder()
+      .connectTimeout(seconds, TimeUnit.SECONDS)
+      .readTimeout(seconds, TimeUnit.SECONDS)
+      .writeTimeout(seconds, TimeUnit.SECONDS)
+      .callTimeout(seconds, TimeUnit.SECONDS)
+      .retryOnConnectionFailure(false)
+      .build()
+
+  def client(storage: ArchiveConfig, leaseSeconds: Int): MinioClient =
+    val value = MinioClient.builder().endpoint(storage.endpoint)
+      .credentials(storage.accessKey, storage.secretKey).region(storage.region)
+      .httpClient(httpClient(leaseSeconds), true).build()
+    value.setRetry(Set.empty[Integer].asJava, java.lang.Long.valueOf(0L), java.lang.Integer.valueOf(0))
+    value
 
   def resource(
       config: DqConfig,
       storage: ArchiveConfig
   ): Resource[IO, DqArtifacts] =
     Resource
-      .make(IO.blocking {
-        MinioClient
-          .builder()
-          .endpoint(storage.endpoint)
-          .credentials(storage.accessKey, storage.secretKey)
-          .region(storage.region)
-          .build()
-      })(client => IO.blocking(client.close()))
+      .make(IO.blocking(client(storage, config.leaseSeconds)))(client => IO.blocking(client.close()))
       .map(client => new MinioDqArtifacts(client, config))
 
   private[dq] def required(value: Json, name: String): String =
@@ -111,7 +126,10 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
     extends DqArtifacts:
   import DqArtifacts.*
 
-  def initialize: IO[Unit] = IO.blocking {
+  private def boundedCall[A](work: IO[A]): IO[A] =
+    work.timeout((config.leaseSeconds / 2).seconds)
+
+  def initialize: IO[Unit] = boundedCall(IO.blocking {
     val bucket = config.artifactBucket
     if !client.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())
     then throw DqPermanentError("artifact_bucket_missing")
@@ -125,9 +143,9 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
     )
     if Option(encryption.rule()).isEmpty then
       throw DqPermanentError("artifact_bucket_encryption_required")
-  }
+  })
 
-  def putSnapshot(run: Json, snapshot: Json): IO[Json] = DqRuntime.traced("dq.minio.put_snapshot", run, SpanKind.CLIENT)(IO
+  def putSnapshot(run: Json, snapshot: Json): IO[Json] = DqRuntime.traced("dq.minio.put_snapshot", run, SpanKind.CLIENT)(boundedCall(IO
     .blocking {
       val payload = bytes(snapshot)
       if payload.length > config.maxArtifactBytes then
@@ -159,6 +177,7 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
         .getOrElse(throw DqPermanentError("artifact_version_missing"))
       Json.obj(
         "artifact_id" -> Json.fromString(digest(Json.arr(Json.fromString(runId), Json.fromString(sha)))),
+        "producer_run_id" -> Json.fromString(runId),
         "installation_id" -> Json.fromString(installation),
         "namespace" -> Json.fromString(namespace),
         "uri" -> Json.fromString(s"s3://${config.artifactBucket}/$key"),
@@ -170,10 +189,10 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
         "size_bytes" -> Json.fromLong(payload.length.toLong)
       )
     }
-    .flatTap(reference => read(reference, run, output = false).void))
+    .flatTap(reference => read(reference, run, output = false).void)))
 
   def read(reference: Json, run: Json, output: Boolean): IO[Json] =
-    DqRuntime.traced("dq.minio.read", run, SpanKind.CLIENT)(IO.blocking {
+    DqRuntime.traced("dq.minio.read", run, SpanKind.CLIENT)(boundedCall(IO.blocking {
       val key = validatedObjectKey(reference, run, output, config)
       val version = required(reference, "version_id")
       val size = reference.hcursor
@@ -207,9 +226,9 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
       then throw DqPermanentError("artifact_integrity_failed")
       parse(new String(payload, StandardCharsets.UTF_8))
         .fold(_ => throw DqPermanentError("artifact_json_invalid"), identity)
-    })
+    }))
 
-  def authorizedAccess(reference: Json): IO[Json] = IO.blocking {
+  def authorizedAccess(reference: Json): IO[Json] = boundedCall(IO.blocking {
     val prefix = s"s3://${config.artifactBucket}/${config.installationId}/${config.namespace}/"
     val uri = required(reference, "uri")
     val key = uri.stripPrefix(s"s3://${config.artifactBucket}/")
@@ -219,4 +238,4 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
       .method(Method.GET).bucket(config.artifactBucket).`object`(key).expiry(60)
       .extraQueryParams(Map("versionId" -> required(reference, "version_id")).asJava).build())
     Json.obj("url" -> Json.fromString(url), "expires_at" -> Json.fromString(java.time.Instant.now().plusSeconds(60).toString))
-  }
+  })

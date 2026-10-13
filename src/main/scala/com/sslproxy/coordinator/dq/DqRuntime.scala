@@ -5,7 +5,7 @@ import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
+import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing, StructuredLogger}
 import com.sslproxy.coordinator.postgres.sql.DqProjectionSql
 import com.sslproxy.coordinator.util.Sha256Utils
 import doobie.implicits.*
@@ -37,7 +37,8 @@ final class DqRuntime(
   dbSemaphore: Semaphore[IO],
   producer: KafkaProducer[IO, String, String],
   minimumSimilarity: Double,
-  readiness: Ref[IO, Boolean]
+  readiness: Ref[IO, Boolean],
+  metrics: CoordinatorMetrics
 ):
   import DqArtifacts.required
   private val log = StructuredLogger(getClass)
@@ -85,7 +86,7 @@ final class DqRuntime(
     }
 
   private def publish(item: DqOutbox): IO[Unit] =
-    val raw = DqArtifacts.CanonicalPrinter.print(item.payload)
+    val raw = DqJson.canonical(item.payload)
     IO(DqJson.bounded(item.payload)) *>
       DqRuntime.traced("dq.publish", item.payload, SpanKind.PRODUCER) {
         IO {
@@ -112,6 +113,11 @@ final class DqRuntime(
     )
 
   private val automation = DqPrincipal("octopus-dq-discovery", Set("automation"), config.scopeModes.keySet)
+  private def discoverAdmission(request: Json): IO[Unit] =
+    database(store.admit(automation,request)).void.handleErrorWith {
+      case DqError(429,"admission_capacity") => IO.unit
+      case error => IO.raiseError(error)
+    }
 
   private def discover: IO[Unit] =
     // Registration is dynamic. Readiness remains down until the approved pinned
@@ -119,31 +125,33 @@ final class DqRuntime(
     database(store.manifest(DqPrincipal.internal, "atheros.dedup", "0.1.0")) *>
       config.scopeModes.toList.sortBy(_._1).traverse_ { case (scope, mode) =>
         val request = admission(scope, "prepare_candidates", "discovery", None)
+          .deepMerge(Json.obj("policy_version" -> Json.fromString(config.policyVersion)))
         database(IO.defer(DqSnapshot.prepare(request, minimumSimilarity).transact(store.xa))).flatMap { snapshot =>
           val hasPairs = snapshot.hcursor.get[Vector[Json]]("pairs").exists(_.nonEmpty)
           val key = DqArtifacts.digest(Json.arr(Json.fromString("candidate-preparation"), Json.fromString(scope),
             Json.fromString(mode), Json.fromString(config.policyVersion), Json.fromString(DqSnapshot.revision(snapshot))))
-          IO.whenA(hasPairs)(database(store.admit(automation, admission(scope, "prepare_candidates", key, None))).void)
+          IO.whenA(hasPairs)(discoverAdmission(admission(scope, "prepare_candidates", key, None)))
         }
       } *> database(DqProjectionSql.decisions(config.installationId, config.namespace, config.batchSize).to[List].transact(store.xa))
         .flatMap(_.traverse_ { case (candidateId, decision, scope) =>
           val key = DqArtifacts.digest(Json.arr(Json.fromString("decision-reconciliation"), Json.fromString(candidateId),
             Json.fromString(decision), Json.fromString(scope), Json.fromString(config.policyVersion),
             Json.fromString(config.scopeModes.getOrElse(scope, "disabled"))))
-          database(store.admit(automation, admission(scope, "reconcile_decision", key, Some(candidateId)))).void
+          discoverAdmission(admission(scope, "reconcile_decision", key, Some(candidateId)))
         })
 
   private def tick: IO[Unit] =
     for
       _ <- artifacts.initialize
       _ <- database(store.expireAttempts)
+      // Start a lease immediately before doing its work. Leasing a whole batch
+      // before serial processing spends the later items' lease while they wait.
+      _ <- DqRuntime.drain(config.batchSize,database(store.claimPreparation(owner,config.leaseSeconds,1)).map(_.headOption))(prepare)
+      _ <- DqRuntime.drain(config.batchSize,database(store.claimOutput(owner,config.leaseSeconds,1)).map(_.headOption))(applyOutput)
+      _ <- DqRuntime.drain(config.batchSize,database(store.claimOutbox(owner,config.leaseSeconds,1)).map(_.headOption))(publish)
+      // Drain previously admitted work before discovery. A full admission queue
+      // must never prevent preparation, application or outbox progress.
       _ <- discover
-      prepared <- database(store.claimPreparation(owner, config.leaseSeconds, config.batchSize))
-      _ <- prepared.traverse_(prepare)
-      outputs <- database(store.claimOutput(owner, config.leaseSeconds, config.batchSize))
-      _ <- outputs.traverse_(applyOutput)
-      pending <- database(store.claimOutbox(owner, config.leaseSeconds, config.batchSize))
-      _ <- pending.traverse_(publish)
     yield ()
 
   private def guardedTick: IO[Unit] = tick.attempt.flatMap {
@@ -152,6 +160,9 @@ final class DqRuntime(
       case value: DqError => value.code
       case value: DqPermanentError => value.code
       case _ => "dependency_unavailable"
+    ), "error_class" -> error.getClass.getSimpleName, "sql_state" -> (error match
+      case value: java.sql.SQLException => Option(value.getSQLState).getOrElse("unknown")
+      case _ => "none"
     )))
   }
 
@@ -162,7 +173,7 @@ final class DqRuntime(
       .withIsolationLevel(IsolationLevel.ReadCommitted).withMaxPollRecords(config.batchSize)
       .withMaxPrefetchBatches(1).withProperties("allow.auto.create.topics" -> "false", "max.partition.fetch.bytes" -> "131072")
     Stream.resource(KafkaConsumer.resource(settings)).flatMap { consumer =>
-      Stream.eval(consumer.subscribeTo("dq.worker-reports.v1")) >>
+      val records = Stream.eval(consumer.subscribeTo("dq.worker-reports.v1")) >>
         consumer.partitionedStream.map { partition =>
           partition.evalMap { record =>
             val receipt = DqRuntime.receipt(config, group, record.record.topic, record.record.partition,
@@ -178,6 +189,12 @@ final class DqRuntime(
             }
           }
         }.parJoinUnbounded
+      val lag = Stream.repeatEval(consumer.metrics
+        .flatMap(values => IO(metrics.recordKafkaMetrics(group,values)))
+        .timeout(5.seconds)
+        .handleErrorWith(_ => IO(metrics.recordLagRefreshFailure(group))))
+        .metered(5.seconds).onFinalize(IO(metrics.clearKafkaMetrics(group)))
+      records.concurrently(lag)
     }
 
   private def reportsForever: IO[Unit] = Monad[IO].tailRecM[Int, Unit](0) { retry =>
@@ -191,8 +208,20 @@ final class DqRuntime(
   def stream: Stream[IO, Unit] =
     (Stream.eval(guardedTick) ++ Stream.awakeEvery[IO](config.pollIntervalMs.millis).evalMap(_ => guardedTick))
       .merge(Stream.eval(reportsForever))
+      .concurrently(Stream.repeatEval(DqMetrics.sample(store,metrics,dbSemaphore)
+        .handleErrorWith(_ => IO(log.warn("dq_metrics","status" -> "sample_unavailable"))))
+        .metered(5.seconds))
 
 object DqRuntime:
+  private[dq] def drain[A](limit: Int, claim: IO[Option[A]])(consume: A => IO[Unit]): IO[Unit] =
+    Monad[IO].tailRecM[Int,Unit](0) { processed =>
+      if processed >= limit then IO.pure(Right(()))
+      else claim.flatMap {
+        case None => IO.pure(Right(()))
+        case Some(item) => consume(item).as(Left(processed+1))
+      }
+    }
+
   private[dq] def traced[A](name: String, record: Json, kind: SpanKind)(operation: IO[A]): IO[A] =
     val headers = new org.apache.kafka.common.header.internals.RecordHeaders()
     List("traceparent", "tracestate").foreach { key =>
@@ -238,7 +267,8 @@ object DqRuntime:
         throw DqPermanentError("dq_topic_replication_inadequate")
       val resources = policies.keys.map(topic => new ConfigResource(ConfigResource.Type.TOPIC, topic)).toList
       val configs = admin.describeConfigs(resources.asJava).all().get(15L, TimeUnit.SECONDS)
-      policies.foreach { case (topic, (cleanup, days)) =>
+      policies.foreachEntry { (topic, policy) =>
+        val (cleanup, days) = policy
         val configured = configs.get(new ConfigResource(ConfigResource.Type.TOPIC, topic))
         if configured.get("cleanup.policy").value() != cleanup ||
           (days > 0 && configured.get("retention.ms").value().toLong != days.toLong * 86400000L) then

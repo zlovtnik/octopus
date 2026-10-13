@@ -204,8 +204,8 @@ object IdentityGraphSql:
       val memberClause =
         value.members.map(member => fr0"$member").intercalate(fr",")
       val firstSeen = (fr"""SELECT MIN(first_seen), MAX(last_seen)
-                            FROM devices
-                            WHERE mac_id IN (""" ++ memberClause ++ fr")")
+                            FROM atheros_search.devices
+                            WHERE mac IN (""" ++ memberClause ++ fr")")
         .query[(Option[java.sql.Timestamp], Option[java.sql.Timestamp])]
         .unique
 
@@ -241,11 +241,11 @@ object IdentityGraphSql:
               sql"""INSERT INTO atheros_search.identity_cluster_members (
                    cluster_id, mac, confidence, evidence, first_seen, last_seen
                  )
-                 SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
+                 SELECT ${value.clusterId}, device.mac, ${value.confidence},
                          jsonb_build_object('source', 'confirmed_identity_edge'),
                         device.first_seen, device.last_seen
-                 FROM devices device
-                 WHERE device.mac_id = $mac
+                 FROM atheros_search.devices device
+                 WHERE device.mac = $mac
                  ON CONFLICT (mac) DO UPDATE SET
                    cluster_id = EXCLUDED.cluster_id,
                    confidence = EXCLUDED.confidence,

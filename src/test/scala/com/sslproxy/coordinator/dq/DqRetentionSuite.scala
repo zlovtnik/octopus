@@ -1,10 +1,11 @@
 package com.sslproxy.coordinator.dq
 
-import cats.effect.{IO, Resource}
 import cats.effect.std.Semaphore
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.ArchiveConfig
 import com.sslproxy.coordinator.postgres.sql.{DqMetricsSql, DqRetentionSql, IdentityGraphSql}
+import com.sun.net.httpserver.HttpServer
 import doobie.Transactor
 import doobie.implicits.*
 import io.circe.Json
@@ -13,7 +14,6 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.containers.wait.strategy.{Wait, WaitAllStrategy}
 import org.testcontainers.utility.DockerImageName
 
-import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}

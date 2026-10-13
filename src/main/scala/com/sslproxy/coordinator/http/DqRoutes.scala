@@ -5,10 +5,11 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.dq.*
 import io.circe.Json
 import io.circe.parser.parse
-import org.http4s.{HttpRoutes, Request, Response, Status}
 import org.http4s.circe.*
 import org.http4s.dsl.io.*
+import org.http4s.{HttpRoutes, Request, Response, Status}
 import org.typelevel.ci.*
+
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 

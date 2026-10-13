@@ -1,10 +1,10 @@
 package com.sslproxy.coordinator.postgres.sql
 
-import cats.syntax.all.*
 import cats.data.NonEmptyList
+import cats.syntax.all.*
 import com.sslproxy.coordinator.processor.{IdentityClusterProjection, ProjectionFunctions}
-import doobie.{ConnectionIO, Fragment, Fragments}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment, Fragments}
 
 object IdentityGraphSql:
   val AutomaticMergeSimilarity = 0.98d

@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import com.sslproxy.coordinator.dq.DqError
-import doobie.{ConnectionIO, Fragment, Query0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment, Query0}
 
 object DqProjectionSql:
   private def decisionRevision(

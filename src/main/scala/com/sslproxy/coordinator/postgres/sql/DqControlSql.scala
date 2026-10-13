@@ -2,10 +2,11 @@ package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
 import com.sslproxy.coordinator.dq.*
-import doobie.{ConnectionIO, Fragment}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Fragment}
 import io.circe.Json
 import io.circe.parser.parse
+
 import java.util.UUID
 
 /** Atomic authoritative DQ transitions. All identifiers and documents are bound. */

@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.dq
 
 import cats.Monad
-import cats.effect.{IO, Resource}
 import cats.effect.std.Semaphore
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.ArchiveConfig
 import com.sslproxy.coordinator.observability.StructuredLogger

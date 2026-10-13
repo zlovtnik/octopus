@@ -2,8 +2,8 @@ package com.sslproxy.coordinator.config
 
 import cats.data.NonEmptyList
 import com.sslproxy.coordinator.config.StringListConfigReader.given
-import com.sslproxy.coordinator.processor.ProcessorId
 import com.sslproxy.coordinator.dq.DqConfig
+import com.sslproxy.coordinator.processor.ProcessorId
 import com.typesafe.config.Config
 import pureconfig.error.ConfigReaderFailures
 import pureconfig.{ConfigCursor, ConfigReader}

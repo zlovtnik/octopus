@@ -3,17 +3,17 @@ package com.sslproxy.coordinator.dq
 import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.ArchiveConfig
 import com.sslproxy.coordinator.util.Sha256Utils
-import io.circe.{Json, Printer}
 import io.circe.parser.parse
+import io.circe.{Json, Printer}
 import io.minio.*
-import io.minio.messages.VersioningConfiguration
 import io.minio.Http.Method
+import io.minio.messages.VersioningConfiguration
 import io.opentelemetry.api.trace.SpanKind
+import okhttp3.OkHttpClient
 
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
-import okhttp3.OkHttpClient
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 

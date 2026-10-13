@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-import doobie.{ConnectionIO, Query0}
 import doobie.implicits.*
+import doobie.{ConnectionIO, Query0}
 
 /** All arrays come from one statement and one MVCC snapshot. Revisions hash
   * complete rows, so a writer changing content at the same timestamp is seen.

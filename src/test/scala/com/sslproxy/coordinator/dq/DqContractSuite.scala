@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.dq
 import io.circe.Json
 import io.circe.parser.parse
 import munit.FunSuite
+
 import java.nio.charset.StandardCharsets
 
 class DqContractSuite extends FunSuite:

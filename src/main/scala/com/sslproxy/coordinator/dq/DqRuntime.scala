@@ -1,8 +1,8 @@
 package com.sslproxy.coordinator.dq
 
 import cats.Monad
-import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, CoordinatorTracing, StructuredLogger}
@@ -13,9 +13,9 @@ import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser.parse
+import io.opentelemetry.api.trace.SpanKind
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.config.ConfigResource
-import io.opentelemetry.api.trace.SpanKind
 
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}

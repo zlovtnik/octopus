@@ -4,8 +4,8 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.postgres.sql.{DqProjectionSql, DqSnapshotSql, IdentityGraphSql}
 import com.sslproxy.coordinator.processor.IntelligencePreparation
 import doobie.ConnectionIO
-import io.circe.{Decoder, Json}
 import io.circe.generic.semiauto.deriveDecoder
+import io.circe.{Decoder, Json}
 
 private[dq] final case class DqCandidateProposal(mac_a: String, mac_b: String, confidence: Double, pair_id: String)
 private[dq] final case class DqReconciliation(candidate_id: String, decision: String)

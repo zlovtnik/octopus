@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.dq
 
 import io.circe.{Json, JsonNumber, JsonObject, Printer}
+
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Instant

@@ -1,10 +1,10 @@
 package com.sslproxy.coordinator.dq
 
 import cats.effect.IO
-import doobie.{ConnectionIO, Transactor}
-import doobie.implicits.*
-import io.circe.Json
 import com.sslproxy.coordinator.postgres.sql.DqControlSql
+import doobie.implicits.*
+import doobie.{ConnectionIO, Transactor}
+import io.circe.Json
 
 /** Durable control boundary shared by HTTP and Octopus's supervised runtime. */
 final class DqStore(val xa: Transactor[IO], val settings: DqSettings):

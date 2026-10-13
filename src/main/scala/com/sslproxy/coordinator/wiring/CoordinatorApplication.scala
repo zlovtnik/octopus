@@ -3,13 +3,13 @@ package com.sslproxy.coordinator.wiring
 import cats.effect.kernel.Fiber
 import cats.effect.{IO, Ref, Resource}
 import com.sslproxy.coordinator.config.AppConfig
-import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.dq.{DqArtifacts, DqRetention, DqRuntime, DqStore}
 import com.sslproxy.coordinator.http.DqRoutes
-import fs2.Stream
+import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.processor.ProcessorId
 import com.sslproxy.coordinator.wiring.workloads.{ConsumerWorkloads, RetentionWorkloads, ScheduledWorkloads}
+import fs2.Stream
 
 import scala.concurrent.duration.*
 

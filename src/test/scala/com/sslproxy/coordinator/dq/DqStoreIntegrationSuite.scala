@@ -11,6 +11,7 @@ import munit.CatsEffectSuite
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.containers.wait.strategy.{Wait, WaitAllStrategy}
 import org.testcontainers.utility.DockerImageName
+
 import java.nio.file.{Files, Paths}
 import java.sql.DriverManager
 import java.util.UUID

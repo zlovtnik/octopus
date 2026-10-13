@@ -236,8 +236,10 @@ object AppConfig:
         archiveErrors(config.archive, config.processors) ++
         config.dq.errors ++
         List(
-          Option.when(config.dq.enabled && (config.archive.endpoint.trim.isEmpty ||
-            config.archive.accessKey.trim.isEmpty || config.archive.secretKey.trim.isEmpty))(
+          Option.when(
+            config.dq.enabled && (config.archive.endpoint.trim.isEmpty ||
+              config.archive.accessKey.trim.isEmpty || config.archive.secretKey.trim.isEmpty)
+          )(
             "enabled DQ requires MINIO_ENDPOINT, MINIO_ACCESS_KEY_ID and MINIO_SECRET_ACCESS_KEY"
           )
         ).flatten ++

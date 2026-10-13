@@ -20,19 +20,25 @@ import scala.concurrent.duration.*
   * same exact expired object version safely; metadata pruning is row-fenced.
   * Orphans wait seven days, longer than the maximum authorized run deadline.
   */
-final class DqRetention private[dq](
-    config: DqConfig,
-    store: DqStore,
-    client: MinioClient,
-    dbSemaphore: Semaphore[IO]
+final class DqRetention private[dq] (
+  config: DqConfig,
+  store: DqStore,
+  client: MinioClient,
+  dbSemaphore: Semaphore[IO]
 ):
   private val log = StructuredLogger(getClass)
   private def database[A](effect: ConnectionIO[A]): IO[A] =
     dbSemaphore.permit.use(_ => effect.transact(store.xa))
 
   private def remove(key: String, version: String): IO[Unit] = IO.blocking {
-    client.removeObject(RemoveObjectArgs.builder().bucket(config.artifactBucket)
-      .`object`(key).versionId(version).build())
+    client.removeObject(
+      RemoveObjectArgs
+        .builder()
+        .bucket(config.artifactBucket)
+        .`object`(key)
+        .versionId(version)
+        .build()
+    )
   }
 
   private def expireReference(reference: Json): IO[Unit] =
@@ -75,32 +81,59 @@ final class DqRetention private[dq](
 
   private def orphans: IO[Unit] =
     val prefix = s"${config.installationId}/${config.namespace}/"
-    Stream.eval(IO.blocking(client.listObjects(ListObjectsArgs.builder()
-      .bucket(config.artifactBucket).prefix(prefix).recursive(true).includeVersions(true).build()).iterator()))
-      .flatMap(iterator => Stream.unfoldEval(iterator) { current =>
-        IO.blocking(if current.hasNext then Some((current.next().get(), current)) else None)
-      }).evalMap { item =>
+    Stream
+      .eval(
+        IO.blocking(
+          client
+            .listObjects(
+              ListObjectsArgs
+                .builder()
+                .bucket(config.artifactBucket)
+                .prefix(prefix)
+                .recursive(true)
+                .includeVersions(true)
+                .build()
+            )
+            .iterator()
+        )
+      )
+      .flatMap(iterator =>
+        Stream.unfoldEval(iterator) { current =>
+          IO.blocking(if current.hasNext then Some((current.next().get(), current)) else None)
+        }
+      )
+      .evalMap { item =>
         val key = item.objectName()
         val version = Option(item.versionId()).filter(value => value.nonEmpty && value != "null")
         val old = Option(item.lastModified()).exists(_.toInstant.isBefore(Instant.now().minusSeconds(7L * 86400L)))
         if item.isDeleteMarker() || !old || !DqRetention.allowedKey(key, config) then IO.unit
-        else version.traverse_ { exact =>
-          database(DqRetentionSql.referenced(s"s3://${config.artifactBucket}/$key", exact)).flatMap {
-            case true => IO.unit
-            case false => remove(key, exact)
+        else
+          version.traverse_ { exact =>
+            database(DqRetentionSql.referenced(s"s3://${config.artifactBucket}/$key", exact)).flatMap {
+              case true => IO.unit
+              case false => remove(key, exact)
+            }
           }
-        }
-      }.compile.drain
+      }
+      .compile
+      .drain
 
   def collect: IO[Unit] = expired *> orphans
-  private def guarded(effect: IO[Unit]): IO[Unit] = effect.handleErrorWith(_ => IO(log.warn("dq_retention", "status" -> "dependency_unavailable")))
+  private def guarded(effect: IO[Unit]): IO[Unit] =
+    effect.handleErrorWith(_ => IO(log.warn("dq_retention", "status" -> "dependency_unavailable")))
   def stream: Stream[IO, Unit] =
     (Stream.eval(guarded(expired)) ++ Stream.awakeEvery[IO](5.minutes).evalMap(_ => guarded(expired)))
       .merge(Stream.eval(guarded(orphans)) ++ Stream.awakeEvery[IO](1.hour).evalMap(_ => guarded(orphans)))
 
 object DqRetention:
-  def resource(config: DqConfig, storage: ArchiveConfig, store: DqStore, semaphore: Semaphore[IO]): Resource[IO, DqRetention] =
-    Resource.make(IO.blocking(DqArtifacts.client(storage, config.leaseSeconds)))(client => IO.blocking(client.close()))
+  def resource(
+    config: DqConfig,
+    storage: ArchiveConfig,
+    store: DqStore,
+    semaphore: Semaphore[IO]
+  ): Resource[IO, DqRetention] =
+    Resource
+      .make(IO.blocking(DqArtifacts.client(storage, config.leaseSeconds)))(client => IO.blocking(client.close()))
       .map(client => new DqRetention(config, store, client, semaphore))
 
   private[dq] def allowedKey(key: String, config: DqConfig): Boolean =
@@ -116,6 +149,6 @@ object DqRetention:
     val uri = DqArtifacts.required(reference, "uri")
     val prefix = s"s3://${config.artifactBucket}/"
     val key = uri.stripPrefix(prefix)
-    if !uri.startsWith(prefix) || !allowedKey(key, config) || DqArtifacts.required(reference, "version_id") == "null" then
-      throw DqPermanentError("forbidden_retention_reference")
+    if !uri.startsWith(prefix) || !allowedKey(key, config) || DqArtifacts.required(reference, "version_id") == "null"
+    then throw DqPermanentError("forbidden_retention_reference")
     key

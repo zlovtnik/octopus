@@ -17,8 +17,7 @@ import okhttp3.OkHttpClient
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-final class DqPermanentError(val code: String)
-    extends IllegalArgumentException(code)
+final class DqPermanentError(val code: String) extends IllegalArgumentException(code)
 final class DqStaleSource extends RuntimeException("source_revision_changed")
 
 trait DqArtifacts:
@@ -46,15 +45,19 @@ object DqArtifacts:
       .build()
 
   def client(storage: ArchiveConfig, leaseSeconds: Int): MinioClient =
-    val value = MinioClient.builder().endpoint(storage.endpoint)
-      .credentials(storage.accessKey, storage.secretKey).region(storage.region)
-      .httpClient(httpClient(leaseSeconds), true).build()
+    val value = MinioClient
+      .builder()
+      .endpoint(storage.endpoint)
+      .credentials(storage.accessKey, storage.secretKey)
+      .region(storage.region)
+      .httpClient(httpClient(leaseSeconds), true)
+      .build()
     value.setRetry(Set.empty[Integer].asJava, java.lang.Long.valueOf(0L), java.lang.Integer.valueOf(0))
     value
 
   def resource(
-      config: DqConfig,
-      storage: ArchiveConfig
+    config: DqConfig,
+    storage: ArchiveConfig
   ): Resource[IO, DqArtifacts] =
     Resource
       .make(IO.blocking(client(storage, config.leaseSeconds)))(client => IO.blocking(client.close()))
@@ -71,10 +74,10 @@ object DqArtifacts:
     "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$".r.matches(value)
 
   private[dq] def validatedObjectKey(
-      reference: Json,
-      run: Json,
-      output: Boolean,
-      config: DqConfig
+    reference: Json,
+    run: Json,
+    output: Boolean,
+    config: DqConfig
   ): String =
     val installation = required(run, "installation_id")
     val namespace = required(run, "namespace")
@@ -88,13 +91,11 @@ object DqArtifacts:
       .get[String]("attempt_id")
       .toOption
     val expected =
-      if output then
-        attemptId.map(id =>
-          List(installation, namespace, "runs", runId, "attempts", id)
-        )
+      if output then attemptId.map(id => List(installation, namespace, "runs", runId, "attempts", id))
       else Some(List(installation, namespace, "inputs"))
-    val schema = if output then "atheros.dedup.proposal.v1"
-    else "atheros.dedup.snapshot.v1"
+    val schema =
+      if output then "atheros.dedup.proposal.v1"
+      else "atheros.dedup.snapshot.v1"
     val valid =
       installation == config.installationId && namespace == config.namespace &&
         required(reference, "installation_id") == installation && required(
@@ -122,8 +123,7 @@ object DqArtifacts:
     if !valid then throw DqPermanentError("forbidden_artifact_reference")
     key
 
-private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
-    extends DqArtifacts:
+private final class MinioDqArtifacts(client: MinioClient, config: DqConfig) extends DqArtifacts:
   import DqArtifacts.*
 
   private def boundedCall[A](work: IO[A]): IO[A] =
@@ -141,55 +141,59 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
     val encryption = client.getBucketEncryption(
       GetBucketEncryptionArgs.builder().bucket(bucket).build()
     )
-    if Option(encryption.rule()).isEmpty then
-      throw DqPermanentError("artifact_bucket_encryption_required")
+    if Option(encryption.rule()).isEmpty then throw DqPermanentError("artifact_bucket_encryption_required")
   })
 
-  def putSnapshot(run: Json, snapshot: Json): IO[Json] = DqRuntime.traced("dq.minio.put_snapshot", run, SpanKind.CLIENT)(boundedCall(IO
-    .blocking {
-      val payload = bytes(snapshot)
-      if payload.length > config.maxArtifactBytes then
-        throw DqPermanentError("snapshot_size_exceeded")
-      val sha = Sha256Utils.sha256Hex(payload)
-      val installation = required(run, "installation_id")
-      val namespace = required(run, "namespace")
-      val runId = required(run, "run_id")
-      if installation != config.installationId || namespace != config.namespace || !safeSegment(
-          runId
-        )
-      then throw DqPermanentError("snapshot_scope_invalid")
-      val key = s"$installation/$namespace/inputs/$runId/$sha"
-      val stream = new ByteArrayInputStream(payload)
-      val response = try
-        client.putObject(
-          PutObjectArgs
-            .builder()
-            .bucket(config.artifactBucket)
-            .`object`(key)
-            .contentType("application/json")
-            .userMetadata(Map("sha256" -> sha).asJava)
-            .stream(stream, payload.length.toLong, -1L)
-            .build()
-        )
-      finally stream.close()
-      val version = Option(response.versionId())
-        .filter(value => value.nonEmpty && value != "null")
-        .getOrElse(throw DqPermanentError("artifact_version_missing"))
-      Json.obj(
-        "artifact_id" -> Json.fromString(digest(Json.arr(Json.fromString(runId), Json.fromString(sha)))),
-        "producer_run_id" -> Json.fromString(runId),
-        "installation_id" -> Json.fromString(installation),
-        "namespace" -> Json.fromString(namespace),
-        "uri" -> Json.fromString(s"s3://${config.artifactBucket}/$key"),
-        "version_id" -> Json.fromString(version),
-        "etag" -> Json.fromString(response.etag()),
-        "sha256" -> Json.fromString(sha),
-        "schema_id" -> Json.fromString("atheros.dedup.snapshot.v1"),
-        "media_type" -> Json.fromString("application/json"),
-        "size_bytes" -> Json.fromLong(payload.length.toLong)
+  def putSnapshot(run: Json, snapshot: Json): IO[Json] =
+    DqRuntime.traced("dq.minio.put_snapshot", run, SpanKind.CLIENT)(
+      boundedCall(
+        IO
+          .blocking {
+            val payload = bytes(snapshot)
+            if payload.length > config.maxArtifactBytes then throw DqPermanentError("snapshot_size_exceeded")
+            val sha = Sha256Utils.sha256Hex(payload)
+            val installation = required(run, "installation_id")
+            val namespace = required(run, "namespace")
+            val runId = required(run, "run_id")
+            if installation != config.installationId || namespace != config.namespace || !safeSegment(
+                runId
+              )
+            then throw DqPermanentError("snapshot_scope_invalid")
+            val key = s"$installation/$namespace/inputs/$runId/$sha"
+            val stream = new ByteArrayInputStream(payload)
+            val response =
+              try
+                client.putObject(
+                  PutObjectArgs
+                    .builder()
+                    .bucket(config.artifactBucket)
+                    .`object`(key)
+                    .contentType("application/json")
+                    .userMetadata(Map("sha256" -> sha).asJava)
+                    .stream(stream, payload.length.toLong, -1L)
+                    .build()
+                )
+              finally stream.close()
+            val version = Option(response.versionId())
+              .filter(value => value.nonEmpty && value != "null")
+              .getOrElse(throw DqPermanentError("artifact_version_missing"))
+            Json.obj(
+              "artifact_id" -> Json.fromString(digest(Json.arr(Json.fromString(runId), Json.fromString(sha)))),
+              "producer_run_id" -> Json.fromString(runId),
+              "installation_id" -> Json.fromString(installation),
+              "namespace" -> Json.fromString(namespace),
+              "uri" -> Json.fromString(s"s3://${config.artifactBucket}/$key"),
+              "version_id" -> Json.fromString(version),
+              "etag" -> Json.fromString(response.etag()),
+              "sha256" -> Json.fromString(sha),
+              "schema_id" -> Json.fromString("atheros.dedup.snapshot.v1"),
+              "media_type" -> Json.fromString("application/json"),
+              "size_bytes" -> Json.fromLong(payload.length.toLong)
+            )
+          }
+          .flatTap(reference => read(reference, run, output = false).void)
       )
-    }
-    .flatTap(reference => read(reference, run, output = false).void)))
+    )
 
   def read(reference: Json, run: Json, output: Boolean): IO[Json] =
     DqRuntime.traced("dq.minio.read", run, SpanKind.CLIENT)(boundedCall(IO.blocking {
@@ -198,8 +202,7 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
       val size = reference.hcursor
         .get[Long]("size_bytes")
         .fold(_ => throw DqPermanentError("artifact_size_missing"), identity)
-      if size < 0L || size > config.maxArtifactBytes.toLong then
-        throw DqPermanentError("artifact_size_exceeded")
+      if size < 0L || size > config.maxArtifactBytes.toLong then throw DqPermanentError("artifact_size_exceeded")
       val stat = client.statObject(
         StatObjectArgs
           .builder()
@@ -218,8 +221,9 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
           .versionId(version)
           .build()
       )
-      val payload = try stream.readNBytes(config.maxArtifactBytes + 1)
-      finally stream.close()
+      val payload =
+        try stream.readNBytes(config.maxArtifactBytes + 1)
+        finally stream.close()
       if payload.length.toLong != size || Sha256Utils.sha256Hex(
           payload
         ) != required(reference, "sha256")
@@ -233,9 +237,20 @@ private final class MinioDqArtifacts(client: MinioClient, config: DqConfig)
     val uri = required(reference, "uri")
     val key = uri.stripPrefix(s"s3://${config.artifactBucket}/")
     if !uri.startsWith(prefix) || !key.split("/", -1).forall(safeSegment) ||
-      required(reference, "version_id") == "null" then throw DqPermanentError("forbidden_artifact_reference")
-    val url = client.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
-      .method(Method.GET).bucket(config.artifactBucket).`object`(key).expiry(60)
-      .extraQueryParams(Map("versionId" -> required(reference, "version_id")).asJava).build())
-    Json.obj("url" -> Json.fromString(url), "expires_at" -> Json.fromString(java.time.Instant.now().plusSeconds(60).toString))
+      required(reference, "version_id") == "null"
+    then throw DqPermanentError("forbidden_artifact_reference")
+    val url = client.getPresignedObjectUrl(
+      GetPresignedObjectUrlArgs
+        .builder()
+        .method(Method.GET)
+        .bucket(config.artifactBucket)
+        .`object`(key)
+        .expiry(60)
+        .extraQueryParams(Map("versionId" -> required(reference, "version_id")).asJava)
+        .build()
+    )
+    Json.obj(
+      "url" -> Json.fromString(url),
+      "expires_at" -> Json.fromString(java.time.Instant.now().plusSeconds(60).toString)
+    )
   })

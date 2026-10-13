@@ -31,15 +31,29 @@ private[coordinator] object CoordinatorApplication:
       // The transaction fences old attempts before legacy projection can resume.
       _ <- Resource.eval(db.dbSemaphore.permit.use(_ => dqStore.reconcilePolicies))
       dqReady <- Resource.eval(Ref.of[IO, Boolean](!cfg.dq.enabled))
-      dqArtifacts <- if cfg.dq.enabled then DqArtifacts.resource(cfg.dq, cfg.archive).map(Some(_))
+      dqArtifacts <-
+        if cfg.dq.enabled then DqArtifacts.resource(cfg.dq, cfg.archive).map(Some(_))
         else Resource.pure[IO, Option[DqArtifacts]](None)
-      dqRetention <- if cfg.dq.enabled then DqRetention.resource(cfg.dq,cfg.archive,dqStore,db.dbSemaphore).map(Some(_))
+      dqRetention <-
+        if cfg.dq.enabled then DqRetention.resource(cfg.dq, cfg.archive, dqStore, db.dbSemaphore).map(Some(_))
         else Resource.pure[IO, Option[DqRetention]](None)
-      dqRuntime = dqArtifacts.map(artifacts => new DqRuntime(cfg.dq, cfg.kafka, dqStore,
-        artifacts, db.dbSemaphore, kafka.producer, cfg.processors.behaviorSimilarityThreshold, dqReady, metrics))
+      dqRuntime = dqArtifacts.map(artifacts =>
+        new DqRuntime(
+          cfg.dq,
+          cfg.kafka,
+          dqStore,
+          artifacts,
+          db.dbSemaphore,
+          kafka.producer,
+          cfg.processors.behaviorSimilarityThreshold,
+          dqReady,
+          metrics
+        )
+      )
       _ <- Resource.eval(dqRuntime.fold(IO.unit)(_.initialize))
       dqRoutes = dqArtifacts.fold(org.http4s.HttpRoutes.empty[IO])(artifacts =>
-        new DqRoutes(dqStore, cfg.dq.controlToken, artifacts.authorizedAccess).routes)
+        new DqRoutes(dqStore, cfg.dq.controlToken, artifacts.authorizedAccess).routes
+      )
       services <- Resource.eval(
         ServicesModule.build(
           cfg,
@@ -92,13 +106,15 @@ private[coordinator] object CoordinatorApplication:
           "result_group" -> cfg.kafka.resultConsumer
         )
       })
-      streams = RuntimeStreams.assemble(
-        cfg,
-        services,
-        workloads,
-        enabledProcessorIds,
-        runtimeConsumerIds
-      ).merge(dqRuntime.fold(Stream.empty[IO].covaryOutput[Unit])(_.stream))
+      streams = RuntimeStreams
+        .assemble(
+          cfg,
+          services,
+          workloads,
+          enabledProcessorIds,
+          runtimeConsumerIds
+        )
+        .merge(dqRuntime.fold(Stream.empty[IO].covaryOutput[Unit])(_.stream))
         .merge(dqRetention.fold(Stream.empty[IO].covaryOutput[Unit])(_.stream))
       fiber <- Resource.make(
         db.repository.ensureAllCursors(cfg.ingest.streamNames, db.dbSemaphore) *>

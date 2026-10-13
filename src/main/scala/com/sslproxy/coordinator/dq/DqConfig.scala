@@ -4,19 +4,19 @@ import io.circe.parser.decode
 import pureconfig.ConfigReader
 
 final case class DqConfig(
-    enabled: Boolean = false,
-    installationId: String = "",
-    namespace: String = "",
-    scopeModesJson: String = "{}",
-    policyVersion: String = "",
-    approvedDigestsJson: String = "[]",
-    controlToken: String = "",
-    artifactBucket: String = "dq-artifacts",
-    pollIntervalMs: Long = 1000L,
-    batchSize: Int = 8,
-    leaseSeconds: Int = 60,
-    maxQueued: Int = 10000,
-    maxArtifactBytes: Int = 8 * 1024 * 1024
+  enabled: Boolean = false,
+  installationId: String = "",
+  namespace: String = "",
+  scopeModesJson: String = "{}",
+  policyVersion: String = "",
+  approvedDigestsJson: String = "[]",
+  controlToken: String = "",
+  artifactBucket: String = "dq-artifacts",
+  pollIntervalMs: Long = 1000L,
+  batchSize: Int = 8,
+  leaseSeconds: Int = 60,
+  maxQueued: Int = 10000,
+  maxArtifactBytes: Int = 8 * 1024 * 1024
 ) derives ConfigReader:
   def scopeModes: Map[String, String] =
     decode[Map[String, String]](scopeModesJson).fold(_ => Map.empty, identity)

@@ -16,14 +16,13 @@ import java.security.MessageDigest
   * authentication.
   */
 final class DqRoutes(
-    store: DqStore,
-    controlToken: String,
-    artifactAccess: Json => IO[Json] = _ =>
-      IO.raiseError(DqError(503, "artifact_access_unavailable"))
+  store: DqStore,
+  controlToken: String,
+  artifactAccess: Json => IO[Json] = _ => IO.raiseError(DqError(503, "artifact_access_unavailable"))
 ):
   private def header(
-      request: Request[IO],
-      name: org.typelevel.ci.CIString
+    request: Request[IO],
+    name: org.typelevel.ci.CIString
   ): Option[String] =
     request.headers.get(name).map(_.head.value)
   private def principal(request: Request[IO]): IO[DqPrincipal] = IO {
@@ -34,7 +33,7 @@ final class DqRoutes(
       )
     then throw DqError(401, "service_auth_required")
     header(request, ci"X-DQ-Actor") match
-      case None        => DqPrincipal.internal
+      case None => DqPrincipal.internal
       case Some(actor) =>
         if !DqJson.hash(actor) then throw DqError(403, "invalid_actor")
         val roles = header(request, ci"X-DQ-Roles")
@@ -49,8 +48,7 @@ final class DqRoutes(
           .map(_.trim)
           .filter(_.nonEmpty)
           .toSet
-        if roles.contains("service") || scopes.isEmpty then
-          throw DqError(403, "invalid_principal")
+        if roles.contains("service") || scopes.isEmpty then throw DqError(403, "invalid_principal")
         DqPrincipal(actor, roles, scopes)
   }
   private def body(request: Request[IO], maximum: Int = 65536): IO[Json] =
@@ -76,7 +74,7 @@ final class DqRoutes(
     DqJson.scoped(p, value, store.settings)
   )
   private def execute(request: Request[IO], status: Status = Status.Ok)(
-      run: DqPrincipal => IO[Json]
+    run: DqPrincipal => IO[Json]
   ): IO[Response[IO]] =
     principal(request)
       .flatMap(run)
@@ -104,9 +102,7 @@ final class DqRoutes(
     case req @ POST -> Root / "internal" / "dq" / "v1" / "processor-versions" =>
       execute(req, Status.Created)(p => body(req).flatMap(store.register(p, _)))
     case req @ GET -> Root / "internal" / "dq" / "v1" / "processor-versions" / processor / version =>
-      execute(req)(p =>
-        queryScope(req) *> store.manifest(p, processor, version)
-      )
+      execute(req)(p => queryScope(req) *> store.manifest(p, processor, version))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "runs" =>
       execute(req, Status.Accepted)(p =>
         IO(p.requireRole(Set("operator", "admin", "automation"))) *> body(req)
@@ -115,16 +111,10 @@ final class DqRoutes(
     case req @ GET -> Root / "internal" / "dq" / "v1" / "runs" / runId =>
       execute(req)(p => queryScope(req) *> store.getRun(p, runId))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "runs" / runId / "cancel" =>
-      execute(req)(p =>
-        body(req).flatMap(value =>
-          scopedBody(p, value) *> store.cancel(p, runId)
-        )
-      )
+      execute(req)(p => body(req).flatMap(value => scopedBody(p, value) *> store.cancel(p, runId)))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "runs" / runId / "replay" =>
       execute(req, Status.Accepted)(p =>
-        body(req).flatMap(value =>
-          scopedBody(p, value) *> store.replay(p, runId, value)
-        )
+        body(req).flatMap(value => scopedBody(p, value) *> store.replay(p, runId, value))
       )
     case req @ POST -> Root / "internal" / "dq" / "v1" / "receipts" =>
       execute(req)(p => service(p) *> body(req, 71680).flatMap(store.receiveReceipt))
@@ -137,23 +127,23 @@ final class DqRoutes(
         }
       )
     case req @ GET -> Root / "internal" / "dq" / "v1" / "dispatches" =>
-      execute(req)(p => service(p) *> queryScope(req) *> IO {
-        req.uri.query.params.get("limit").fold(32)(value =>
-          value.toIntOption.filter(limit => limit >= 1 && limit <= 100)
-            .getOrElse(throw DqError(400,"invalid_dispatch_limit")))
-      }.flatMap(store.dispatches(_)))
+      execute(req)(p =>
+        service(p) *> queryScope(req) *> IO {
+          req.uri.query.params
+            .get("limit")
+            .fold(32)(value =>
+              value.toIntOption
+                .filter(limit => limit >= 1 && limit <= 100)
+                .getOrElse(throw DqError(400, "invalid_dispatch_limit"))
+            )
+        }.flatMap(store.dispatches(_))
+      )
     case req @ POST -> Root / "internal" / "dq" / "v1" / "runs" / runId / "attempts" / "reserve" =>
-      execute(req)(p =>
-        service(p) *> body(req).flatMap(store.reserve(runId, _))
-      )
+      execute(req)(p => service(p) *> body(req).flatMap(store.reserve(runId, _)))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "attempts" / attempt / "accepted" =>
-      execute(req)(p =>
-        service(p) *> body(req).flatMap(store.accepted(attempt, _))
-      )
+      execute(req)(p => service(p) *> body(req).flatMap(store.accepted(attempt, _)))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "attempts" / attempt / "renew" =>
-      execute(req)(p =>
-        service(p) *> body(req).flatMap(store.renew(attempt, _))
-      )
+      execute(req)(p => service(p) *> body(req).flatMap(store.renew(attempt, _)))
     case req @ GET -> Root / "internal" / "dq" / "v1" / "artifacts" / artifactId =>
       execute(req)(p => queryScope(req) *> store.artifact(p, artifactId, false))
     case req @ POST -> Root / "internal" / "dq" / "v1" / "artifacts" / artifactId / "access" =>

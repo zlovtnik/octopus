@@ -6,80 +6,84 @@ import java.security.MessageDigest
 import java.time.Instant
 
 final case class DqSettings(
-    installationId: String,
-    namespace: String,
-    scopeModes: Map[String, String],
-    policyVersion: String,
-    approvedDigests: Set[String],
-    maxQueued: Int = 10000,
-    leaseSeconds: Int = 60,
-    artifactBucket: String = "dq-artifacts"
+  installationId: String,
+  namespace: String,
+  scopeModes: Map[String, String],
+  policyVersion: String,
+  approvedDigests: Set[String],
+  maxQueued: Int = 10000,
+  leaseSeconds: Int = 60,
+  artifactBucket: String = "dq-artifacts"
 ):
   def mode(scope: String): Option[String] =
     scopeModes.get(scope).filter(Set("shadow", "enabled"))
 
 final case class DqPrincipal(
-    actor: String,
-    roles: Set[String],
-    scopes: Set[String]
+  actor: String,
+  roles: Set[String],
+  scopes: Set[String]
 ):
   def permits(scope: String): Boolean =
     scopes.contains("*") || scopes.contains(scope)
   def requireRole(allowed: Set[String]): Unit =
-    if roles.intersect(allowed).isEmpty then
-      throw DqError(403, "forbidden_role")
+    if roles.intersect(allowed).isEmpty then throw DqError(403, "forbidden_role")
 
 object DqPrincipal:
   val internal: DqPrincipal =
     DqPrincipal("octopus-runtime", Set("service"), Set("*"))
 
 final case class DqOutbox(
-    id: String,
-    topic: String,
-    key: String,
-    payload: Json,
-    owner: String,
-    token: String,
-    fence: Long
+  id: String,
+  topic: String,
+  key: String,
+  payload: Json,
+  owner: String,
+  token: String,
+  fence: Long
 )
-final case class DqError(status: Int, code: String)
-    extends RuntimeException(code)
+final case class DqError(status: Int, code: String) extends RuntimeException(code)
 
 object DqJson:
   val DispatchPageBytes: Int = 1024 * 1024
+
   /** Keep the ordered prefix within the dispatch HTTP response budget. The
     * actual Circe HTTP encoding uses noSpaces; mutation/broker limits stay 64K.
     */
   def dispatchPage(items: List[Json]): Json =
-    val (selected,_,_) = items.foldLeft((Vector.empty[Json],12,true)) {
-      case ((prefix,size,true),item) =>
+    val (selected, _, _) = items.foldLeft((Vector.empty[Json], 12, true)) {
+      case ((prefix, size, true), item) =>
         val next = size + item.noSpaces.getBytes(StandardCharsets.UTF_8).length + (if prefix.isEmpty then 0 else 1)
-        if next <= DispatchPageBytes then (prefix :+ item,next,true)
-        else if prefix.isEmpty then throw DqError(503,"dispatch_item_too_large")
-        else (prefix,size,false)
-      case (state,_) => state
+        if next <= DispatchPageBytes then (prefix :+ item, next, true)
+        else if prefix.isEmpty then throw DqError(503, "dispatch_item_too_large")
+        else (prefix, size, false)
+      case (state, _) => state
     }
     Json.obj("items" -> Json.fromValues(selected))
 
   private val canonicalPrinter = Printer.noSpaces
   private def normalized(value: Json, depth: Int): Json =
-    if depth > 128 then throw DqError(400,"json_depth_exceeded")
+    if depth > 128 then throw DqError(400, "json_depth_exceeded")
     value.asNumber match
       case Some(number) =>
-        val decimal = number.toBigDecimal.getOrElse(throw DqError(400,"invalid_number")).bigDecimal.stripTrailingZeros()
-        if decimal.scale().toLong.abs > 65536L || decimal.precision() > 65536 then throw DqError(413,"number_too_large")
+        val decimal =
+          number.toBigDecimal.getOrElse(throw DqError(400, "invalid_number")).bigDecimal.stripTrailingZeros()
+        if decimal.scale().toLong.abs > 65536L || decimal.precision() > 65536 then
+          throw DqError(413, "number_too_large")
         Json.fromJsonNumber(JsonNumber.fromDecimalStringUnsafe(decimal.toPlainString))
-      case None => value.asArray match
-        case Some(values) => Json.fromValues(values.map(normalized(_,depth+1)))
-        case None => value.mapObject { obj =>
-          val ordered = obj.toIterable.toVector.sortWith { (left,right) =>
-            java.util.Arrays.compare(left._1.codePoints().toArray,right._1.codePoints().toArray) < 0
-          }
-          JsonObject.fromIterable(ordered.map { case (key,item) => key -> normalized(item,depth+1) })
-        }
-  def canonical(value: Json): String = canonicalPrinter.print(normalized(value,0))
-    .replace(new String(Character.toChars(0x2028)),"\\u2028")
-    .replace(new String(Character.toChars(0x2029)),"\\u2029")
+      case None =>
+        value.asArray match
+          case Some(values) => Json.fromValues(values.map(normalized(_, depth + 1)))
+          case None =>
+            value.mapObject { obj =>
+              val ordered = obj.toIterable.toVector.sortWith { (left, right) =>
+                java.util.Arrays.compare(left._1.codePoints().toArray, right._1.codePoints().toArray) < 0
+              }
+              JsonObject.fromIterable(ordered.map { case (key, item) => key -> normalized(item, depth + 1) })
+            }
+  def canonical(value: Json): String = canonicalPrinter
+    .print(normalized(value, 0))
+    .replace(new String(Character.toChars(0x2028)), "\\u2028")
+    .replace(new String(Character.toChars(0x2029)), "\\u2029")
   def sha256(value: Json): String = digest(canonical(value))
   def digest(value: String): String =
     MessageDigest
@@ -111,9 +115,9 @@ object DqJson:
   def hash(value: String): Boolean = value.matches("[0-9a-f]{64}")
   def scope(parameters: Json): String = text(parameters, "authorized_scope")
   def scoped(
-      principal: DqPrincipal,
-      request: Json,
-      settings: DqSettings
+    principal: DqPrincipal,
+    request: Json,
+    settings: DqSettings
   ): Unit =
     if text(request, "installation_id") != settings.installationId || text(
         request,
@@ -123,18 +127,14 @@ object DqJson:
     val requested = optional(request, "authorized_scope").orElse(
       request.hcursor.downField("parameters").focus.map(scope)
     )
-    requested.foreach(s =>
-      if !principal.permits(s) then throw DqError(403, "forbidden_scope")
-    )
+    requested.foreach(s => if !principal.permits(s) then throw DqError(403, "forbidden_scope"))
   def bounded(value: Json): Unit =
-    if canonical(value).getBytes(StandardCharsets.UTF_8).length > 65536 then
-      throw DqError(413, "record_too_large")
+    if canonical(value).getBytes(StandardCharsets.UTF_8).length > 65536 then throw DqError(413, "record_too_large")
   def deadline(request: Json): Instant =
-    optional(request, "deadline_at").fold(Instant.now().plusSeconds(3600)) {
-      value =>
-        scala.util
-          .Try(Instant.parse(value))
-          .getOrElse(throw DqError(400, "invalid_deadline"))
+    optional(request, "deadline_at").fold(Instant.now().plusSeconds(3600)) { value =>
+      scala.util
+        .Try(Instant.parse(value))
+        .getOrElse(throw DqError(400, "invalid_deadline"))
     }
 
   // The v1 registry deliberately supports this bounded, local JSON Schema vocabulary.
@@ -165,8 +165,7 @@ object DqJson:
     val obj =
       schema.asObject.getOrElse(throw DqError(400, "invalid_parameter_schema"))
     if depth > 16 then throw DqError(400, "schema_depth_exceeded")
-    if !obj.keys.forall(schemaKeywords) then
-      throw DqError(400, "unsupported_schema_keyword")
+    if !obj.keys.forall(schemaKeywords) then throw DqError(400, "unsupported_schema_keyword")
     def reject(): Nothing = throw DqError(400, "invalid_parameter_schema")
     List("$schema", "$id", "title", "description").foreach { key =>
       obj(key).foreach(value => if !value.isString then reject())
@@ -198,20 +197,19 @@ object DqJson:
     obj("items").foreach(checkSchemaAt(_, depth + 1))
     obj("pattern").foreach(value => if !value.isString then reject())
     obj("pattern").flatMap(_.asString).foreach { value =>
-      if value.length > 256 || scala.util.Try(value.r).isFailure then
-        throw DqError(400, "invalid_schema_pattern")
+      if value.length > 256 || scala.util.Try(value.r).isFailure then throw DqError(400, "invalid_schema_pattern")
     }
   def validate(schema: Json, value: Json): Unit =
     val c = schema.hcursor
     val validType = c.get[String]("type").toOption.forall {
-      case "object"  => value.isObject
-      case "array"   => value.isArray
-      case "string"  => value.isString
+      case "object" => value.isObject
+      case "array" => value.isArray
+      case "string" => value.isString
       case "boolean" => value.isBoolean
       case "integer" => value.asNumber.flatMap(_.toBigDecimal).exists(_.isWhole)
-      case "number"  => value.isNumber
-      case "null"    => value.isNull
-      case _         => false
+      case "number" => value.isNumber
+      case "null" => value.isNull
+      case _ => false
     }
     if !validType || c
         .get[Vector[Json]]("enum")
@@ -265,11 +263,11 @@ object DqJson:
     }
 
   def validateArtifacts(
-      refs: Json,
-      settings: DqSettings,
-      runId: String,
-      attemptId: Option[String],
-      input: Boolean
+    refs: Json,
+    settings: DqSettings,
+    runId: String,
+    attemptId: Option[String],
+    input: Boolean
   ): Unit =
     val values = refs.asArray.getOrElse(throw DqError(400, "invalid_artifacts"))
     if values.size > 16 then throw DqError(400, "too_many_artifacts")
@@ -284,9 +282,9 @@ object DqJson:
       val prefix =
         "s3://" + settings.artifactBucket + "/" + settings.installationId + "/" + settings.namespace + "/"
       val uri = text(ref, "uri")
-      val permitted = if input then prefix + "inputs/"
-      else
-        prefix + "runs/" + runId + "/attempts/" + attemptId.getOrElse("") + "/"
+      val permitted =
+        if input then prefix + "inputs/"
+        else prefix + "runs/" + runId + "/attempts/" + attemptId.getOrElse("") + "/"
       if !uri.startsWith(permitted) || uri.contains("..") || uri.contains(
           "?"
         ) || uri.contains("#") || uri.contains("@")

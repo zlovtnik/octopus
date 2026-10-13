@@ -5,17 +5,29 @@ import doobie.{ConnectionIO, Fragment, Query0}
 import doobie.implicits.*
 
 object DqProjectionSql:
-  private def decisionRevision(installation: String, namespace: String, scope: Fragment,
-      policy: Fragment, mode: Fragment): Fragment =
+  private def decisionRevision(
+    installation: String,
+    namespace: String,
+    scope: Fragment,
+    policy: Fragment,
+    mode: Fragment
+  ): Fragment =
     // Runtime binds strings as unspecified for enum/JSON compatibility. Every
     // variadic JSON argument therefore needs a concrete PostgreSQL type.
     fr"encode(sha256(convert_to(jsonb_build_array(" ++ fr"$installation::TEXT,$namespace::TEXT," ++
       scope ++ fr"::TEXT," ++ policy ++ fr"::TEXT," ++ mode ++
       fr"::TEXT,decision.candidate_id,decision.decision)::text,'UTF8')),'hex')"
 
-  def recordDecision(installation: String, namespace: String, scope: String,
-      policy: String, mode: String, candidateId: String, runId: String): ConnectionIO[Int] =
-    val revision = decisionRevision(installation,namespace,fr"$scope",fr"$policy",fr"$mode")
+  def recordDecision(
+    installation: String,
+    namespace: String,
+    scope: String,
+    policy: String,
+    mode: String,
+    candidateId: String,
+    runId: String
+  ): ConnectionIO[Int] =
+    val revision = decisionRevision(installation, namespace, fr"$scope", fr"$policy", fr"$mode")
     val available = sql"""SELECT EXISTS(SELECT 1 FROM atheros_search.merge_decisions decision
       JOIN atheros_search.merge_candidates candidate ON candidate.candidate_id=decision.candidate_id
       JOIN atheros_search.devices left_device ON left_device.mac=candidate.mac_a
@@ -23,7 +35,7 @@ object DqProjectionSql:
       WHERE decision.candidate_id=$candidateId AND ($scope='*' OR
         (left_device.location_id=$scope AND right_device.location_id=$scope)))""".query[Boolean].unique
     available.flatMap { exists =>
-      if !exists then doobie.free.connection.raiseError[Int](DqError(404,"decision_not_found"))
+      if !exists then doobie.free.connection.raiseError[Int](DqError(404, "decision_not_found"))
       else (fr"""INSERT INTO octopus_core.dq_decision_sources(candidate_id,decision,decision_revision,run_id)
       SELECT decision.candidate_id,decision.decision,""" ++ revision ++ fr""",$runId
       FROM atheros_search.merge_decisions decision
@@ -45,11 +57,12 @@ object DqProjectionSql:
     * silently considered projected or rediscovered in a hot loop.
     */
   def decisions(
-      installation: String,
-      namespace: String,
-      limit: Int
+    installation: String,
+    namespace: String,
+    limit: Int
   ): Query0[(String, String, String)] =
-    val revision = decisionRevision(installation,namespace,fr"policy.authorized_scope",fr"policy.policy_version",fr"policy.mode")
+    val revision =
+      decisionRevision(installation, namespace, fr"policy.authorized_scope", fr"policy.policy_version", fr"policy.mode")
     (fr"""SELECT decision.candidate_id, decision.decision, policy.authorized_scope
            FROM atheros_search.merge_decisions decision
            JOIN atheros_search.merge_candidates candidate ON candidate.candidate_id = decision.candidate_id

@@ -68,12 +68,18 @@ final class DqRuntime(
 
   private def applyOutput(run: Json): IO[Unit] =
     val runId = required(run, "run_id")
-    def single(name: String): Json = run.hcursor.get[Vector[Json]](name).toOption
-      .filter(_.size == 1).flatMap(_.headOption).getOrElse(throw DqPermanentError(s"invalid_$name"))
+    def single(name: String): Json = run.hcursor
+      .get[Vector[Json]](name)
+      .toOption
+      .filter(_.size == 1)
+      .flatMap(_.headOption)
+      .getOrElse(throw DqPermanentError(s"invalid_$name"))
     val work = for
       snapshot <- IO.defer(artifacts.read(single("input_refs"), run, output = false))
       proposal <- IO.defer(artifacts.read(single("output_refs"), run, output = true))
-      _ <- database(IO.defer(DqApply.transaction(store, owner, run, snapshot, proposal, minimumSimilarity).transact(store.xa)))
+      _ <- database(
+        IO.defer(DqApply.transaction(store, owner, run, snapshot, proposal, minimumSimilarity).transact(store.xa))
+      )
     yield ()
     DqRuntime.traced("dq.apply", run, SpanKind.INTERNAL)(work).handleErrorWith { error =>
       val (code, permanent, fresh) = error match
@@ -92,30 +98,38 @@ final class DqRuntime(
         IO {
           val headers = new org.apache.kafka.common.header.internals.RecordHeaders()
           CoordinatorTracing.injectCurrent(headers)
-          val converted = fs2.kafka.Headers.fromIterable(headers.asScala.map(header => fs2.kafka.Header(header.key(), header.value())).toList)
+          val converted = fs2.kafka.Headers.fromIterable(
+            headers.asScala.map(header => fs2.kafka.Header(header.key(), header.value())).toList
+          )
           ProducerRecord(item.topic, item.key, raw).withHeaders(converted)
         }.flatMap(record => producer.produce(ProducerRecords.one(record)).flatten.void)
-      }
-    ).attempt.flatMap {
+      }).attempt.flatMap {
       case Right(_) => database(store.acknowledgeOutbox(item)).void
       case Left(error) => database(store.failOutbox(item)) *> IO.raiseError(error)
     }
 
   private def admission(scope: String, operation: String, key: String, candidate: Option[String]): Json =
-    val parameters = Json.obj(
-      "authorized_scope" -> Json.fromString(scope), "policy_version" -> Json.fromString(config.policyVersion),
-      "max_candidates" -> Json.fromInt(1000)
-    ).deepMerge(candidate.fold(Json.obj())(id => Json.obj("candidate_id" -> Json.fromString(id))))
+    val parameters = Json
+      .obj(
+        "authorized_scope" -> Json.fromString(scope),
+        "policy_version" -> Json.fromString(config.policyVersion),
+        "max_candidates" -> Json.fromInt(1000)
+      )
+      .deepMerge(candidate.fold(Json.obj())(id => Json.obj("candidate_id" -> Json.fromString(id))))
     Json.obj(
-      "installation_id" -> Json.fromString(config.installationId), "namespace" -> Json.fromString(config.namespace),
-      "processor_id" -> Json.fromString("atheros.dedup"), "processor_version" -> Json.fromString("0.1.0"),
-      "operation" -> Json.fromString(operation), "parameters" -> parameters, "idempotency_key" -> Json.fromString(key)
+      "installation_id" -> Json.fromString(config.installationId),
+      "namespace" -> Json.fromString(config.namespace),
+      "processor_id" -> Json.fromString("atheros.dedup"),
+      "processor_version" -> Json.fromString("0.1.0"),
+      "operation" -> Json.fromString(operation),
+      "parameters" -> parameters,
+      "idempotency_key" -> Json.fromString(key)
     )
 
   private val automation = DqPrincipal("octopus-dq-discovery", Set("automation"), config.scopeModes.keySet)
   private def discoverAdmission(request: Json): IO[Unit] =
-    database(store.admit(automation,request)).void.handleErrorWith {
-      case DqError(429,"admission_capacity") => IO.unit
+    database(store.admit(automation, request)).void.handleErrorWith {
+      case DqError(429, "admission_capacity") => IO.unit
       case error => IO.raiseError(error)
     }
 
@@ -128,15 +142,31 @@ final class DqRuntime(
           .deepMerge(Json.obj("policy_version" -> Json.fromString(config.policyVersion)))
         database(IO.defer(DqSnapshot.prepare(request, minimumSimilarity).transact(store.xa))).flatMap { snapshot =>
           val hasPairs = snapshot.hcursor.get[Vector[Json]]("pairs").exists(_.nonEmpty)
-          val key = DqArtifacts.digest(Json.arr(Json.fromString("candidate-preparation"), Json.fromString(scope),
-            Json.fromString(mode), Json.fromString(config.policyVersion), Json.fromString(DqSnapshot.revision(snapshot))))
+          val key = DqArtifacts.digest(
+            Json.arr(
+              Json.fromString("candidate-preparation"),
+              Json.fromString(scope),
+              Json.fromString(mode),
+              Json.fromString(config.policyVersion),
+              Json.fromString(DqSnapshot.revision(snapshot))
+            )
+          )
           IO.whenA(hasPairs)(discoverAdmission(admission(scope, "prepare_candidates", key, None)))
         }
-      } *> database(DqProjectionSql.decisions(config.installationId, config.namespace, config.batchSize).to[List].transact(store.xa))
+      } *> database(
+        DqProjectionSql.decisions(config.installationId, config.namespace, config.batchSize).to[List].transact(store.xa)
+      )
         .flatMap(_.traverse_ { case (candidateId, decision, scope) =>
-          val key = DqArtifacts.digest(Json.arr(Json.fromString("decision-reconciliation"), Json.fromString(candidateId),
-            Json.fromString(decision), Json.fromString(scope), Json.fromString(config.policyVersion),
-            Json.fromString(config.scopeModes.getOrElse(scope, "disabled"))))
+          val key = DqArtifacts.digest(
+            Json.arr(
+              Json.fromString("decision-reconciliation"),
+              Json.fromString(candidateId),
+              Json.fromString(decision),
+              Json.fromString(scope),
+              Json.fromString(config.policyVersion),
+              Json.fromString(config.scopeModes.getOrElse(scope, "disabled"))
+            )
+          )
           discoverAdmission(admission(scope, "reconcile_decision", key, Some(candidateId)))
         })
 
@@ -146,85 +176,136 @@ final class DqRuntime(
       _ <- database(store.expireAttempts)
       // Start a lease immediately before doing its work. Leasing a whole batch
       // before serial processing spends the later items' lease while they wait.
-      _ <- DqRuntime.attemptStages(List(
-        DqRuntime.drain(config.batchSize,database(store.claimPreparation(owner,config.leaseSeconds,1)).map(_.headOption))(prepare),
-        DqRuntime.drain(config.batchSize,database(store.claimOutput(owner,config.leaseSeconds,1)).map(_.headOption))(applyOutput),
-        DqRuntime.drain(config.batchSize,database(store.claimOutbox(owner,config.leaseSeconds,1)).map(_.headOption))(publish),
-      // Drain previously admitted work before discovery. A full admission queue
-      // must never prevent preparation, application or outbox progress.
-        discover
-      ))
+      _ <- DqRuntime.attemptStages(
+        List(
+          DqRuntime.drain(
+            config.batchSize,
+            database(store.claimPreparation(owner, config.leaseSeconds, 1)).map(_.headOption)
+          )(prepare),
+          DqRuntime.drain(
+            config.batchSize,
+            database(store.claimOutput(owner, config.leaseSeconds, 1)).map(_.headOption)
+          )(applyOutput),
+          DqRuntime.drain(
+            config.batchSize,
+            database(store.claimOutbox(owner, config.leaseSeconds, 1)).map(_.headOption)
+          )(publish),
+          // Drain previously admitted work before discovery. A full admission queue
+          // must never prevent preparation, application or outbox progress.
+          discover
+        )
+      )
     yield ()
 
   private def guardedTick: IO[Unit] = tick.attempt.flatMap {
     case Right(_) => readiness.set(true)
-    case Left(error) => readiness.set(false) *> IO(log.warn("dq_runtime", "status" -> (error match
-      case value: DqError => value.code
-      case value: DqPermanentError => value.code
-      case _ => "dependency_unavailable"
-    ), "error_class" -> error.getClass.getSimpleName, "sql_state" -> (error match
-      case value: java.sql.SQLException => Option(value.getSQLState).getOrElse("unknown")
-      case _ => "none"
-    )))
+    case Left(error) =>
+      readiness.set(false) *> IO(
+        log.warn(
+          "dq_runtime",
+          "status" -> (error match
+            case value: DqError => value.code
+            case value: DqPermanentError => value.code
+            case _ => "dependency_unavailable"
+          ),
+          "error_class" -> error.getClass.getSimpleName,
+          "sql_state" -> (error match
+            case value: java.sql.SQLException => Option(value.getSQLState).getOrElse("unknown")
+            case _ => "none"
+          )
+        )
+      )
   }
 
   private def reports: Stream[IO, Unit] =
     val settings = ConsumerSettings[IO, String, Array[Byte]]
-      .withBootstrapServers(kafka.bootstrapServers).withGroupId(group)
-      .withAutoOffsetReset(AutoOffsetReset.Earliest).withEnableAutoCommit(false)
-      .withIsolationLevel(IsolationLevel.ReadCommitted).withMaxPollRecords(config.batchSize)
-      .withMaxPrefetchBatches(1).withProperties("allow.auto.create.topics" -> "false", "max.partition.fetch.bytes" -> "131072")
+      .withBootstrapServers(kafka.bootstrapServers)
+      .withGroupId(group)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withEnableAutoCommit(false)
+      .withIsolationLevel(IsolationLevel.ReadCommitted)
+      .withMaxPollRecords(config.batchSize)
+      .withMaxPrefetchBatches(1)
+      .withProperties("allow.auto.create.topics" -> "false", "max.partition.fetch.bytes" -> "131072")
     Stream.resource(KafkaConsumer.resource(settings)).flatMap { consumer =>
       val records = Stream.eval(consumer.subscribeTo("dq.worker-reports.v1")) >>
         consumer.partitionedStream.map { partition =>
           partition.evalMap { record =>
-            val receipt = DqRuntime.receipt(config, group, record.record.topic, record.record.partition,
-              record.record.offset, Option(record.record.key).getOrElse(""), Option(record.record.value).getOrElse(Array.emptyByteArray))
+            val receipt = DqRuntime.receipt(
+              config,
+              group,
+              record.record.topic,
+              record.record.partition,
+              record.record.offset,
+              Option(record.record.key).getOrElse(""),
+              Option(record.record.value).getOrElse(Array.emptyByteArray)
+            )
             Monad[IO].tailRecM[Int, Unit](0) { retry =>
-              DqRuntime.traced("dq.receive_report", receipt.hcursor.downField("envelope").focus.getOrElse(Json.obj()), SpanKind.CONSUMER) {
-                database(store.receiveReceipt(receipt))
-              }.attempt.flatMap {
-                case Right(_) => record.offset.commit.as(Right(()))
-                case Left(_) => readiness.set(false) *>
-                  IO.sleep((1000L * (1L << retry.min(5))).millis).as(Left((retry + 1).min(5)))
-              }
+              DqRuntime
+                .traced(
+                  "dq.receive_report",
+                  receipt.hcursor.downField("envelope").focus.getOrElse(Json.obj()),
+                  SpanKind.CONSUMER
+                ) {
+                  database(store.receiveReceipt(receipt))
+                }
+                .attempt
+                .flatMap {
+                  case Right(_) => record.offset.commit.as(Right(()))
+                  case Left(_) =>
+                    readiness.set(false) *>
+                      IO.sleep((1000L * (1L << retry.min(5))).millis).as(Left((retry + 1).min(5)))
+                }
             }
           }
         }.parJoinUnbounded
-      val lag = Stream.repeatEval(consumer.metrics
-        .flatMap(values => IO(metrics.recordKafkaMetrics(group,values)))
-        .timeout(5.seconds)
-        .handleErrorWith(_ => IO(metrics.recordLagRefreshFailure(group))))
-        .metered(5.seconds).onFinalize(IO(metrics.clearKafkaMetrics(group)))
+      val lag = Stream
+        .repeatEval(
+          consumer.metrics
+            .flatMap(values => IO(metrics.recordKafkaMetrics(group, values)))
+            .timeout(5.seconds)
+            .handleErrorWith(_ => IO(metrics.recordLagRefreshFailure(group)))
+        )
+        .metered(5.seconds)
+        .onFinalize(IO(metrics.clearKafkaMetrics(group)))
       records.concurrently(lag)
     }
 
   private def reportsForever: IO[Unit] = Monad[IO].tailRecM[Int, Unit](0) { retry =>
     reports.compile.drain.attempt.flatMap {
       case Right(_) => IO.pure(Right(()))
-      case Left(_) => readiness.set(false) *> IO.sleep((1000L * (1L << retry.min(5))).millis)
-        .as(Left((retry + 1).min(5)))
+      case Left(_) =>
+        readiness.set(false) *> IO
+          .sleep((1000L * (1L << retry.min(5))).millis)
+          .as(Left((retry + 1).min(5)))
     }
   }
 
   def stream: Stream[IO, Unit] =
     (Stream.eval(guardedTick) ++ Stream.awakeEvery[IO](config.pollIntervalMs.millis).evalMap(_ => guardedTick))
       .merge(Stream.eval(reportsForever))
-      .concurrently(Stream.repeatEval(DqMetrics.sample(store,metrics,dbSemaphore)
-        .handleErrorWith(_ => IO(log.warn("dq_metrics","status" -> "sample_unavailable"))))
-        .metered(5.seconds))
+      .concurrently(
+        Stream
+          .repeatEval(
+            DqMetrics
+              .sample(store, metrics, dbSemaphore)
+              .handleErrorWith(_ => IO(log.warn("dq_metrics", "status" -> "sample_unavailable")))
+          )
+          .metered(5.seconds)
+      )
 
 object DqRuntime:
   private[dq] def attemptStages(stages: List[IO[Unit]]): IO[Unit] =
     stages.traverse(_.attempt).flatMap(_.collectFirst { case Left(error) => error }.fold(IO.unit)(IO.raiseError))
 
   private[dq] def drain[A](limit: Int, claim: IO[Option[A]])(consume: A => IO[Unit]): IO[Unit] =
-    Monad[IO].tailRecM[Int,Unit](0) { processed =>
+    Monad[IO].tailRecM[Int, Unit](0) { processed =>
       if processed >= limit then IO.pure(Right(()))
-      else claim.flatMap {
-        case None => IO.pure(Right(()))
-        case Some(item) => consume(item).as(Left(processed+1))
-      }
+      else
+        claim.flatMap {
+          case None => IO.pure(Right(()))
+          case Some(item) => consume(item).as(Left(processed + 1))
+        }
     }
 
   private[dq] def traced[A](name: String, record: Json, kind: SpanKind)(operation: IO[A]): IO[A] =
@@ -234,33 +315,71 @@ object DqRuntime:
         val _ = headers.add(key, value.getBytes(StandardCharsets.UTF_8))
       }
     }
-    CoordinatorTracing.spanWithParent(name, kind, Some(CoordinatorTracing.extractParent(headers)),
-      "dq.operation" -> CoordinatorTracing.Attr.S(record.hcursor.get[String]("operation").getOrElse("control")))(operation)
+    CoordinatorTracing.spanWithParent(
+      name,
+      kind,
+      Some(CoordinatorTracing.extractParent(headers)),
+      "dq.operation" -> CoordinatorTracing.Attr.S(record.hcursor.get[String]("operation").getOrElse("control"))
+    )(operation)
 
-  private[dq] def receipt(config: DqConfig, group: String, topic: String, partition: Int, offset: Long, key: String, raw: Array[Byte]): Json =
+  private[dq] def receipt(
+    config: DqConfig,
+    group: String,
+    topic: String,
+    partition: Int,
+    offset: Long,
+    key: String,
+    raw: Array[Byte]
+  ): Json =
     val hash = Sha256Utils.sha256Hex(raw)
-    val decoded = Either.catchNonFatal(StandardCharsets.UTF_8.newDecoder()
-      .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
-      .decode(ByteBuffer.wrap(raw)).toString).flatMap(value => parse(value).leftMap(identity[Throwable]))
+    val decoded = Either
+      .catchNonFatal(
+        StandardCharsets.UTF_8
+          .newDecoder()
+          .onMalformedInput(CodingErrorAction.REPORT)
+          .onUnmappableCharacter(CodingErrorAction.REPORT)
+          .decode(ByteBuffer.wrap(raw))
+          .toString
+      )
+      .flatMap(value => parse(value).leftMap(identity[Throwable]))
     val permitted = decoded.toOption.filter { envelope =>
       raw.length <= 65536 && envelope.isObject &&
-        envelope.hcursor.get[String]("installation_id").contains(config.installationId) &&
-        envelope.hcursor.get[String]("namespace").contains(config.namespace) &&
-        envelope.hcursor.get[String]("run_id").toOption.exists(id => key == s"${config.installationId}/${config.namespace}/$id")
+      envelope.hcursor.get[String]("installation_id").contains(config.installationId) &&
+      envelope.hcursor.get[String]("namespace").contains(config.namespace) &&
+      envelope.hcursor
+        .get[String]("run_id")
+        .toOption
+        .exists(id => key == s"${config.installationId}/${config.namespace}/$id")
     }
-    val eventId = permitted.flatMap(_.hcursor.get[String]("event_id").toOption).filter(value => value.nonEmpty && value.length <= 256).getOrElse(hash)
-    Json.obj(
-      "installation_id" -> Json.fromString(config.installationId), "namespace" -> Json.fromString(config.namespace),
-      "consumer_group" -> Json.fromString(group), "topic" -> Json.fromString(topic),
-      "partition" -> Json.fromInt(partition), "offset" -> Json.fromLong(offset),
-      "event_id" -> Json.fromString(eventId), "payload_sha256" -> Json.fromString(hash)
-    ).deepMerge(permitted.fold(Json.obj("quarantine_reason" -> Json.fromString("invalid_record")))(value => Json.obj("envelope" -> value)))
+    val eventId = permitted
+      .flatMap(_.hcursor.get[String]("event_id").toOption)
+      .filter(value => value.nonEmpty && value.length <= 256)
+      .getOrElse(hash)
+    Json
+      .obj(
+        "installation_id" -> Json.fromString(config.installationId),
+        "namespace" -> Json.fromString(config.namespace),
+        "consumer_group" -> Json.fromString(group),
+        "topic" -> Json.fromString(topic),
+        "partition" -> Json.fromInt(partition),
+        "offset" -> Json.fromLong(offset),
+        "event_id" -> Json.fromString(eventId),
+        "payload_sha256" -> Json.fromString(hash)
+      )
+      .deepMerge(
+        permitted.fold(Json.obj("quarantine_reason" -> Json.fromString("invalid_record")))(value =>
+          Json.obj("envelope" -> value)
+        )
+      )
 
   def brokerPreflight(config: KafkaCfg): IO[Unit] = IO.blocking {
     val policies = Map(
-      "dq.commands.v1" -> ("delete", 7), "dq.worker-reports.v1" -> ("delete", 7),
-      "dq.events.v1" -> ("delete", 30), "dq.dlq.v1" -> ("delete", 30),
-      "dq.registry.v1" -> ("compact", 0), "dq.audit.v1" -> ("delete", 180)
+      "dq.commands.v1" -> ("delete", 7),
+      "dq.worker-reports.v1" -> ("delete", 7),
+      "dq.events.v1" -> ("delete", 30),
+      "dq.dlq.v1" -> ("delete", 30),
+      "dq.registry.v1" -> ("compact", 0),
+      "dq.audit.v1" -> ("delete", 180)
     )
     val properties = new Properties()
     properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, config.bootstrapServers)
@@ -268,16 +387,18 @@ object DqRuntime:
     val admin = Admin.create(properties)
     try
       val topics = admin.describeTopics(policies.keys.toList.asJava).allTopicNames().get(15L, TimeUnit.SECONDS)
-      if topics.asScala.values.exists(_.partitions().asScala.exists(_.replicas().size() < config.topicReplicationFactor)) then
-        throw DqPermanentError("dq_topic_replication_inadequate")
+      if topics.asScala.values.exists(
+          _.partitions().asScala.exists(_.replicas().size() < config.topicReplicationFactor)
+        )
+      then throw DqPermanentError("dq_topic_replication_inadequate")
       val resources = policies.keys.map(topic => new ConfigResource(ConfigResource.Type.TOPIC, topic)).toList
       val configs = admin.describeConfigs(resources.asJava).all().get(15L, TimeUnit.SECONDS)
       policies.foreachEntry { (topic, policy) =>
         val (cleanup, days) = policy
         val configured = configs.get(new ConfigResource(ConfigResource.Type.TOPIC, topic))
         if configured.get("cleanup.policy").value() != cleanup ||
-          (days > 0 && configured.get("retention.ms").value().toLong != days.toLong * 86400000L) then
-          throw DqPermanentError("dq_topic_retention_mismatch")
+          (days > 0 && configured.get("retention.ms").value().toLong != days.toLong * 86400000L)
+        then throw DqPermanentError("dq_topic_retention_mismatch")
       }
     finally admin.close(JavaDuration.ofSeconds(5))
   }

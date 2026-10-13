@@ -64,8 +64,14 @@ object DqRetentionSql:
           WHERE c.candidate_id IS NULL OR c.status NOT IN ('confirmed','rejected','not_match')
             OR GREATEST(c.updated_at,d.decided_at)>CURRENT_TIMESTAMP-INTERVAL '90 days'
         )
-      ORDER BY a.retained_until,a.artifact_id LIMIT $limit""".query[String].to[List]
-      .flatMap(_.traverse(raw => parse(raw).fold(error => doobie.free.connection.raiseError[Json](error), _.pure[ConnectionIO])))
+      ORDER BY a.retained_until,a.artifact_id LIMIT $limit"""
+      .query[String]
+      .to[List]
+      .flatMap(
+        _.traverse(raw =>
+          parse(raw).fold(error => doobie.free.connection.raiseError[Json](error), _.pure[ConnectionIO])
+        )
+      )
 
   def referenced(uri: String, version: String): ConnectionIO[Boolean] =
     sql"""SELECT EXISTS(SELECT 1 FROM octopus_core.dq_artifacts

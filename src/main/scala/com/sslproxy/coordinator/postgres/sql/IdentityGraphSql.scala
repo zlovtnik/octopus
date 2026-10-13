@@ -2,10 +2,7 @@ package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
 import cats.data.NonEmptyList
-import com.sslproxy.coordinator.processor.{
-  IdentityClusterProjection,
-  ProjectionFunctions
-}
+import com.sslproxy.coordinator.processor.{IdentityClusterProjection, ProjectionFunctions}
 import doobie.{ConnectionIO, Fragment, Fragments}
 import doobie.implicits.*
 
@@ -13,8 +10,8 @@ object IdentityGraphSql:
   val AutomaticMergeSimilarity = 0.98d
 
   def similarityEdges(
-      minimumSimilarity: Double,
-      limit: Int
+    minimumSimilarity: Double,
+    limit: Int
   ): doobie.Query0[(String, String, Double)] =
     sql"""SELECT left_source_mac, right_source_mac, cosine_similarity
            FROM atheros_search.similarity_pairs pair
@@ -97,10 +94,10 @@ object IdentityGraphSql:
     )""")
 
   def reconcileMergeConfirmationsFor(
-      candidateIds: List[String]
+    candidateIds: List[String]
   ): ConnectionIO[Int] =
     NonEmptyList.fromList(candidateIds.distinct.sorted) match
-      case None      => 0.pure[ConnectionIO]
+      case None => 0.pure[ConnectionIO]
       case Some(ids) =>
         reconcileConfirmations(Fragments.in(fr"candidate.candidate_id", ids))
 
@@ -173,9 +170,9 @@ object IdentityGraphSql:
     lock *> update
 
   def persistMergeCandidate(
-      left: String,
-      right: String,
-      confidence: Double
+    left: String,
+    right: String,
+    confidence: Double
   ): ConnectionIO[Int] =
     val ordered = Vector(left, right).sorted
     val candidateId = ProjectionFunctions.stableId("merge-candidate", ordered)
@@ -211,8 +208,8 @@ object IdentityGraphSql:
 
       firstSeen.flatMap { case (minimum, maximum) =>
         def persistRows(
-            min: java.sql.Timestamp,
-            max: java.sql.Timestamp
+          min: java.sql.Timestamp,
+          max: java.sql.Timestamp
         ): ConnectionIO[Int] =
           for
             cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
@@ -264,14 +261,14 @@ object IdentityGraphSql:
 
         (minimum, maximum) match
           case (Some(min), Some(max)) => persistRows(min, max)
-          case (Some(min), None)      => persistRows(min, min)
-          case (None, Some(max))      => persistRows(max, max)
-          case (None, None)           => 0.pure[ConnectionIO]
+          case (Some(min), None) => persistRows(min, min)
+          case (None, Some(max)) => persistRows(max, max)
+          case (None, None) => 0.pure[ConnectionIO]
       }
     }
 
   def replaceClusters(
-      values: List[IdentityClusterProjection]
+    values: List[IdentityClusterProjection]
   ): ConnectionIO[Int] =
     for
       deactivated <- sql"""UPDATE atheros_search.identity_clusters

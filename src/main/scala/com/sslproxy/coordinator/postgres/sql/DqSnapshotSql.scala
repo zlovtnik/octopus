@@ -9,11 +9,11 @@ import doobie.implicits.*
   */
 object DqSnapshotSql:
   def source(
-      scope: String,
-      operation: String,
-      limit: Int,
-      candidateId: Option[String],
-      minimumSimilarity: Double
+    scope: String,
+    operation: String,
+    limit: Int,
+    candidateId: Option[String],
+    minimumSimilarity: Double
   ): Query0[String] =
     sql"""WITH selected_pairs AS MATERIALIZED (
              SELECT pair.*,

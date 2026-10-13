@@ -11,9 +11,15 @@ private[dq] final case class DqCandidateProposal(mac_a: String, mac_b: String, c
 private[dq] final case class DqReconciliation(candidate_id: String, decision: String)
 private[dq] final case class DqProposalSummary(candidate_count: Int, reconciliation_count: Int)
 private[dq] final case class DqProposal(
-  run_id: String, attempt_id: String, fence: Long, operation: String,
-  source_revision_digest: String, policy_version: String,
-  candidates: Vector[DqCandidateProposal], reconciliations: Vector[DqReconciliation], summary: DqProposalSummary
+  run_id: String,
+  attempt_id: String,
+  fence: Long,
+  operation: String,
+  source_revision_digest: String,
+  policy_version: String,
+  candidates: Vector[DqCandidateProposal],
+  reconciliations: Vector[DqReconciliation],
+  summary: DqProposalSummary
 )
 
 object DqApply:
@@ -29,7 +35,17 @@ object DqApply:
 
   private[dq] def validate(run: Json, snapshot: Json, output: Json): DqProposal =
     val proposal = output.as[DqProposal].fold(_ => throw DqPermanentError("proposal_schema_invalid"), identity)
-    val fields = Set("run_id", "attempt_id", "fence", "operation", "source_revision_digest", "policy_version", "candidates", "reconciliations", "summary")
+    val fields = Set(
+      "run_id",
+      "attempt_id",
+      "fence",
+      "operation",
+      "source_revision_digest",
+      "policy_version",
+      "candidates",
+      "reconciliations",
+      "summary"
+    )
     val candidateFields = Set("mac_a", "mac_b", "confidence", "pair_id")
     val reconciliationFields = Set("candidate_id", "decision")
     val summaryFields = Set("candidate_count", "reconciliation_count")
@@ -37,7 +53,9 @@ object DqApply:
     val scope = run.hcursor.downField("parameters").get[String]("authorized_scope").toOption
     val limit = run.hcursor.downField("parameters").get[Int]("max_candidates").toOption.getOrElse(0)
     val sameIdentity = proposal.run_id == required(run, "run_id") &&
-      proposal.attempt_id == required(attempt, "attempt_id") && attempt.hcursor.get[Long]("fence").contains(proposal.fence) &&
+      proposal.attempt_id == required(attempt, "attempt_id") && attempt.hcursor
+        .get[Long]("fence")
+        .contains(proposal.fence) &&
       proposal.operation == required(run, "operation") && proposal.policy_version == required(run, "policy_version") &&
       proposal.source_revision_digest == required(run, "source_revision_digest") &&
       proposal.source_revision_digest == DqSnapshot.revision(snapshot) && DqSnapshot.validateDigest(snapshot) &&
@@ -53,12 +71,19 @@ object DqApply:
       output.hcursor.get[Vector[Json]]("reconciliations").exists(_.forall(exactFields(_, reconciliationFields)))
     if !sameIdentity || !strictFields || proposal.candidates.size > limit ||
       proposal.summary.candidate_count != proposal.candidates.size ||
-      proposal.summary.reconciliation_count != proposal.reconciliations.size then
-      throw DqPermanentError("proposal_identity_mismatch")
-    val pairs = snapshot.hcursor.get[Vector[Json]]("pairs").fold(_ => throw DqPermanentError("snapshot_pairs_invalid"), identity)
-    val decisions = snapshot.hcursor.get[Vector[Json]]("decisions").fold(_ => throw DqPermanentError("snapshot_decisions_invalid"), identity)
-    val candidates = snapshot.hcursor.get[Vector[Json]]("candidates").fold(_ => throw DqPermanentError("snapshot_candidates_invalid"), identity)
-    val devices = snapshot.hcursor.get[Vector[Json]]("devices").fold(_ => throw DqPermanentError("snapshot_devices_invalid"), identity)
+      proposal.summary.reconciliation_count != proposal.reconciliations.size
+    then throw DqPermanentError("proposal_identity_mismatch")
+    val pairs =
+      snapshot.hcursor.get[Vector[Json]]("pairs").fold(_ => throw DqPermanentError("snapshot_pairs_invalid"), identity)
+    val decisions = snapshot.hcursor
+      .get[Vector[Json]]("decisions")
+      .fold(_ => throw DqPermanentError("snapshot_decisions_invalid"), identity)
+    val candidates = snapshot.hcursor
+      .get[Vector[Json]]("candidates")
+      .fold(_ => throw DqPermanentError("snapshot_candidates_invalid"), identity)
+    val devices = snapshot.hcursor
+      .get[Vector[Json]]("devices")
+      .fold(_ => throw DqPermanentError("snapshot_devices_invalid"), identity)
     val macs = devices.map(required(_, "mac")).toSet
     proposal.candidates.foreach { candidate =>
       val pairMatches = pairs.exists { source =>
@@ -67,14 +92,18 @@ object DqApply:
         source.hcursor.get[String]("mac_b").contains(candidate.mac_b) &&
         source.hcursor.get[Double]("confidence").contains(candidate.confidence)
       }
-      val decided = candidates.find(source => source.hcursor.get[String]("mac_a").contains(candidate.mac_a) &&
-        source.hcursor.get[String]("mac_b").contains(candidate.mac_b)).exists { existing =>
-        decisions.exists(decision => required(decision, "candidate_id") == required(existing, "candidate_id"))
-      }
+      val decided = candidates
+        .find(source =>
+          source.hcursor.get[String]("mac_a").contains(candidate.mac_a) &&
+            source.hcursor.get[String]("mac_b").contains(candidate.mac_b)
+        )
+        .exists { existing =>
+          decisions.exists(decision => required(decision, "candidate_id") == required(existing, "candidate_id"))
+        }
       if !Mac.matches(candidate.mac_a) || !Mac.matches(candidate.mac_b) || candidate.mac_a >= candidate.mac_b ||
         !candidate.confidence.isFinite || candidate.confidence < 0.0d || candidate.confidence > 1.0d ||
-        !pairMatches || decided || !macs(candidate.mac_a) || !macs(candidate.mac_b) then
-        throw DqPermanentError("proposal_candidate_forbidden")
+        !pairMatches || decided || !macs(candidate.mac_a) || !macs(candidate.mac_b)
+      then throw DqPermanentError("proposal_candidate_forbidden")
     }
     if proposal.candidates.distinctBy(value => (value.mac_a, value.mac_b)).size != proposal.candidates.size then
       throw DqPermanentError("proposal_duplicate_pair")
@@ -85,10 +114,15 @@ object DqApply:
         val candidateId = run.hcursor.downField("parameters").get[String]("candidate_id").toOption
         if proposal.candidates.nonEmpty || proposal.reconciliations.size != 1 ||
           !proposal.reconciliations.forall { reconciliation =>
-            candidateId.contains(reconciliation.candidate_id) && candidates.exists(_.hcursor.get[String]("candidate_id").contains(reconciliation.candidate_id)) &&
-              decisions.exists(source => source.hcursor.get[String]("candidate_id").contains(reconciliation.candidate_id) &&
-                source.hcursor.get[String]("decision").contains(reconciliation.decision))
-          } then throw DqPermanentError("proposal_decision_forbidden")
+            candidateId.contains(reconciliation.candidate_id) && candidates.exists(
+              _.hcursor.get[String]("candidate_id").contains(reconciliation.candidate_id)
+            ) &&
+            decisions.exists(source =>
+              source.hcursor.get[String]("candidate_id").contains(reconciliation.candidate_id) &&
+                source.hcursor.get[String]("decision").contains(reconciliation.decision)
+            )
+          }
+        then throw DqPermanentError("proposal_decision_forbidden")
       case _ => throw DqPermanentError("proposal_operation_unsupported")
     proposal
 
@@ -96,52 +130,93 @@ object DqApply:
     val pairs = snapshot.hcursor.get[Vector[Json]]("pairs").getOrElse(Vector.empty)
     val legacy = pairs.foldLeft(Map.empty[(String, String), Double]) { (current, pair) =>
       val key = (required(pair, "mac_a"), required(pair, "mac_b"))
-      val confidence = pair.hcursor.get[Double]("confidence").fold(_ => throw DqPermanentError("source_confidence_invalid"), identity)
-      current.updated(key,current.get(key).fold(confidence)(_.max(confidence)))
+      val confidence =
+        pair.hcursor.get[Double]("confidence").fold(_ => throw DqPermanentError("source_confidence_invalid"), identity)
+      current.updated(key, current.get(key).fold(confidence)(_.max(confidence)))
     }
     val proposed = proposal.candidates.map(value => (value.mac_a, value.mac_b) -> value.confidence).toMap
     Json.obj(
       "source_revision_digest" -> Json.fromString(proposal.source_revision_digest),
-      "legacy_candidate_count" -> Json.fromInt(legacy.size), "proposal_candidate_count" -> Json.fromInt(proposed.size),
+      "legacy_candidate_count" -> Json.fromInt(legacy.size),
+      "proposal_candidate_count" -> Json.fromInt(proposed.size),
       "missing_pairs" -> Json.fromInt((legacy.keySet -- proposed.keySet).size),
       "additional_pairs" -> Json.fromInt((proposed.keySet -- legacy.keySet).size),
-      "confidence_differences" -> Json.fromInt(legacy.count { case (key, confidence) => proposed.get(key).exists(_ != confidence) }),
+      "confidence_differences" -> Json.fromInt(legacy.count { case (key, confidence) =>
+        proposed.get(key).exists(_ != confidence)
+      }),
       "reconciliation_count" -> Json.fromInt(proposal.reconciliations.size)
     )
 
-  def transaction(store: DqStore, owner: String, run: Json, snapshot: Json, output: Json, minimumSimilarity: Double): ConnectionIO[Boolean] =
+  def transaction(
+    store: DqStore,
+    owner: String,
+    run: Json,
+    snapshot: Json,
+    output: Json,
+    minimumSimilarity: Double
+  ): ConnectionIO[Boolean] =
     val proposal = validate(run, snapshot, output)
     val shadow = required(run, "execution_mode") == "shadow"
     for
       _ <- DqSnapshotSql.serializable
-      authorized <- store.guardOutputTx(proposal.run_id, proposal.attempt_id, proposal.fence, owner, proposal.source_revision_digest)
-      completed <- if !authorized then false.pure[ConnectionIO]
+      authorized <- store.guardOutputTx(
+        proposal.run_id,
+        proposal.attempt_id,
+        proposal.fence,
+        owner,
+        proposal.source_revision_digest
+      )
+      completed <-
+        if !authorized then false.pure[ConnectionIO]
         else
           for
             _ <- DqSnapshotSql.lockSources(DqArtifacts.CanonicalPrinter.print(snapshot))
             current <- DqSnapshot.prepare(run, minimumSimilarity)
-            _ <- if DqSnapshot.revision(current) == proposal.source_revision_digest then ().pure[ConnectionIO]
-                 else doobie.free.connection.raiseError[Unit](DqStaleSource())
-            ids <- if shadow then List.empty[String].pure[ConnectionIO]
-              else proposal.candidates.toList.traverse { candidate =>
-                IdentityGraphSql.persistMergeCandidate(candidate.mac_a, candidate.mac_b, candidate.confidence) *>
-                  DqProjectionSql.candidateId(candidate.mac_a, candidate.mac_b).unique
-              }
-            _ <- if shadow then ().pure[ConnectionIO] else
-              IdentityGraphSql.reconcileMergeConfirmationsFor(ids ++ proposal.reconciliations.map(_.candidate_id)).flatMap { _ =>
-                // Derived clusters remain global. Replacing only a scoped subset
-                // would erase identities maintained by another scope or path.
-                IdentityGraphSql.approvedIdentityEdges.to[List].flatMap { edges =>
-                  IdentityGraphSql.replaceClusters(IntelligencePreparation.identityClusters(edges).toList)
+            _ <-
+              if DqSnapshot.revision(current) == proposal.source_revision_digest then ().pure[ConnectionIO]
+              else doobie.free.connection.raiseError[Unit](DqStaleSource())
+            ids <-
+              if shadow then List.empty[String].pure[ConnectionIO]
+              else
+                proposal.candidates.toList.traverse { candidate =>
+                  IdentityGraphSql.persistMergeCandidate(candidate.mac_a, candidate.mac_b, candidate.confidence) *>
+                    DqProjectionSql.candidateId(candidate.mac_a, candidate.mac_b).unique
                 }
-              }.void
-            summary = Json.obj(
-              "candidate_count" -> Json.fromInt(proposal.candidates.size),
-              "reconciliation_count" -> Json.fromInt(proposal.reconciliations.size),
-              "review_candidate_ids" -> Json.fromValues((ids ++ proposal.reconciliations.map(_.candidate_id)).distinct.sorted.map(Json.fromString))
-            ).deepMerge(if shadow then Json.obj("shadow_comparison" -> shadowComparison(snapshot, proposal)) else Json.obj())
-            done <- store.completeOutputTx(proposal.run_id, proposal.attempt_id, proposal.fence, owner,
-              proposal.source_revision_digest, !shadow, summary)
-            _ <- if done then ().pure[ConnectionIO] else doobie.free.connection.raiseError[Unit](DqPermanentError("application_fence_lost"))
+            _ <-
+              if shadow then ().pure[ConnectionIO]
+              else
+                IdentityGraphSql
+                  .reconcileMergeConfirmationsFor(ids ++ proposal.reconciliations.map(_.candidate_id))
+                  .flatMap { _ =>
+                    // Derived clusters remain global. Replacing only a scoped subset
+                    // would erase identities maintained by another scope or path.
+                    IdentityGraphSql.approvedIdentityEdges.to[List].flatMap { edges =>
+                      IdentityGraphSql.replaceClusters(IntelligencePreparation.identityClusters(edges).toList)
+                    }
+                  }
+                  .void
+            summary = Json
+              .obj(
+                "candidate_count" -> Json.fromInt(proposal.candidates.size),
+                "reconciliation_count" -> Json.fromInt(proposal.reconciliations.size),
+                "review_candidate_ids" -> Json.fromValues(
+                  (ids ++ proposal.reconciliations.map(_.candidate_id)).distinct.sorted.map(Json.fromString)
+                )
+              )
+              .deepMerge(
+                if shadow then Json.obj("shadow_comparison" -> shadowComparison(snapshot, proposal)) else Json.obj()
+              )
+            done <- store.completeOutputTx(
+              proposal.run_id,
+              proposal.attempt_id,
+              proposal.fence,
+              owner,
+              proposal.source_revision_digest,
+              !shadow,
+              summary
+            )
+            _ <-
+              if done then ().pure[ConnectionIO]
+              else doobie.free.connection.raiseError[Unit](DqPermanentError("application_fence_lost"))
           yield done
     yield completed

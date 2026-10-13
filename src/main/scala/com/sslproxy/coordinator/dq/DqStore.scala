@@ -12,11 +12,11 @@ final class DqStore(val xa: Transactor[IO], val settings: DqSettings):
   private def commit[A](operation: => ConnectionIO[A]): IO[A] =
     IO.defer(operation.transact(xa))
   def catalog(principal: DqPrincipal): IO[Json] = commit(sql.catalog(principal))
-  def invocation(principal: DqPrincipal, key: String): IO[Json] = commit(sql.invocation(principal,key))
+  def invocation(principal: DqPrincipal, key: String): IO[Json] = commit(sql.invocation(principal, key))
   def manifest(
-      principal: DqPrincipal,
-      processorId: String,
-      version: String
+    principal: DqPrincipal,
+    processorId: String,
+    version: String
   ): IO[Json] =
     IO(
       principal.requireRole(
@@ -53,50 +53,50 @@ final class DqStore(val xa: Transactor[IO], val settings: DqSettings):
   def receiveReceipt(principal: DqPrincipal, request: Json): IO[Json] =
     IO(principal.requireRole(Set("service"))) *> receiveReceipt(request)
   def artifact(
-      principal: DqPrincipal,
-      artifactId: String,
-      access: Boolean
+    principal: DqPrincipal,
+    artifactId: String,
+    access: Boolean
   ): IO[Json] = commit(sql.artifact(principal, artifactId, access))
   def claimPreparation(
-      owner: String,
-      leaseSeconds: Int,
-      limit: Int
+    owner: String,
+    leaseSeconds: Int,
+    limit: Int
   ): IO[List[Json]] = commit(sql.claimPreparation(owner, leaseSeconds, limit))
   def completePreparation(
-      runId: String,
-      owner: String,
-      inputRefs: Json,
-      sourceRevision: String
+    runId: String,
+    owner: String,
+    inputRefs: Json,
+    sourceRevision: String
   ): IO[Boolean] =
     commit(sql.completePreparation(runId, owner, inputRefs, sourceRevision))
   def failPreparation(
-      runId: String,
-      owner: String,
-      code: String,
-      permanent: Boolean
+    runId: String,
+    owner: String,
+    code: String,
+    permanent: Boolean
   ): IO[Unit] =
     commit(sql.failWork(runId, owner, code, permanent, true))
   def claimOutput(
-      owner: String,
-      leaseSeconds: Int,
-      limit: Int
+    owner: String,
+    leaseSeconds: Int,
+    limit: Int
   ): IO[List[Json]] = commit(sql.claimOutput(owner, leaseSeconds, limit))
   def guardOutputTx(
-      runId: String,
-      attemptId: String,
-      fence: Long,
-      owner: String,
-      sourceRevision: String
+    runId: String,
+    attemptId: String,
+    fence: Long,
+    owner: String,
+    sourceRevision: String
   ): ConnectionIO[Boolean] =
     sql.guardOutput(runId, attemptId, fence, owner, sourceRevision)
   def completeOutputTx(
-      runId: String,
-      attemptId: String,
-      fence: Long,
-      owner: String,
-      sourceRevision: String,
-      applied: Boolean,
-      summary: Json
+    runId: String,
+    attemptId: String,
+    fence: Long,
+    owner: String,
+    sourceRevision: String,
+    applied: Boolean,
+    summary: Json
   ): ConnectionIO[Boolean] = sql.completeOutput(
     runId,
     attemptId,
@@ -107,19 +107,19 @@ final class DqStore(val xa: Transactor[IO], val settings: DqSettings):
     summary
   )
   def failOutput(
-      runId: String,
-      owner: String,
-      code: String,
-      permanent: Boolean,
-      needsPreparation: Boolean
+    runId: String,
+    owner: String,
+    code: String,
+    permanent: Boolean,
+    needsPreparation: Boolean
   ): IO[Unit] =
     commit(sql.failWork(runId, owner, code, permanent, needsPreparation))
   def expireAttempts: IO[Int] = commit(sql.expireAttempts)
   def reconcilePolicies: IO[Unit] = commit(sql.reconcilePolicies)
   def claimOutbox(
-      owner: String,
-      leaseSeconds: Int,
-      limit: Int
+    owner: String,
+    leaseSeconds: Int,
+    limit: Int
   ): IO[List[DqOutbox]] = commit(sql.claimOutbox(owner, leaseSeconds, limit))
   def acknowledgeOutbox(item: DqOutbox): IO[Boolean] = commit(
     sql.acknowledgeOutbox(item)

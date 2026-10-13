@@ -46,7 +46,9 @@ private[coordinator] object ServerModule:
       .withHost(host"0.0.0.0")
       .withHttpApp(
         com.sslproxy.coordinator.observability.CoordinatorTracing
-          .serverMiddleware(healthRoutes.routes <+> new LiveMetricsRoutes(metrics).routes <+> publicStatsRoutes <+> dqRoutes)
+          .serverMiddleware(
+            healthRoutes.routes <+> new LiveMetricsRoutes(metrics).routes <+> publicStatsRoutes <+> dqRoutes
+          )
           .orNotFound
       )
       .build

@@ -44,9 +44,7 @@ object DqSnapshot:
         val base = rows
           .deepMerge(metadata)
           .deepMerge(
-            candidateId.fold(Json.obj())(value =>
-              Json.obj("candidate_id" -> Json.fromString(value))
-            )
+            candidateId.fold(Json.obj())(value => Json.obj("candidate_id" -> Json.fromString(value)))
           )
         val digest = DqArtifacts.digest(base)
         val requested = parameters.hcursor

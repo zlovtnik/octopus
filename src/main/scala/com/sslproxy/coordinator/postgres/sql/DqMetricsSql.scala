@@ -13,7 +13,7 @@ object DqMetricsSql:
         count(*) FILTER(WHERE status='applying')::DOUBLE PRECISION,
         greatest(coalesce(max(extract(epoch FROM CURRENT_TIMESTAMP-next_attempt_at)) FILTER(WHERE status='applying'),0),0)::DOUBLE PRECISION
         FROM octopus_core.dq_runs WHERE installation_id=$installation AND namespace=$namespace
-        AND status NOT IN ('succeeded','failed','cancelled')""".query[(Double,Double,Double,Double,Double)].unique
+        AND status NOT IN ('succeeded','failed','cancelled')""".query[(Double, Double, Double, Double, Double)].unique
       admitted <- sql"""SELECT count(*)::DOUBLE PRECISION FROM octopus_core.dq_runs WHERE installation_id=$installation
         AND namespace=$namespace AND created_at>=CURRENT_TIMESTAMP-INTERVAL '1 minute'""".query[Double].unique
       completed <- sql"""SELECT count(*)::DOUBLE PRECISION FROM octopus_core.dq_runs WHERE installation_id=$installation
@@ -25,13 +25,21 @@ object DqMetricsSql:
       pending <- sql"""SELECT count(*)::DOUBLE PRECISION,
         count(*) FILTER(WHERE topic='dq.dlq.v1')::DOUBLE PRECISION FROM octopus_core.dq_outbox
         WHERE status<>'published' AND payload->>'installation_id'=$installation AND payload->>'namespace'=$namespace"""
-        .query[(Double,Double)].unique
-      artifacts <- sql"""SELECT count(*)::DOUBLE PRECISION FROM octopus_core.dq_artifacts WHERE installation_id=$installation
+        .query[(Double, Double)]
+        .unique
+      artifacts <-
+        sql"""SELECT count(*)::DOUBLE PRECISION FROM octopus_core.dq_artifacts WHERE installation_id=$installation
         AND namespace=$namespace AND retained_until<=CURRENT_TIMESTAMP""".query[Double].unique
     yield Map(
-      "queue.runs" -> active._1, "queue.oldest.seconds" -> active._2,
-      "retrying.runs" -> active._3, "applying.runs" -> active._4, "apply.ready.age.seconds" -> active._5,
-      "admissions.last.minute" -> admitted, "completions.last.minute" -> completed,
-      "expired.attempts.last.hour" -> fences, "outbox.pending" -> pending._1,
-      "dlq.outbox.pending" -> pending._2, "retention.expired.artifacts" -> artifacts
+      "queue.runs" -> active._1,
+      "queue.oldest.seconds" -> active._2,
+      "retrying.runs" -> active._3,
+      "applying.runs" -> active._4,
+      "apply.ready.age.seconds" -> active._5,
+      "admissions.last.minute" -> admitted,
+      "completions.last.minute" -> completed,
+      "expired.attempts.last.hour" -> fences,
+      "outbox.pending" -> pending._1,
+      "dlq.outbox.pending" -> pending._2,
+      "retention.expired.artifacts" -> artifacts
     )

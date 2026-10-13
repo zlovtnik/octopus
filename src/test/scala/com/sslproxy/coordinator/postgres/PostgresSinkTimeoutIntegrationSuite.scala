@@ -5,7 +5,8 @@ import com.sslproxy.coordinator.config.AppConfig
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
-import org.testcontainers.containers.GenericContainer
+import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.containers.wait.strategy.{Wait, WaitAllStrategy}
 import org.testcontainers.utility.DockerImageName
 
 import java.nio.file.{Files, Path}
@@ -15,11 +16,18 @@ import scala.concurrent.duration.*
 import scala.util.Using
 
 class PostgresSinkTimeoutIntegrationSuite extends CatsEffectSuite:
-  private class Database extends GenericContainer[Database](DockerImageName.parse("postgres:17"))
+  private class Database extends PostgreSQLContainer[Database](DockerImageName.parse("postgres:17"))
   private lazy val database = new Database()
-    .withExposedPorts(5432)
-    .withEnv("POSTGRES_PASSWORD", "test-password")
-    .withEnv("POSTGRES_DB", "octopus_timeout_test")
+    .withDatabaseName("octopus_timeout_test")
+    .withUsername("postgres")
+    .withPassword("test-password")
+    .waitingFor(
+      new WaitAllStrategy()
+        .withStrategy(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2))
+        .withStrategy(
+          Wait.forSuccessfulCommand("pg_isready -h 127.0.0.1 -p 5432 -U postgres -d octopus_timeout_test")
+        )
+    )
   private lazy val available = DockerClientFactory.instance().isDockerAvailable
   private val dockerRequired = sys.env.get("OCTOPUS_REQUIRE_DOCKER").contains("true")
   private var pool: HikariDataSource = null

@@ -44,7 +44,7 @@ class DqRuntimeSuite extends CatsEffectSuite:
         events.update(_ :+ "discovery")
       )).attempt
       observed <- events.get
-      _ = assert(result.isLeft)
+      _ = assertEquals(result.left.toOption.map(_.getMessage),Some("preparation_failed"))
       _ = assertEquals(observed,Vector("preparation","output","outbox","discovery"))
     yield ()
   }

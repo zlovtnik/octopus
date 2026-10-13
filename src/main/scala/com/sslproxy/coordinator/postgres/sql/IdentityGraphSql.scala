@@ -1,14 +1,21 @@
 package com.sslproxy.coordinator.postgres.sql
 
 import cats.syntax.all.*
-import com.sslproxy.coordinator.processor.{IdentityClusterProjection, ProjectionFunctions}
-import doobie.ConnectionIO
+import cats.data.NonEmptyList
+import com.sslproxy.coordinator.processor.{
+  IdentityClusterProjection,
+  ProjectionFunctions
+}
+import doobie.{ConnectionIO, Fragment, Fragments}
 import doobie.implicits.*
 
 object IdentityGraphSql:
   val AutomaticMergeSimilarity = 0.98d
 
-  def similarityEdges(minimumSimilarity: Double, limit: Int): doobie.Query0[(String, String, Double)] =
+  def similarityEdges(
+      minimumSimilarity: Double,
+      limit: Int
+  ): doobie.Query0[(String, String, Double)] =
     sql"""SELECT left_source_mac, right_source_mac, cosine_similarity
            FROM atheros_search.similarity_pairs pair
            JOIN atheros_search.search_documents left_document
@@ -21,7 +28,18 @@ object IdentityGraphSql:
              AND pair.left_source_mac IS NOT NULL
              AND pair.right_source_mac IS NOT NULL
              AND pair.left_source_mac <> pair.right_source_mac
-             AND pair.cosine_similarity >= ${minimumSimilarity.max(-1.0d).min(1.0d)}
+             AND pair.cosine_similarity >= ${minimumSimilarity
+        .max(-1.0d)
+        .min(1.0d)}
+             AND NOT EXISTS (
+               SELECT 1 FROM octopus_core.dq_scope_policies policy
+               WHERE policy.mode = 'enabled' AND (policy.authorized_scope = '*' OR (
+                 EXISTS (SELECT 1 FROM atheros_search.devices device
+                         WHERE device.mac = pair.left_source_mac AND device.location_id = policy.authorized_scope)
+                 AND EXISTS (SELECT 1 FROM atheros_search.devices device
+                         WHERE device.mac = pair.right_source_mac AND device.location_id = policy.authorized_scope)
+               ))
+             )
              AND NOT EXISTS (
                SELECT 1 FROM atheros_search.merge_candidates candidate
                WHERE candidate.mac_a = LEAST(pair.left_source_mac, pair.right_source_mac)
@@ -64,10 +82,36 @@ object IdentityGraphSql:
                      AND left_device.registered_device_id = candidate.trusted_registered_device_id
                  ))
              )
-           ORDER BY candidate.confirmed_at, candidate.candidate_id""".query[(String, String, Double)]
+           ORDER BY candidate.confirmed_at, candidate.candidate_id"""
+      .query[(String, String, Double)]
 
   def reconcileMergeConfirmations: ConnectionIO[Int] =
-    sql"""WITH classified AS (
+    reconcileConfirmations(fr"""NOT EXISTS (
+      SELECT 1 FROM octopus_core.dq_scope_policies policy
+      WHERE policy.mode = 'enabled' AND (policy.authorized_scope = '*' OR (
+        EXISTS (SELECT 1 FROM atheros_search.devices device
+                WHERE device.mac = candidate.mac_a AND device.location_id = policy.authorized_scope)
+        AND EXISTS (SELECT 1 FROM atheros_search.devices device
+                WHERE device.mac = candidate.mac_b AND device.location_id = policy.authorized_scope)
+      ))
+    )""")
+
+  def reconcileMergeConfirmationsFor(
+      candidateIds: List[String]
+  ): ConnectionIO[Int] =
+    NonEmptyList.fromList(candidateIds.distinct.sorted) match
+      case None      => 0.pure[ConnectionIO]
+      case Some(ids) =>
+        reconcileConfirmations(Fragments.in(fr"candidate.candidate_id", ids))
+
+  private def reconcileConfirmations(predicate: Fragment): ConnectionIO[Int] =
+    // Human decisions use the same candidate row lock before recording their
+    // decision. Acquire locks in a separate statement before reading decisions.
+    val lock = (fr"SELECT candidate.candidate_id FROM atheros_search.merge_candidates candidate WHERE" ++
+      predicate ++ fr"ORDER BY candidate.candidate_id FOR UPDATE OF candidate")
+      .query[String]
+      .to[List]
+    val update = (fr"""WITH classified AS (
              SELECT candidate.candidate_id,
                     CASE
                       WHEN decision.decision = 'merge' THEN 'confirmed'
@@ -108,7 +152,7 @@ object IdentityGraphSql:
                ON left_device.mac = candidate.mac_a
              LEFT JOIN atheros_search.devices right_device
                ON right_device.mac = candidate.mac_b
-           )
+             WHERE """ ++ predicate ++ fr""")
            UPDATE atheros_search.merge_candidates candidate
               SET status = classified.next_status,
                   confirmation_source = classified.next_source,
@@ -125,17 +169,25 @@ object IdentityGraphSql:
                    candidate.trusted_registered_device_id)
                   IS DISTINCT FROM
                   (classified.next_status, classified.next_source,
-                   classified.next_registered_device_id)""".update.run
+                   classified.next_registered_device_id)""").update.run
+    lock *> update
 
-  def persistMergeCandidate(left: String, right: String, confidence: Double): ConnectionIO[Int] =
+  def persistMergeCandidate(
+      left: String,
+      right: String,
+      confidence: Double
+  ): ConnectionIO[Int] =
     val ordered = Vector(left, right).sorted
     val candidateId = ProjectionFunctions.stableId("merge-candidate", ordered)
-    val runId = ProjectionFunctions.stableId("merge-candidate-run", Vector(candidateId))
+    val runId =
+      ProjectionFunctions.stableId("merge-candidate-run", Vector(candidateId))
     sql"""INSERT INTO atheros_search.merge_candidates (
              candidate_id, mac_a, mac_b, confidence, computed_at, status,
              evidence, expires_at, projection_run_id
            ) VALUES (
-             $candidateId, ${ordered.head}, ${ordered.last}, ${confidence.max(0.0d).min(1.0d)},
+             $candidateId, ${ordered.head}, ${ordered.last}, ${confidence
+        .max(0.0d)
+        .min(1.0d)},
              CURRENT_TIMESTAMP, 'pending',
              jsonb_build_object('source', 'similarity_pairs'),
              (CURRENT_TIMESTAMP + (30) * INTERVAL '1 day'), $runId
@@ -149,21 +201,27 @@ object IdentityGraphSql:
   def persistCluster(value: IdentityClusterProjection): ConnectionIO[Int] =
     if value.members.isEmpty then 0.pure[ConnectionIO]
     else {
-      val memberClause = value.members.map(member => fr0"$member").intercalate(fr",")
+      val memberClause =
+        value.members.map(member => fr0"$member").intercalate(fr",")
       val firstSeen = (fr"""SELECT MIN(first_seen), MAX(last_seen)
-                            FROM devices
-                            WHERE mac_id IN (""" ++ memberClause ++ fr")")
+                            FROM atheros_search.devices
+                            WHERE mac IN (""" ++ memberClause ++ fr")")
         .query[(Option[java.sql.Timestamp], Option[java.sql.Timestamp])]
         .unique
 
       firstSeen.flatMap { case (minimum, maximum) =>
-        def persistRows(min: java.sql.Timestamp, max: java.sql.Timestamp): ConnectionIO[Int] =
+        def persistRows(
+            min: java.sql.Timestamp,
+            max: java.sql.Timestamp
+        ): ConnectionIO[Int] =
           for
             cluster <- sql"""INSERT INTO atheros_search.identity_clusters (
                             cluster_id, cluster_name, cluster_size, first_seen, last_seen,
                             status, projection_run_id
                           ) VALUES (
-                            ${value.clusterId}, ${Some(s"identity-${value.clusterId.take(8)}")},
+                            ${value.clusterId}, ${Some(
+                s"identity-${value.clusterId.take(8)}"
+              )},
                             ${value.members.size}, $min, $max,
                             'active', ${value.projectionRunId}
                           ) ON CONFLICT (cluster_id) DO UPDATE SET
@@ -183,11 +241,11 @@ object IdentityGraphSql:
               sql"""INSERT INTO atheros_search.identity_cluster_members (
                    cluster_id, mac, confidence, evidence, first_seen, last_seen
                  )
-                 SELECT ${value.clusterId}, device.mac_id, ${value.confidence},
+                 SELECT ${value.clusterId}, device.mac, ${value.confidence},
                          jsonb_build_object('source', 'confirmed_identity_edge'),
                         device.first_seen, device.last_seen
-                 FROM devices device
-                 WHERE device.mac_id = $mac
+                 FROM atheros_search.devices device
+                 WHERE device.mac = $mac
                  ON CONFLICT (mac) DO UPDATE SET
                    cluster_id = EXCLUDED.cluster_id,
                    confidence = EXCLUDED.confidence,
@@ -206,18 +264,21 @@ object IdentityGraphSql:
 
         (minimum, maximum) match
           case (Some(min), Some(max)) => persistRows(min, max)
-          case (Some(min), None) => persistRows(min, min)
-          case (None, Some(max)) => persistRows(max, max)
-          case (None, None) => 0.pure[ConnectionIO]
+          case (Some(min), None)      => persistRows(min, min)
+          case (None, Some(max))      => persistRows(max, max)
+          case (None, None)           => 0.pure[ConnectionIO]
       }
     }
 
-  def replaceClusters(values: List[IdentityClusterProjection]): ConnectionIO[Int] =
+  def replaceClusters(
+      values: List[IdentityClusterProjection]
+  ): ConnectionIO[Int] =
     for
       deactivated <- sql"""UPDATE atheros_search.identity_clusters
                             SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
                             WHERE status = 'active'""".update.run
-      removedMembers <- sql"""DELETE FROM atheros_search.identity_cluster_members""".update.run
+      removedMembers <-
+        sql"""DELETE FROM atheros_search.identity_cluster_members""".update.run
       persisted <- values.traverse(persistCluster).map(_.sum)
     yield deactivated + removedMembers + persisted
 

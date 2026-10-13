@@ -21,13 +21,16 @@ private[coordinator] object ServerModule:
     metrics: CoordinatorMetrics,
     readiness: ProcessorReadiness,
     statsService: OperationalStatsService,
-    databaseCheckTimeout: FiniteDuration
+    databaseCheckTimeout: FiniteDuration,
+    dqRoutes: org.http4s.HttpRoutes[IO] = org.http4s.HttpRoutes.empty[IO],
+    dqReadiness: IO[Boolean] = IO.pure(true)
   ): Resource[IO, Server] =
     val healthRoutes = new HealthRoutes(
       transactor,
       metrics,
       Some(readiness),
-      databaseCheckTimeout
+      databaseCheckTimeout,
+      dqReadiness
     )
     val publicStatsRoutes =
       if publicStats.enabled then new PublicStatsRoutes(statsService, publicStats.allowedOrigins).routes
@@ -43,7 +46,7 @@ private[coordinator] object ServerModule:
       .withHost(host"0.0.0.0")
       .withHttpApp(
         com.sslproxy.coordinator.observability.CoordinatorTracing
-          .serverMiddleware(healthRoutes.routes <+> new LiveMetricsRoutes(metrics).routes <+> publicStatsRoutes)
+          .serverMiddleware(healthRoutes.routes <+> new LiveMetricsRoutes(metrics).routes <+> publicStatsRoutes <+> dqRoutes)
           .orNotFound
       )
       .build

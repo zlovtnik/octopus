@@ -24,6 +24,24 @@ class CoordinatorMetrics(
   private val lagSampleAt =
     ConcurrentHashMap[(String, String, String), AtomicLong]()
 
+  private val dqGauges = List(
+    "queue.runs", "queue.oldest.seconds", "retrying.runs", "applying.runs", "apply.ready.age.seconds",
+    "admissions.last.minute", "completions.last.minute", "expired.attempts.last.hour",
+    "outbox.pending", "dlq.outbox.pending", "retention.expired.artifacts", "sample.timestamp.seconds"
+  ).map { name =>
+    val value = new atomic.AtomicReference[java.lang.Double](0.0)
+    Gauge.builder("coordinator.dq." + name, value, (v: atomic.AtomicReference[java.lang.Double]) => v.get().doubleValue())
+      .description("Scoped DQ durable-state sample; fixed metric names with no identifying labels")
+      .register(registry)
+    name -> value
+  }.toMap
+
+  def recordDq(values: Map[String, Double]): Unit =
+    values.foreachEntry { (name, value) =>
+      if value.isFinite && value >= 0.0 then dqGauges.get(name).foreach(_.set(value))
+    }
+    dqGauges.get("sample.timestamp.seconds").foreach(_.set(nowMillis().toDouble / 1000.0))
+
   def jvmMetrics: Resource[IO, Unit] =
     Resource
       .make(IO {

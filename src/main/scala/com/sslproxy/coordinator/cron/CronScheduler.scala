@@ -365,6 +365,13 @@ final class CronScheduler private (
         IO.whenA(count > 0)(
           IO(log.info("outbox_lease_recovery", "status" -> "recovered", "count" -> count.toString))
         )
+    } *> ingestionStore.reconcileCompletedEvents(cfg.ingestBatchSize).value.flatMap {
+      case Left(err) =>
+        recordTickFailure("recover") *> IO.raiseError(databaseFailure(err))
+      case Right(count) =>
+        IO.whenA(count > 0)(
+          IO(log.info("sync_event_completion_recovery", "status" -> "recovered", "count" -> count.toString))
+        )
     }
 
   private def dispatchBatches(): IO[Unit] =

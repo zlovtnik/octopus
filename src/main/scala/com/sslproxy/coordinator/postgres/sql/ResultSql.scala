@@ -91,8 +91,68 @@ object ResultSql:
                    WHERE job_id = ${result.jobId}
                      AND status <> 'completed'
                  )""".update.run.void
+      _ <- completeEvents(List(result.jobId))
       _ <- IngestionSql.advanceCursor(streamName, cursorEnd)
     yield ()
+
+  // Load completion does not imply that search projections have consumed the
+  // source. This only closes the ingestion ledger; retention keeps its gates.
+  private def completeEvents(jobIds: List[String]): ConnectionIO[Int] =
+    if jobIds.isEmpty then 0.pure[ConnectionIO]
+    else
+      val jobs = jobIds.map(id => fr0"$id").intercalate(fr",")
+      (fr"""UPDATE sync_events event
+             SET status = 'completed', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+             FROM sync_jobs job
+             WHERE job.job_id IN (""" ++ jobs ++ fr""")
+               AND job.status = 'completed'
+               AND event.stream_name = job.stream_name
+               AND event.dedupe_key = job.dedupe_key
+               AND event.status = 'batched'
+               AND EXISTS (
+                 SELECT 1 FROM sync_batches batch
+                 WHERE batch.job_id = job.job_id
+                   AND batch.stream_name = job.stream_name
+                   AND batch.dedupe_key = job.dedupe_key
+                   AND batch.status = 'completed'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_batches batch
+                 WHERE batch.job_id = job.job_id AND batch.status <> 'completed'
+               )""").update.run
+
+  // One upgrade pass over the job primary key avoids rescanning millions of
+  // already repaired rows. The checkpoint lock serializes concurrent callers;
+  // its cursor and ledger updates commit together, and resume after a restart.
+  def reconcileCompletedEvents(limit: Int): ConnectionIO[Int] =
+    val batchSize = limit.max(1).min(1000)
+    for
+      _ <- sql"""INSERT INTO processor_checkpoints (processor_name, shard_id)
+                 VALUES ('sync-backlog-recovery', 'event-completion-v1')
+                 ON CONFLICT (processor_name, shard_id) DO NOTHING""".update.run
+      checkpoint <- sql"""SELECT checkpoint_value, status FROM processor_checkpoints
+                          WHERE processor_name = 'sync-backlog-recovery'
+                            AND shard_id = 'event-completion-v1'
+                          FOR UPDATE""".query[(Option[String], String)].unique
+      repaired <-
+        if checkpoint._2 == "healthy" then 0.pure[ConnectionIO]
+        else
+          for
+            ids <- sql"""SELECT job_id FROM sync_jobs
+                         WHERE job_id > ${checkpoint._1.getOrElse("")}
+                         ORDER BY job_id LIMIT $batchSize""".query[String].to[List]
+            changed <- completeEvents(ids)
+            _ <- sql"""UPDATE processor_checkpoints
+                       SET checkpoint_value = ${ids.lastOption.orElse(checkpoint._1)},
+                           status = ${if ids.size < batchSize then "healthy" else "running"},
+                           last_started_at = COALESCE(last_started_at, CURRENT_TIMESTAMP),
+                           last_succeeded_at = CURRENT_TIMESTAMP,
+                           rows_processed = rows_processed + ${ids.size.toLong},
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE processor_name = 'sync-backlog-recovery'
+                         AND shard_id = 'event-completion-v1'""".update.run
+          yield changed
+    yield repaired
 
   def scheduleRetry(result: PostgresResult, batch: BatchState): ConnectionIO[Unit] =
     sql"""UPDATE sync_batches

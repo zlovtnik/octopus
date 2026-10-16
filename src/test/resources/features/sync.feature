@@ -5,6 +5,9 @@ Feature: Sync processor contracts
   The load consumer requires an exact durable coordinator dispatch, and the
   result consumer requires its recorded durable outcome for the current dispatch.
   Unknown, altered and stale messages are parked without applying effects.
+  Successful results complete the matching ingestion event only after its job
+  and all batches succeed. Backlog recovery repairs historical batched events
+  in bounded, checkpointed pages without changing search documents or vectors.
 
   Scenario Outline: An Octopus sync processor has its declared durable contract
     Given processor "<processor>" belongs to "sync"

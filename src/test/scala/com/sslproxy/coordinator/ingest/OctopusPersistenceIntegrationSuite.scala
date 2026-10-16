@@ -41,7 +41,7 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
 import fs2.kafka.ConsumerRecord
-import io.circe.{Printer, parser as circeParser}
+import io.circe.{Decoder, Printer, parser as circeParser}
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
@@ -61,6 +61,26 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private val ArtifactSha256 = "a" * 64
   private val ProxyMaxAuditBodyBytes = 65_536
   private var containerStarted = false
+
+  private final case class CompletionSample(
+    streamName: String,
+    eventStatus: String,
+    jobStatus: String,
+    batchStatus: String,
+    attemptCount: Int,
+    maxAttempts: Int,
+    rowCount: Int
+  )
+
+  private given Decoder[CompletionSample] = Decoder.forProduct7(
+    "stream_name",
+    "event_status",
+    "job_status",
+    "batch_status",
+    "attempt_count",
+    "max_attempts",
+    "row_count"
+  )(CompletionSample.apply)
 
   private final class TestPostgresContainer(image: DockerImageName)
       extends GenericContainer[TestPostgresContainer](image)
@@ -1189,7 +1209,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     for
       decision <- persist(record, offset = 9501L)
       _ <-
-        sql"""UPDATE sync_events SET status = 'completed', payload = NULL, payload_archived = true
+        sql"""UPDATE sync_events SET payload = NULL, payload_archived = true
                   WHERE dedupe_key = ${record.dedupeKey}""".update.run
           .transact(xa)
       _ <- sql"""INSERT INTO sync_event_payload_archives
@@ -1197,12 +1217,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                  SELECT dedupe_key, stream_name, observed_at, payload_sha256, 's3://test/retention'
                  FROM sync_events WHERE dedupe_key = ${record.dedupeKey}""".update.run
         .transact(xa)
-      _ <-
-        sql"""UPDATE sync_jobs SET status = 'completed' WHERE job_id = ${decision.jobId}""".update.run
-          .transact(xa)
-      _ <-
-        sql"""UPDATE sync_batches SET status = 'completed' WHERE batch_id = ${decision.batchId}""".update.run
-          .transact(xa)
+      _ <- ResultSql
+        .completeSuccessful(
+          PostgresResult.success(decision.jobId, decision.batchId, 1, "retention", "2025-01-01T00:00:01Z"),
+          record.streamName,
+          "1735689600"
+        )
+        .transact(xa)
       blocked <- MaintenanceSql
         .retentionCandidates(30, 100)
         .to[List]
@@ -1378,18 +1399,37 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
           metadata("sync.oracle.result", 9205L, key)
         )
         .map(requireRight)
+      completedAt <- sql"""SELECT updated_at FROM sync_events
+                           WHERE dedupe_key = ${record.dedupeKey} AND stream_name = ${record.streamName}"""
+        .query[java.sql.Timestamp]
+        .unique
+        .transact(xa)
       _ <- repository
         .recordResultWithEvidence(
           result,
           metadata("sync.oracle.result", 9205L, key)
         )
         .map(requireRight)
+      _ <- repository
+        .recordResultWithEvidence(result, metadata("sync.oracle.result", 9206L, key))
+        .map(requireRight)
+      replayedAt <- sql"""SELECT updated_at FROM sync_events
+                          WHERE dedupe_key = ${record.dedupeKey} AND stream_name = ${record.streamName}"""
+        .query[java.sql.Timestamp]
+        .unique
+        .transact(xa)
+      _ = assertEquals(replayedAt, completedAt)
       status <-
-        sql"""SELECT status FROM sync_batches WHERE batch_id = ${load.batchId}"""
-          .query[String]
+        sql"""SELECT batch.status, job.status, event.status
+               FROM sync_batches batch
+               JOIN sync_jobs job ON job.job_id = batch.job_id
+               JOIN sync_events event ON event.dedupe_key = batch.dedupe_key
+                 AND event.stream_name = batch.stream_name
+               WHERE batch.batch_id = ${load.batchId}"""
+          .query[(String, String, String)]
           .unique
           .transact(xa)
-      _ = assertEquals(status, "completed")
+      _ = assertEquals(status, ("completed", "completed", "completed"))
       _ <- sql"""UPDATE outbox_events SET message_key = ${s"${load.batchId}:2"}
                   WHERE source_id = ${load.batchId} AND event_type = 'sync.load.requested'""".update.run
         .transact(xa)
@@ -1398,6 +1438,180 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .transact(xa)
         .attempt
     yield assert(stale.isLeft)
+
+  test("completion recovery repairs anonymized Wiretrap samples without changing unfinished work or search"):
+    requireDocker()
+    val documentId = "0e000000-0000-0000-0000-000000000001"
+    def checkpoint = sql"""SELECT checkpoint_value, rows_processed, status FROM processor_checkpoints
+                          WHERE processor_name = 'sync-backlog-recovery' AND shard_id = 'event-completion-v1'"""
+      .query[(Option[String], Long, String)]
+      .unique
+      .transact(xa)
+    def searchState = sql"""SELECT document.status, document.normalized_text, embedding.content_sha256,
+                                  embedding.embedding::text
+                           FROM atheros_search.search_documents document
+                           JOIN atheros_search.embeddings embedding USING (document_id)
+                           WHERE document.document_id = $documentId::uuid"""
+      .query[(String, String, String, String)]
+      .unique
+      .transact(xa)
+
+    for
+      json <- IO.blocking(
+        Files.readString(Path.of("src/test/resources/fixtures/wiretrap-event-completion-2026-10-16.json"))
+      )
+      samples <- IO.fromEither(circeParser.parse(json).flatMap(_.hcursor.get[List[CompletionSample]]("samples")))
+      _ = assertEquals(samples.size, 32)
+      _ = assertEquals(samples.count(_.batchStatus == "completed"), 16)
+      _ <- samples.zipWithIndex.traverse_ { case (sample, index) =>
+        seedCompletionSample(f"completion-sample-$index%03d", sample)
+      }
+      _ <- sql"""INSERT INTO atheros_search.search_documents (
+                   document_id, source_kind, source_id, source_key, source_table,
+                   normalized_text, normalized_sha256, search_vector
+                 ) VALUES ($documentId::uuid, 'event', 'completion-sample-search', 'completion-sample-000',
+                           'wireless_frames', 'retained evidence',
+                           ${"a" * 64}, to_tsvector('simple', 'retained evidence'))""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO atheros_search.embeddings (
+                   document_id, embedding_kind, embedding_model, content_sha256, embedding, embedded_at
+                 ) VALUES ($documentId::uuid, 'event', 'completion-sample-model', ${"a" * 64},
+                           array_fill(0.1::real, ARRAY[768])::public.vector, CURRENT_TIMESTAMP)""".update.run
+        .transact(xa)
+      before <- searchState
+      _ <- sql"""DELETE FROM processor_checkpoints WHERE processor_name = 'sync-backlog-recovery'
+                 AND shard_id = 'event-completion-v1'""".update.run.transact(xa)
+      rolledBack <- (ResultSql.reconcileCompletedEvents(7) *>
+        doobie.free.connection.raiseError[Int](IllegalStateException("rollback completion repair")))
+        .transact(xa)
+        .attempt
+      _ = assert(rolledBack.isLeft)
+      checkpointCount <- sql"""SELECT count(*) FROM processor_checkpoints
+                              WHERE processor_name = 'sync-backlog-recovery'
+                                AND shard_id = 'event-completion-v1'""".query[Long].unique.transact(xa)
+      _ = assertEquals(checkpointCount, 0L)
+      first <- repository.reconcileCompletedEvents(7).map(requireRight)
+      firstCheckpoint <- checkpoint
+      _ = assert(first >= 0 && first <= 7)
+      _ = assertEquals(firstCheckpoint._2, 7L)
+      restarted = new PostgresRepository(xa)
+      _ <- (
+        restarted.reconcileCompletedEvents(7).map(requireRight),
+        restarted.reconcileCompletedEvents(7).map(requireRight)
+      ).parTupled
+      concurrentCheckpoint <- checkpoint
+      _ = assertEquals(concurrentCheckpoint._2, 21L)
+      _ <- (restarted.reconcileCompletedEvents(7).map(requireRight) *> checkpoint)
+        .iterateUntil(_._3 == "healthy")
+        .timeout(15.seconds)
+      statuses <- sql"""SELECT dedupe_key, status, payload::text, payload_ref FROM sync_events
+                         WHERE dedupe_key LIKE 'completion-sample-%' ORDER BY dedupe_key"""
+        .query[(String, String, String, String)]
+        .to[List]
+        .transact(xa)
+      after <- searchState
+      completedCheckpoint <- checkpoint
+      repeated <- restarted.reconcileCompletedEvents(7).map(requireRight)
+      repeatedCheckpoint <- checkpoint
+    yield
+      assertEquals(
+        statuses.map(_._2),
+        samples.map { sample =>
+          if sample.jobStatus == "completed" && sample.batchStatus == "completed" then "completed"
+          else sample.eventStatus
+        }
+      )
+      assert(statuses.forall(row => row._3 == "{}" && row._4 == "inline://json/e30"))
+      assertEquals(after, before)
+      assertEquals(repeated, 0)
+      assertEquals(repeatedCheckpoint, completedCheckpoint)
+
+  test(
+    "completion finalization preserves quarantine and waits for every batch; retry and failure do not complete events"
+  ):
+    requireDocker()
+    val key = "completion-guards"
+    val pending = CompletionSample("wireless.audit", "batched", "pending", "pending", 0, 5, 1)
+    def result(id: String) = PostgresResult.success(id, id, 1, "guard-test", "2026-10-16T00:00:00Z")
+    def eventStatus(id: String) =
+      sql"SELECT status FROM sync_events WHERE dedupe_key = $id AND stream_name = 'wireless.audit'"
+        .query[String]
+        .unique
+        .transact(xa)
+
+    for
+      _ <- seedCompletionSample(key, pending)
+      _ <- seedCompletionSample("completion-quarantined", pending.copy(eventStatus = "failed"))
+      _ <- seedCompletionSample("completion-retry", pending)
+      _ <- seedCompletionSample("completion-failure", pending)
+      _ <- seedCompletionSample("completion-unfinished", pending.copy(jobStatus = "completed"))
+      _ <- seedCompletionSample(
+        "completion-cancelled",
+        pending.copy(jobStatus = "cancelled", batchStatus = "cancelled")
+      )
+      _ <- seedCompletionSample("completion-orphan", pending.copy(jobStatus = "completed", batchStatus = "completed"))
+      _ <- sql"DELETE FROM sync_batches WHERE batch_id = 'completion-orphan'".update.run.transact(xa)
+      _ <- sql"""INSERT INTO sync_events (dedupe_key, stream_name, observed_at, payload_ref, status)
+                 VALUES ($key, 'proxy.events', CURRENT_TIMESTAMP, 'inline://json/e30', 'batched')""".update.run
+        .transact(xa)
+      _ <- sql"""INSERT INTO sync_batches (
+                   batch_id, job_id, batch_no, payload_ref, dedupe_key, stream_name, cursor_start, cursor_end
+                 ) VALUES ('completion-guards-sibling', $key, 1, 'inline://json/e30',
+                           'completion-guards-sibling', 'wireless.audit', '0', '1')""".update.run.transact(xa)
+      _ <- ResultSql.completeSuccessful(result(key), "wireless.audit", "1").transact(xa)
+      partial <- eventStatus(key)
+      _ <- ResultSql
+        .completeSuccessful(result(key).copy(batchId = "completion-guards-sibling"), "wireless.audit", "1")
+        .transact(xa)
+      complete <- eventStatus(key)
+      unrelated <- sql"SELECT status FROM sync_events WHERE dedupe_key = $key AND stream_name = 'proxy.events'"
+        .query[String]
+        .unique
+        .transact(xa)
+      _ <- ResultSql.completeSuccessful(result("completion-quarantined"), "wireless.audit", "1").transact(xa)
+      quarantined <- eventStatus("completion-quarantined")
+      retryState <- ResultSql.batchForUpdate("completion-retry").unique.transact(xa)
+      failedState <- ResultSql.batchForUpdate("completion-failure").unique.transact(xa)
+      _ <- ResultSql.scheduleRetry(result("completion-retry").copy(status = "failed"), retryState).transact(xa)
+      _ <- ResultSql.completeFailed(result("completion-failure").copy(status = "failed"), failedState).transact(xa)
+      retry <- eventStatus("completion-retry")
+      failed <- eventStatus("completion-failure")
+      stale <- ResultSql.completeSuccessful(result("completion-failure"), "wireless.audit", "1").transact(xa).attempt
+      _ <- sql"""DELETE FROM processor_checkpoints WHERE processor_name = 'sync-backlog-recovery'
+                 AND shard_id = 'event-completion-v1'""".update.run.transact(xa)
+      _ <- repository.reconcileCompletedEvents(1000).map(requireRight)
+      recoveredQuarantine <- eventStatus("completion-quarantined")
+      recoveredFailure <- eventStatus("completion-failure")
+      unfinished <- eventStatus("completion-unfinished")
+      cancelled <- eventStatus("completion-cancelled")
+      orphan <- eventStatus("completion-orphan")
+    yield
+      assertEquals(partial, "batched")
+      assertEquals(complete, "completed")
+      assertEquals(unrelated, "batched")
+      assertEquals(quarantined, "failed")
+      assertEquals(retry, "batched")
+      assertEquals(failed, "batched")
+      assert(stale.isLeft)
+      assertEquals(recoveredQuarantine, "failed")
+      assertEquals(recoveredFailure, "batched")
+      assertEquals(unfinished, "batched")
+      assertEquals(cancelled, "batched")
+      assertEquals(orphan, "batched")
+
+  private def seedCompletionSample(key: String, sample: CompletionSample): IO[Unit] =
+    (for
+      _ <- sql"""INSERT INTO sync_events (
+                   dedupe_key, stream_name, observed_at, payload_ref, payload, payload_sha256, status
+                 ) VALUES ($key, ${sample.streamName}, TIMESTAMPTZ '2026-10-12 00:00:00Z',
+                           'inline://json/e30', '{}'::jsonb, ${"a" * 64}, ${sample.eventStatus})""".update.run
+      _ <- sql"""INSERT INTO sync_jobs (job_id, dedupe_key, stream_name, status)
+                 VALUES ($key, $key, ${sample.streamName}, ${sample.jobStatus})""".update.run
+      _ <- sql"""INSERT INTO sync_batches (
+                   batch_id, job_id, dedupe_key, stream_name, payload_ref, status,
+                   attempt_count, max_attempts, row_count, cursor_start, cursor_end
+                 ) VALUES ($key, $key, $key, ${sample.streamName}, 'inline://json/e30', ${sample.batchStatus},
+                           ${sample.attemptCount}, ${sample.maxAttempts}, ${sample.rowCount}, '0', '1')""".update.run
+    yield ()).transact(xa)
 
   test(
     "invalid load batch_id is parked after publication without dispatching its batch"

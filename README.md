@@ -60,6 +60,20 @@ The currently wired binary provides:
 All 24 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
 
+Successful load outcomes complete the matching `sync_events` row after its job
+and all batches complete. This status records load completion; it does not claim
+that downstream search projections have consumed the source. Event retention
+continues to require its archive, age, dependent-work and lease checks.
+
+`sync-backlog-recovery` also repairs historical `batched` events whose matching
+job and all batches completed. Each tick scans at most 1,000 job IDs in primary
+key order. Its resumable upgrade checkpoint is the `processor_checkpoints` row
+with `processor_name=sync-backlog-recovery` and `shard_id=event-completion-v1`;
+`checkpoint_value` is the last scanned job ID, `rows_processed` counts scanned
+jobs, and `status=healthy` ends the pass. Failed, quarantined and unfinished work
+is preserved. The repair changes no search documents, vectors or source payloads
+and does not enable retention processors.
+
 ## Components
 
 | Package | Responsibility |

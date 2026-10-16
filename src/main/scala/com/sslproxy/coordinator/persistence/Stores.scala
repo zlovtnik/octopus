@@ -19,6 +19,7 @@ import java.time.Instant
 
 trait IngestionStore[F[_]]:
   def pendingCount: DbResultT[F, Long]
+  def reconcileCompletedEvents(limit: Int): DbResultT[F, Int]
   def processPending(
     streamNames: List[String],
     maxAttempts: Int,

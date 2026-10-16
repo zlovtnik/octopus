@@ -87,6 +87,8 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
 
     def pendingCount: DbResultT[IO, Long] = unused
 
+    def reconcileCompletedEvents(limit: Int): DbResultT[IO, Int] = unused
+
     def processPending(
       streamNames: List[String],
       maxAttempts: Int,
@@ -146,6 +148,8 @@ class SyncEventHydrationServiceSuite extends CatsEffectSuite:
       throw UnsupportedOperationException("unused test store operation")
 
     def pendingCount: DbResultT[IO, Long] = unused
+
+    def reconcileCompletedEvents(limit: Int): DbResultT[IO, Int] = unused
 
     def processPending(
       streamNames: List[String],

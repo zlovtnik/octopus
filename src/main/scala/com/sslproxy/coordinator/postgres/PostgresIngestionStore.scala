@@ -10,6 +10,9 @@ final class PostgresIngestionStore(repository: PostgresRepository) extends Inges
   def pendingCount: DbResultT[IO, Long] =
     EitherT(repository.pendingLedgerCount())
 
+  def reconcileCompletedEvents(limit: Int): DbResultT[IO, Int] =
+    EitherT(repository.reconcileCompletedEvents(limit))
+
   def processPending(
     streamNames: List[String],
     maxAttempts: Int,

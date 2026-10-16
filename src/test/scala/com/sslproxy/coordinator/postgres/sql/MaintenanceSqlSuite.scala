@@ -35,11 +35,10 @@ class MaintenanceSqlSuite extends FunSuite:
     assert(statement.contains("outbox.status NOT IN"), statement)
     assert(statement.contains("LIMIT ?"), statement)
 
-  test("retention candidates stay selectable for the status ingestion actually writes"):
+  test("retention candidates require the same completed status as event deletion"):
     val statement = MaintenanceSql.retentionCandidates(30, 100).sql
 
-    assert(statement.contains("status <> 'failed'"), statement)
-    assert(!statement.contains("status = 'completed'"), statement)
+    assert(statement.contains("e.status = 'completed'"), statement)
 
   test("tombstone pruning uses the persisted absolute expiry and a bound limit"):
     val statement = MaintenanceSql.pruneTombstones(100).sql

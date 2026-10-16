@@ -620,6 +620,11 @@ class PostgresRepository(
       OutboxSql.RecoverExpiredLeases
     }
 
+  def reconcileCompletedEvents(limit: Int): IO[Either[DatabaseError, Int]] =
+    runDb("postgres.reconcile_completed_events") {
+      ResultSql.reconcileCompletedEvents(limit)
+    }
+
   def ensureCursor(streamName: String): IO[Either[DatabaseError, String]] =
     runDb("postgres.ensure_cursor") {
       for

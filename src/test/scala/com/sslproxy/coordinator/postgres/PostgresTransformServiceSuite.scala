@@ -8,7 +8,8 @@ class PostgresTransformServiceSuite extends FunSuite:
 
   test("transform ProxyEvents creates events and blocked rollups"):
     val row = parse("""{"type": "tls_scan", "host": "example.com", "time": "2026-07-20T12:00:00Z", "blocked": true,
-       "bytes_up": 100, "bytes_down": 200, "blocked_bytes": 300, "verdict": "MALICIOUS"}""").toOption.get
+       "bytes_up": 100, "bytes_down": 200, "blocked_bytes": 300,
+       "blocked_bytes_delta_approx": 42, "verdict": "MALICIOUS"}""").toOption.get
     val result = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(row))
     assertEquals(result.proxyEvents.size, 1)
     assertEquals(result.blockedEvents.size, 1)
@@ -19,6 +20,13 @@ class PostgresTransformServiceSuite extends FunSuite:
     assertEquals(result.proxyEvents.head.blocked, true)
     assertEquals(result.proxyEvents.head.classification, "unknown")
     assertEquals(result.proxyEvents.head.rawJson, row.noSpaces)
+    assertEquals(result.blockedEvents.head.blockedBytes, 42L)
+
+  test("legacy cumulative blocked bytes use the per-event tunnel estimate"):
+    val row = parse("""{"type":"block","host":"example.com","time":"2026-07-20T12:00:00Z",
+      "blocked":true,"blocked_bytes":999999,"metrics":{"total_blocked_bytes_approx":999999}}""").toOption.get
+    val result = PostgresTransformService.transform(PostgresSinkTarget.ProxyEvents, List(row))
+    assertEquals(result.blockedEvents.head.blockedBytes, 61L)
 
   test("transform ProxyEvents preserves canonical envelope fields"):
     val eventId = "cb2c1f16-d5bb-4a22-9890-49f0dbb547e3"

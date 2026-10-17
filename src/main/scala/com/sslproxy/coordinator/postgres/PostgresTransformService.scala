@@ -127,10 +127,16 @@ object PostgresTransformService:
   ): Option[BlockedEventInsert] =
     if boolFlag(row, "blocked") == 0L then None
     else
-      val blockedBytes = optionalLong(row, "blocked_bytes")
-        .orElse(nestedLong(row, "metrics", "blocked_bytes"))
-        .orElse(nestedLong(row, "metrics", "total_blocked_bytes_approx"))
-        .getOrElse(Math.addExact(proxyRow.bytesUp, proxyRow.bytesDown))
+      // Older tunnel block producers used 50 + host byte length for each attempt.
+      // Other legacy blocked events have no safe per-event estimate.
+      val legacyBlockEstimate =
+        if proxyRow.eventType == "block" || proxyRow.eventType == "session.blocked" then
+          50L + proxyRow.host.getBytes(StandardCharsets.UTF_8).length.toLong
+        else 0L
+      val blockedBytes = optionalLong(row, "blocked_bytes_delta_approx")
+        .orElse(nestedLong(row, "metrics", "blocked_bytes_delta_approx"))
+        .filter(_ >= 0L)
+        .getOrElse(legacyBlockEstimate)
       val verdict = optionalString(row, "verdict").getOrElse("BLOCKED")
       val fingerprint = row.hcursor.downField("fingerprint").focus
       Some(

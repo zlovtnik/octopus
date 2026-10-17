@@ -163,6 +163,11 @@ class AppConfigSuite extends FunSuite:
     )
 
     assert(validationMessages(invalid).exists(_.contains("version suffix")))
+    val invalidHeartbeat = invalid.copy(kafka = baseline.kafka.copy(wirelessHeartbeatConsumer = "heartbeat"))
+    assert(validationMessages(invalidHeartbeat).exists(_.contains("version suffix")))
+    val duplicateHeartbeat =
+      invalid.copy(kafka = baseline.kafka.copy(wirelessHeartbeatConsumer = baseline.kafka.scanConsumer))
+    assert(validationMessages(duplicateHeartbeat).exists(_.contains("duplicates")))
 
   test("locked consumer processors require the consumer lane"):
     val baseline = defaults
@@ -207,6 +212,7 @@ class AppConfigSuite extends FunSuite:
         "SYNC_LOAD_CONSUMER" -> "octopus-load-v7",
         "SYNC_RESULT_CONSUMER" -> "octopus-result-v7",
         "SYNC_PAYLOAD_AUDIT_CONSUMER" -> "octopus-payload-audit-v7",
+        "WIRELESS_HEARTBEAT_CONSUMER" -> "wireless-sensor-heartbeat-postgres-v2",
         "SYNC_SCAN_CONSUMERS_COUNT" -> "5",
         "SYNC_LOAD_CONSUMERS_COUNT" -> "6",
         "SYNC_RESULT_CONSUMERS_COUNT" -> "7",
@@ -224,6 +230,7 @@ class AppConfigSuite extends FunSuite:
     assertEquals(loaded.kafka.loadConsumer, "octopus-load-v7")
     assertEquals(loaded.kafka.resultConsumer, "octopus-result-v7")
     assertEquals(loaded.kafka.payloadAuditConsumer, "octopus-payload-audit-v7")
+    assertEquals(loaded.kafka.wirelessHeartbeatConsumer, "wireless-sensor-heartbeat-postgres-v2")
     assertEquals(loaded.kafka.scanConsumersCount, 5)
     assertEquals(loaded.kafka.loadConsumersCount, 6)
     assertEquals(loaded.kafka.resultConsumersCount, 7)

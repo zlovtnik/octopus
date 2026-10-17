@@ -149,9 +149,13 @@ include `proxy.events`, `wireless.audit`, wireless alerts, and
 - Delivery is at least once from each consumer group's committed Kafka offset;
   a group without committed offsets starts at the earliest retained record.
 - Ingestion evidence is unique by group/topic/partition/offset.
-- The direct `wireless-audit-projection-v1` consumer commits an offset only
+- The direct wireless audit consumer commits an offset only
   after its receipt, dedupe hash, compact summary, graph evidence, and any
   embedding source update commit in PostgreSQL.
+- Wireless projection receipts are scoped by consumer group, topic, partition,
+  and offset. A rebuilt broker requires a new versioned audit group; shared
+  payload hashes still prevent replay from duplicating projection effects.
+  Legacy coordinate receipts remain intact until their normal expiry.
 - Stream cursors advance monotonically and handle numeric wireless cursors
   without lexicographic regression.
 - Outbox mutations require owner, lease token, and fence matches.
@@ -265,6 +269,8 @@ Important gates:
 | `POSTGRES_SCHEMA_MANIFEST_SHA256` | bundled `octopus_core` manifest digest | Exact executor-recorded canonical schema digest; startup and periodic verification fail closed on drift |
 | `OCTOPUS_CONSUMERS_ENABLED` | `false` | Enables the Kafka consumer processor set (`ProcessorId.kafkaConsumers`): the three locked consumers plus `wireless-heartbeat-ingestion` and `wireless-audit-projection`. Those IDs do not have to be repeated in `OCTOPUS_ENABLED_PROCESSORS`. |
 | `WIRELESS_PROJECTION_MODE` | `legacy` | `shadow` projects `wireless.audit` alongside legacy raw-frame normalization; `projected` disables new raw-frame writes after a retained-window comparison. |
+| `WIRELESS_HEARTBEAT_CONSUMER` | `wireless-sensor-heartbeat-postgres-v1` | Optional versioned heartbeat consumer group; change after broker history replacement to replay retained heartbeats under separate ingestion evidence. |
+| `WIRELESS_AUDIT_CONSUMER` | `wireless-audit-projection-v1` | Optional versioned wireless audit consumer group; scopes projection receipts and Kafka restart offsets. |
 | `WIRELESS_RANGES_ENABLED` | `false` | Enables sensor-to-device range estimates only with a current reviewed calibration and stable sufficient RSSI samples. |
 | `WIRELESS_CALIBRATIONS_JSON` | `[]` | Deployment-managed calibration entries. Each supplies sensor/location, version, RSSI model, supported radio contexts, sample policy, and validity dates. |
 | `OCTOPUS_PROCESSORS_ENABLED` | `false` | Enables the processor lane (cron, projections, retention, and support streams) |

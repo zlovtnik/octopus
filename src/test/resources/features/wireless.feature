@@ -1,6 +1,10 @@
 @processor-wireless-audit-projection @processor-wireless-heartbeat-ingestion @processor-wireless-frame-normalizer @processor-wireless-inventory-projector @processor-wireless-identity-projector @processor-wireless-behavior-projector @processor-wireless-timing-projector @processor-wireless-sequence-projector @processor-wireless-baseline-projector @processor-wireless-similarity-projector
 Feature: Wireless processor contracts
 
+  Wireless projection receipts use group/topic/partition/offset identities.
+  A new broker history uses a new versioned consumer group while shared
+  payload hashes prevent duplicate projection effects across histories.
+
   Scenario Outline: An Octopus wireless processor has its declared durable contract
     Given processor "<processor>" belongs to "wireless"
     Then the processor is owned by Octopus

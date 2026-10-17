@@ -87,7 +87,8 @@ final case class KafkaCfg(
   lockedBatchWindowMs: Long,
   topicPartitions: Int,
   topicReplicationFactor: Int,
-  lockedBatchMaxBytes: Int = 8 * 1024 * 1024
+  lockedBatchMaxBytes: Int = 8 * 1024 * 1024,
+  wirelessHeartbeatConsumer: String = "wireless-sensor-heartbeat-postgres-v1"
 ) derives ConfigReader
 
 final case class CronConfig(
@@ -559,6 +560,7 @@ object AppConfig:
       config.kafka.payloadAuditConsumer,
       config.kafka.loadConsumer,
       config.kafka.wirelessAuditConsumer,
+      config.kafka.wirelessHeartbeatConsumer,
       config.wireless.backlogSaveConsumer,
       config.wireless.backlogListConsumer,
       config.wireless.backlogSyncedConsumer,

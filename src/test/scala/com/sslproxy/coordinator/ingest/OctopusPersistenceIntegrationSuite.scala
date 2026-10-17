@@ -163,6 +163,10 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     for
       rawBefore <- sql"SELECT COUNT(*) FROM sync_events".query[Long].unique.transact(xa)
       framesBefore <- sql"SELECT COUNT(*) FROM wireless_frames".query[Long].unique.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.wireless_projection_receipts
+        (topic, partition_id, offset_id, payload_sha256, disposition, observed_at)
+        VALUES (${metadata.topic}, ${metadata.partition}, ${metadata.offset}, ${"e" * 64}, 'projected', CURRENT_TIMESTAMP)""".update.run
+        .transact(xa)
       _ <- (0 until 3).toList.traverse_(i =>
         repo
           .projectWirelessRecord(event, metadata.copy(offset = 100 + i, payloadSha256 = (i + 1).toString * 64))
@@ -174,6 +178,18 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       summaries <-
         sql"""SELECT summary_id::text, frame_count, radio::text FROM atheros_search.wireless_observation_summaries
         WHERE sensor_id = 'stream-test'""".query[(String, Long, String)].to[List].transact(xa)
+      newHistory = metadata.copy(consumerGroup = "wireless-audit-projection-v2", groupVersion = 2)
+      repeatedPayload <- repo.projectWirelessRecord(event, newHistory)
+      reusedCoordinate <- repo.projectWirelessRecord(event, newHistory.copy(offset = 101, payloadSha256 = "f" * 64))
+      newHistoryConflict <- repo.projectWirelessRecord(event, newHistory.copy(offset = 101, payloadSha256 = "a" * 64))
+      groupedHashes <- sql"""SELECT group_id, payload_sha256 FROM octopus_core.wireless_projection_group_receipts
+        WHERE topic = ${metadata.topic} AND partition_id = ${metadata.partition} AND offset_id = 101
+        ORDER BY group_id""".query[(String, String)].to[List].transact(xa)
+      legacyHash <- sql"""SELECT payload_sha256 FROM octopus_core.wireless_projection_receipts
+        WHERE topic = ${metadata.topic} AND partition_id = ${metadata.partition} AND offset_id = ${metadata.offset}"""
+        .query[String]
+        .unique
+        .transact(xa)
       _ <- repo.buildSearchDocuments(100)
       _ <- repo.prepareEmbeddingJobs(100, "nomic-embed-text-v2-moe")
       jobsBefore <- sql"SELECT COUNT(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
@@ -205,6 +221,14 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(duplicate, Right(false))
       assertEquals(replay, Right(false))
       assert(conflict.isLeft)
+      assertEquals(repeatedPayload, Right(false))
+      assertEquals(reusedCoordinate, Right(true))
+      assert(newHistoryConflict.isLeft)
+      assertEquals(
+        groupedHashes,
+        List("wireless-audit-projection-v1" -> ("2" * 64), "wireless-audit-projection-v2" -> ("f" * 64))
+      )
+      assertEquals(legacyHash, "e" * 64)
       assertEquals(summaries.map(_._2), List(3L))
       assert(summaries.forall(_._3.contains("mean_dbm")))
       assertEquals(jobsAfter, jobsBefore)
@@ -220,6 +244,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   test("wireless projection expiry drains multi-batch receipt and hash backlogs") {
     requireDocker()
     for
+      _ <- sql"""INSERT INTO octopus_core.wireless_projection_group_receipts
+        (group_id, topic, partition_id, offset_id, payload_sha256, disposition, observed_at, expires_at)
+        SELECT 'wireless-audit-projection-v2', 'wireless.audit', 1, i, lpad(to_hex(i), 64, '0'), 'received',
+          CURRENT_TIMESTAMP - INTERVAL '10 days', CURRENT_TIMESTAMP - INTERVAL '1 day'
+        FROM generate_series(1, 5001) i""".update.run.transact(xa)
       _ <- sql"""INSERT INTO octopus_core.wireless_projection_receipts
         (topic, partition_id, offset_id, payload_sha256, disposition, observed_at, expires_at)
         SELECT 'wireless.audit', 1, i, lpad(to_hex(i), 64, '0'), 'received',
@@ -233,10 +262,13 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         WHERE expires_at <= CURRENT_TIMESTAMP""".query[Long].unique.transact(xa)
       hashesLeft <- sql"""SELECT COUNT(*) FROM octopus_core.wireless_projection_hashes
         WHERE expires_at <= CURRENT_TIMESTAMP""".query[Long].unique.transact(xa)
+      groupReceiptsLeft <- sql"""SELECT COUNT(*) FROM octopus_core.wireless_projection_group_receipts
+        WHERE expires_at <= CURRENT_TIMESTAMP""".query[Long].unique.transact(xa)
     yield
       assertEquals(expired, Right(0))
       assertEquals(receiptsLeft, 0L)
       assertEquals(hashesLeft, 0L)
+      assertEquals(groupReceiptsLeft, 0L)
   }
 
   private lazy val schemaConfig = PostgresConfig(

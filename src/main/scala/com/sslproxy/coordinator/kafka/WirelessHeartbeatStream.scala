@@ -18,7 +18,6 @@ import java.nio.charset.StandardCharsets
 object WirelessHeartbeatStream:
   private val log = StructuredLogger(getClass)
   private val Topic = "wireless.sensor.heartbeat"
-  private val ConsumerGroup = "wireless-sensor-heartbeat-postgres-v1"
 
   private final case class Decoded(record: ResolvedScanRequestRecord)
 
@@ -28,35 +27,36 @@ object WirelessHeartbeatStream:
     metrics: CoordinatorMetrics,
     producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, ConsumerGroup, Topic, 1, IO.unit, metrics, producer, decode) { lockedRecords =>
-      lockedRecords.traverse_ { locked =>
-        store.recordScanRequestWithEvidence(locked.decoded.record, locked.metadata).value.flatMap {
-          case Right(decision) =>
-            IO.whenA(decision.disposition == IngestionDisposition.Processed)(
-              IO(metrics.recordSyncEventHydrated())
-            ) *>
-              IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
-                IO(metrics.recordIngestDeduplicated())
-              ) *> IO(
-                log.info(
-                  "wireless_sensor_heartbeat",
-                  "status" -> decision.disposition.databaseValue,
-                  "group" -> locked.metadata.consumerGroup,
-                  "partition" -> locked.metadata.partition.toString,
-                  "offset" -> locked.metadata.offset.toString
+    LockedTopicConsumer.stream(cfg, cfg.wirelessHeartbeatConsumer, Topic, 1, IO.unit, metrics, producer, decode) {
+      lockedRecords =>
+        lockedRecords.traverse_ { locked =>
+          store.recordScanRequestWithEvidence(locked.decoded.record, locked.metadata).value.flatMap {
+            case Right(decision) =>
+              IO.whenA(decision.disposition == IngestionDisposition.Processed)(
+                IO(metrics.recordSyncEventHydrated())
+              ) *>
+                IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
+                  IO(metrics.recordIngestDeduplicated())
+                ) *> IO(
+                  log.info(
+                    "wireless_sensor_heartbeat",
+                    "status" -> decision.disposition.databaseValue,
+                    "group" -> locked.metadata.consumerGroup,
+                    "partition" -> locked.metadata.partition.toString,
+                    "offset" -> locked.metadata.offset.toString
+                  )
                 )
+            case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
+              LockedTopicConsumer.parkNonRetriable(
+                producer,
+                Topic + cfg.dlqSuffix,
+                cfg.wirelessHeartbeatConsumer,
+                locked.record,
+                error.cause
               )
-          case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
-            LockedTopicConsumer.parkNonRetriable(
-              producer,
-              Topic + cfg.dlqSuffix,
-              ConsumerGroup,
-              locked.record,
-              error.cause
-            )
-          case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
+            case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
+          }
         }
-      }
     }
 
   private def decode(raw: String): Either[Throwable, Decoded] =

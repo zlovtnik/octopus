@@ -28,14 +28,15 @@ object WirelessStreamSql:
   ): ConnectionIO[Boolean] =
     for
       now <- sql"SELECT CURRENT_TIMESTAMP".query[Timestamp].unique.map(_.toInstant)
-      inserted <- sql"""INSERT INTO octopus_core.wireless_projection_receipts
-        (topic, partition_id, offset_id, payload_sha256, disposition, observed_at)
-        VALUES (${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.payloadSha256}, 'received', ${ts(
+      inserted <- sql"""INSERT INTO octopus_core.wireless_projection_group_receipts
+        (group_id, topic, partition_id, offset_id, payload_sha256, disposition, observed_at)
+        VALUES (${meta.consumerGroup}, ${meta.topic}, ${meta.partition}, ${meta.offset}, ${meta.payloadSha256}, 'received', ${ts(
           event.observedAt
         )})
         ON CONFLICT DO NOTHING""".update.run
-      stored <- sql"""SELECT payload_sha256 FROM octopus_core.wireless_projection_receipts
-        WHERE topic = ${meta.topic} AND partition_id = ${meta.partition} AND offset_id = ${meta.offset}"""
+      stored <- sql"""SELECT payload_sha256 FROM octopus_core.wireless_projection_group_receipts
+        WHERE group_id = ${meta.consumerGroup}
+          AND topic = ${meta.topic} AND partition_id = ${meta.partition} AND offset_id = ${meta.offset}"""
         .query[String]
         .unique
       _ <-
@@ -60,8 +61,9 @@ object WirelessStreamSql:
       disposition = if fresh == 0 then "duplicate" else if eligible then "projected" else "outside_window"
       _ <-
         if inserted == 0 then 0.pure[ConnectionIO]
-        else sql"""UPDATE octopus_core.wireless_projection_receipts
-        SET disposition = $disposition WHERE topic = ${meta.topic} AND partition_id = ${meta.partition} AND offset_id = ${meta.offset}""".update.run
+        else sql"""UPDATE octopus_core.wireless_projection_group_receipts
+        SET disposition = $disposition WHERE group_id = ${meta.consumerGroup}
+          AND topic = ${meta.topic} AND partition_id = ${meta.partition} AND offset_id = ${meta.offset}""".update.run
     yield eligible
 
   private def node(
@@ -318,6 +320,14 @@ object WirelessStreamSql:
   private val ExpiryDeleteBatch = 5000
 
   private def expireReceipts(limit: Int): ConnectionIO[Int] =
+    sql"""DELETE FROM octopus_core.wireless_projection_group_receipts
+      WHERE (group_id, topic, partition_id, offset_id) IN
+      (SELECT group_id, topic, partition_id, offset_id FROM octopus_core.wireless_projection_group_receipts
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, group_id, topic, partition_id, offset_id
+        LIMIT ${limit.max(1)} FOR UPDATE SKIP LOCKED)""".update.run
+
+  private def expireLegacyReceipts(limit: Int): ConnectionIO[Int] =
     sql"""DELETE FROM octopus_core.wireless_projection_receipts WHERE (topic, partition_id, offset_id) IN
       (SELECT topic, partition_id, offset_id FROM octopus_core.wireless_projection_receipts
         WHERE expires_at <= CURRENT_TIMESTAMP
@@ -356,6 +366,7 @@ object WirelessStreamSql:
         yield ()
       }
       _ <- drainExpired(expireReceipts)
+      _ <- drainExpired(expireLegacyReceipts)
       _ <- drainExpired(expireHashes)
     yield ids.size
 

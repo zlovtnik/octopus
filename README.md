@@ -331,9 +331,9 @@ warn-only schema validation, and invalid consumer-group contracts.
 The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
 `OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
 processor catalog lists the 21 non-Kafka processor IDs; the remaining
-four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
+five Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
 is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
-is all 24 Octopus-owned processors.
+is all 26 Octopus-owned processors.
 
 A new consumer group replays every retained record; an existing group resumes
 from its committed Kafka offsets. Rollback must preserve consumer offsets,

@@ -9,7 +9,7 @@ import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchServ
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.{IngestionStore, MaintenanceStore, OutboxStore, ProjectionStore}
 import com.sslproxy.coordinator.postgres.PostgresErrorClass
-import com.sslproxy.coordinator.processor.{FencedWorkRunner, ProcessorId}
+import com.sslproxy.coordinator.processor.{FencedWorkRunner, Lease, ProcessorId}
 import fs2.Stream
 
 import scala.concurrent.duration.*
@@ -97,15 +97,11 @@ final class CronScheduler private (
     inputRevision: String,
     highWater: Int
   ): Stream[IO, Unit] =
-    Stream.awakeEvery[IO](interval).evalMap { _ =>
-      workRunner
-        .runOnce(ProcessorId.ProxySearchPreparer, (interval * 2L).max(30.seconds)) { lease =>
-          projectionStore.prepareProxySearch(lease, batchSize, model, inputRevision, highWater).value.flatMap {
-            case Right(_) => IO.unit
-            case Left(error) => IO.raiseError(databaseFailure(error))
-          }
-        }
-        .void
+    leasedPeriodicStream(ProcessorId.ProxySearchPreparer, interval) { lease =>
+      projectionStore.prepareProxySearch(lease, batchSize, model, inputRevision, highWater).value.flatMap {
+        case Right(_) => IO.unit
+        case Left(error) => IO.raiseError(databaseFailure(error))
+      }
     }
 
   def embeddingJobPreparerStream(
@@ -244,10 +240,18 @@ final class CronScheduler private (
   )(
     operation: => IO[Unit]
   ): Stream[IO, Unit] =
+    leasedPeriodicStream(processorId, interval)(_ => operation)
+
+  private def leasedPeriodicStream(
+    processorId: ProcessorId,
+    interval: FiniteDuration
+  )(
+    operation: Lease => IO[Unit]
+  ): Stream[IO, Unit] =
     Stream.awakeEvery[IO](interval).evalMap { _ =>
       val leaseTtl = (interval * 2L).max(30.seconds)
       workRunner
-        .runOnce(processorId, leaseTtl)(_ => operation)
+        .runOnce(processorId, leaseTtl)(operation)
         .void
         .handleErrorWith { error =>
           IO(log.error("cron_fenced_tick", error, "status" -> "failed", "processor" -> processorId.value)) *>

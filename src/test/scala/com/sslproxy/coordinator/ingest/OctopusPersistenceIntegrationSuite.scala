@@ -2305,6 +2305,58 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         )
         .map(result => requireRight(result).get)
 
+  test("older preparation generations cannot publish evidence, consume dirty work or advance checkpoints") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val id = "55229101-31c3-43e2-9f3a-9e236b829bc1"
+    val json = circeParser
+      .parse(s"""{"event_id":"$id","type":"http_proxied","host":"generation.example","time":"2026-10-19T12:00:00Z"}""")
+      .toOption
+      .get
+    for
+      lease <- proxyLease
+      revision <- sql"""INSERT INTO octopus_core.proxy_events(event_id,event_time,event_type,host,payload)
+        VALUES ($id, '2026-10-19T12:00:00Z', 'http_proxied', 'generation.example', ${json.noSpaces}::jsonb)
+        RETURNING observation_revision""".query[Long].unique.transact(xa)
+      _ <-
+        sql"INSERT INTO octopus_core.proxy_preparation_dirty(event_id,source_revision) VALUES ($id,$revision)".update.run
+          .transact(xa)
+      source = ProxyEvidence
+        .source(json, id, revision, java.sql.Timestamp.from(java.time.Instant.parse("2026-10-19T12:00:00Z")))
+        .get
+      _ <- ProxyPreparationSql.persist(lease, source, "nomic-embed-text-v2-moe").transact(xa)
+      _ <- sql"UPDATE atheros_search.proxy_document_state SET preparation_generation=3 WHERE source_key=$id".update.run
+        .transact(xa)
+      before <- sql"SELECT after_revision FROM octopus_core.proxy_preparation_progress WHERE scope='proxy-event-v2'"
+        .query[Long]
+        .option
+        .transact(xa)
+      outcome <- ProxyPreparationSql
+        .tick(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+        .transact(xa)
+        .attempt
+      after <- sql"SELECT after_revision FROM octopus_core.proxy_preparation_progress WHERE scope='proxy-event-v2'"
+        .query[Long]
+        .option
+        .transact(xa)
+      dirty <- sql"SELECT count(*) FROM octopus_core.proxy_preparation_dirty WHERE event_id=$id"
+        .query[Long]
+        .unique
+        .transact(xa)
+      evidence <- sql"SELECT count(*) FROM atheros_search.proxy_event_evidence WHERE event_id=$id"
+        .query[Long]
+        .unique
+        .transact(xa)
+      _ <- sql"UPDATE atheros_search.proxy_document_state SET preparation_generation=2 WHERE source_key=$id".update.run
+        .transact(xa)
+    yield
+      assert(outcome.isLeft)
+      assertEquals(before, after)
+      assertEquals(dirty, 1L)
+      assertEquals(evidence, 0L)
+  }
+
   test("proxy similarity excludes wireless on both sides and uses independent scope checkpoints") {
     requireDocker()
     import com.sslproxy.coordinator.postgres.sql.IntelligenceSql
@@ -2596,7 +2648,8 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         octopus_core.proxy_preparation_progress, octopus_core.proxy_window_dirty, octopus_core.work_leases,
         atheros_search.proxy_event_evidence, atheros_search.proxy_document_state, atheros_search.search_documents,
         atheros_search.search_document_tokens, atheros_search.search_document_tags, atheros_search.embedding_jobs,
-        atheros_search.embedding_repair_receipts TO proxy_preparation_contract""".update.run.transact(xa)
+        atheros_search.embedding_repair_receipts, atheros_search.proxy_preparation_policy TO proxy_preparation_contract""".update.run
+          .transact(xa)
       _ <-
         sql"GRANT SELECT ON atheros_search.embeddings, atheros_search.search_vectors_event TO proxy_preparation_contract".update.run
           .transact(xa)

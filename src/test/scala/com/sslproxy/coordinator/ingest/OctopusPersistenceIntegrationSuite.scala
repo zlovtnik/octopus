@@ -2466,6 +2466,80 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       )
   }
 
+  test("proxy windows isolate member coverage and limits and retry after member normalization") {
+    requireDocker()
+    val start = java.sql.Timestamp.from(java.time.Instant.parse("1990-01-01T01:00:00Z"))
+    val end = java.sql.Timestamp.from(start.toInstant.plusSeconds(3600))
+    val host = "SCOPED.Example:443"
+    val device = "89ec1e80-9459-4d8e-a938-64adbb4c2061"
+    val otherDevice = "89ec1e80-9459-4d8e-a938-64adbb4c2062"
+    val version = com.sslproxy.coordinator.processor.ProxyAuthority.Version
+    val evidence = s"""{"host_normalized":"scoped.example","normalization_version":"$version"}"""
+    val payload = s"""{"type":"block","blocked":true,"host":"$host","authority_raw":"$host"}"""
+    def tick(lease: com.sslproxy.coordinator.processor.Lease): IO[Unit] =
+      repository
+        .prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+        .map(requireRight)
+        .void
+    val skipHistory = sql"""INSERT INTO octopus_core.proxy_preparation_progress(scope, after_revision)
+      SELECT 'proxy-event-v2', max(observation_revision) FROM octopus_core.proxy_events WHERE true
+      ON CONFLICT(scope) DO UPDATE SET after_revision = EXCLUDED.after_revision""".update.run.transact(xa)
+    for
+      lease <- proxyLease
+      _ <- sql"""INSERT INTO octopus_core.proxy_events
+        (event_id,event_time,event_type,host,registered_device_id,blocked,payload,evidence) VALUES
+        ('scoped-window-ready', $start::timestamptz + interval '45 minutes', 'block', $host, $device::uuid, true, $payload::jsonb, $evidence::jsonb),
+        ('scoped-window-late', $start::timestamptz + interval '46 minutes', 'block', $host, $device::uuid, true, $payload::jsonb, '{}'::jsonb)""".update.run
+        .transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_events
+        (event_id,event_time,event_type,host,registered_device_id,blocked,evidence)
+        SELECT 'scoped-window-unrelated-' || n, $start::timestamptz + interval '10 minutes', 'block',
+          CASE WHEN n <= 250 THEN $host ELSE 'unrelated.example' END,
+          CASE WHEN n <= 250 THEN $otherDevice::uuid ELSE $device::uuid END, true,
+          CASE WHEN n <= 250 THEN jsonb_build_object('host_normalized', 'different.example', 'normalization_version', $version::text)
+            ELSE '{}'::jsonb END FROM generate_series(1,501) n""".update.run.transact(xa)
+      _ <- skipHistory
+      _ <- sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+        VALUES ($start,$host,$device)""".update.run.transact(xa)
+      _ <- tick(lease)
+      parked <- sql"""SELECT disposition, observed_rows_lower_bound FROM octopus_core.proxy_window_dirty
+        WHERE window_start=$start AND host=$host AND device_key=$device""".query[(String, Int)].unique.transact(xa)
+      watermark <- sql"""SELECT max(observation_revision) FROM (
+        SELECT observation_revision FROM octopus_core.proxy_events WHERE event_time >= $start AND event_time < $end
+        ORDER BY event_time, event_id LIMIT 501) bounded""".query[Long].unique.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_preparation_dirty(event_id,source_revision)
+        SELECT event_id, observation_revision FROM octopus_core.proxy_events WHERE event_id='scoped-window-late'""".update.run
+        .transact(xa)
+      _ <- tick(lease)
+      key <-
+        sql"""SELECT CONCAT('proxy-window:', md5(jsonb_build_array($host::text,$device::text,$start::timestamptz)::text))"""
+          .query[String]
+          .unique
+          .transact(xa)
+      detail <- sql"""SELECT detail_json::text FROM atheros_search.search_documents
+        WHERE source_key=$key AND status='active'""".query[String].unique.transact(xa)
+      remaining <- sql"""SELECT count(*) FROM octopus_core.proxy_window_dirty
+        WHERE window_start=$start AND host=$host AND device_key=$device""".query[Long].unique.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_events
+        (event_id,event_time,event_type,host,registered_device_id,blocked,evidence)
+        SELECT 'scoped-window-overflow-' || n, $start::timestamptz + interval '50 minutes', 'block', $host, $device::uuid,
+          true, $evidence::jsonb FROM generate_series(1,499) n""".update.run.transact(xa)
+      _ <- skipHistory
+      _ <- sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+        VALUES ($start,$host,$device)""".update.run.transact(xa)
+      _ <- tick(lease)
+      overflow <- sql"""SELECT disposition, observed_rows_lower_bound FROM octopus_core.proxy_window_dirty
+        WHERE window_start=$start AND host=$host AND device_key=$device""".query[(String, Int)].unique.transact(xa)
+    yield
+      assertEquals(parked, ("source_coverage_pending", 2))
+      val cursor = circeParser.parse(detail).toOption.get.hcursor
+      assertEquals(cursor.get[Int]("observed_blocked_events"), Right(2))
+      assertEquals(cursor.get[String]("host_normalized"), Right("scoped.example"))
+      assertEquals(cursor.get[Long]("source_watermark"), Right(watermark))
+      assertEquals(remaining, 0L)
+      assertEquals(overflow, ("input_limit", 501))
+  }
+
   test("proxy job reconciliation repairs missing coverage and retains terminal failure history") {
     requireDocker()
     import com.sslproxy.coordinator.processor.*

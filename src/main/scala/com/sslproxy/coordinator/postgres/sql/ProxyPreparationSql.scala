@@ -413,25 +413,33 @@ object ProxyPreparationSql:
               ORDER BY event_time, event_id LIMIT ${MaxWindowRows + 1}"""
                   .query[WindowObservation]
                   .to[List]
-                incomplete = rows.exists(
+                memberRows <-
+                  sql"""SELECT event_id, evidence->>'host_normalized', COALESCE(registered_device_id::text, ''),
+                evidence->>'normalization_version', observation_revision, host, event_type, classification,
+                status_code, bytes_up, bytes_down, event_time FROM octopus_core.proxy_events
+              WHERE blocked AND event_time >= $start AND event_time < $end
+                AND event_type IN ('block', 'http_blocked', 'session.blocked', 'http_proxied', 'http_error', 'tunnel_open', 'tunnel_close')
+                AND host = $rawHost AND COALESCE(registered_device_id::text, '') = $deviceKey
+              ORDER BY event_time, event_id LIMIT ${MaxWindowRows + 1}"""
+                    .query[WindowObservation]
+                    .to[List]
+                incomplete = memberRows.exists(
                   _.normalizationVersion != Some(ProxyAuthority.Version)
                 )
-                members = rows.filter(row =>
-                  row.host == rawHost && row.deviceKey == deviceKey
-                )
+                members = memberRows
                 hosts = members.flatMap(_.normalizedHost).distinct
                 ambiguous = hosts.size != 1 || members.exists(
                   _.normalizedHost.isEmpty
                 )
                 _ <-
-                  if rows.size > MaxWindowRows || incomplete || ambiguous then
+                  if memberRows.size > MaxWindowRows || incomplete || ambiguous then
                     // Preserve the dirty window for an explicitly reviewed larger
                     // budget. It cannot acquire a misleading partial denominator.
                     sql"""UPDATE octopus_core.proxy_window_dirty SET disposition = ${
                         if incomplete then "source_coverage_pending"
-                        else if rows.size > MaxWindowRows then "input_limit"
+                        else if memberRows.size > MaxWindowRows then "input_limit"
                         else "ambiguous_normalization"
-                      }, observed_rows_lower_bound = ${rows.size}
+                      }, observed_rows_lower_bound = ${memberRows.size}
                 WHERE window_start = $start AND host = $rawHost AND device_key = $deviceKey AND revision = $revision""".update.run.void
                   else
                     val host = hosts.head

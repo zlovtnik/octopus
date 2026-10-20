@@ -90,6 +90,24 @@ final class CronScheduler private (
       projectionStore.buildSearchDocuments(batchSize).value
     }
 
+  def proxySearchPreparerStream(
+    batchSize: Int,
+    interval: FiniteDuration,
+    model: String,
+    inputRevision: String,
+    highWater: Int
+  ): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](interval).evalMap { _ =>
+      workRunner
+        .runOnce(ProcessorId.ProxySearchPreparer, (interval * 2L).max(30.seconds)) { lease =>
+          projectionStore.prepareProxySearch(lease, batchSize, model, inputRevision, highWater).value.flatMap {
+            case Right(_) => IO.unit
+            case Left(error) => IO.raiseError(databaseFailure(error))
+          }
+        }
+        .void
+    }
+
   def embeddingJobPreparerStream(
     batchSize: Int,
     interval: FiniteDuration,

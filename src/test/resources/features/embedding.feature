@@ -1,4 +1,4 @@
-@processor-embedding-preparer @processor-embedding-text-builder
+@processor-embedding-preparer @processor-embedding-text-builder @processor-proxy-search-preparer
 Feature: Embedding preparation processor contracts
 
   Scenario Outline: An Octopus embedding processor has its declared durable contract
@@ -10,3 +10,4 @@ Feature: Embedding preparation processor contracts
       | processor              | input                   |
       | embedding-preparer     | search documents        |
       | embedding-text-builder | normalized domain rows  |
+      | proxy-search-preparer  | proxy observations      |

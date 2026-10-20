@@ -2292,6 +2292,326 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
            WHERE destination_topic = 'sync.oracle.load'
              AND status = 'pending'""".update.run.void.transact(xa)
 
+  private def proxyLease: IO[com.sslproxy.coordinator.processor.Lease] =
+    sql"DELETE FROM octopus_core.work_leases WHERE resource_type = 'processor' AND resource_id = 'proxy-search-preparer'".update.run
+      .transact(xa) *>
+      repository
+        .claimMaintenanceLease(
+          "processor",
+          "proxy-search-preparer",
+          "proxy-test",
+          java.util.UUID.randomUUID().toString,
+          60
+        )
+        .map(result => requireRight(result).get)
+
+  test("proxy similarity excludes wireless on both sides and uses independent scope checkpoints") {
+    requireDocker()
+    import com.sslproxy.coordinator.postgres.sql.IntelligenceSql
+    val left = "55229101-31c3-43e2-9f3a-9e236b829bb1"
+    val right = "55229101-31c3-43e2-9f3a-9e236b829bb2"
+    val wireless = "55229101-31c3-43e2-9f3a-9e236b829bb3"
+    val vector = (List("1") ++ List.fill(767)("0")).mkString("[", ",", "]")
+    for
+      _ <- List(left -> "proxy_event", right -> "proxy_event", wireless -> "event").traverse_ { case (id, kind) =>
+        sql"""INSERT INTO atheros_search.search_documents(document_id,source_id,source_key,source_table,source_kind,normalized_text,normalized_sha256,normalization_version)
+          VALUES ($id::uuid,$id,$id,'proxy_events',$kind,'synthetic',encode(sha256(convert_to('synthetic','UTF8')),'hex'),'proxy-authority-v1')""".update.run
+          .transact(xa)
+      }
+      _ <- List(left, right, wireless).traverse_ { id =>
+        (sql"""INSERT INTO atheros_search.search_vectors_event(document_id,embedding_model,content_sha256,embedding,embedded_at)
+          VALUES ($id::uuid,'scope-fixture',encode(sha256(convert_to('synthetic','UTF8')),'hex'),$vector::public.vector,clock_timestamp())""".update.run *>
+          sql"""INSERT INTO atheros_search.embeddings(document_id,embedding_kind,embedding_model,content_sha256,embedding,embedded_at)
+          VALUES ($id::uuid,'event','scope-fixture',encode(sha256(convert_to('synthetic','UTF8')),'hex'),$vector::public.vector,clock_timestamp())""".update.run)
+          .transact(xa)
+      }
+      anchors <- IntelligenceSql.similarityAnchors(IntelligenceSql.VectorKind.Event, 100, "proxy").to[List].transact(xa)
+      candidates <- IntelligenceSql
+        .similarityCandidatesForAnchor(
+          IntelligenceSql.VectorKind.Event,
+          left,
+          "scope-fixture",
+          vector,
+          0.1,
+          100,
+          "proxy"
+        )
+        .to[List]
+        .transact(xa)
+      wrongAnchor <- IntelligenceSql
+        .similarityCandidatesForAnchor(
+          IntelligenceSql.VectorKind.Event,
+          wireless,
+          "scope-fixture",
+          vector,
+          0.1,
+          100,
+          "proxy"
+        )
+        .to[List]
+        .transact(xa)
+      anchor = anchors.find(_._2 == left).get
+      _ <- IntelligenceSql
+        .beginSimilarityAnchor(IntelligenceSql.VectorKind.Event, anchor._1, left, "scope-fixture", anchor._5, "proxy")
+        .transact(xa)
+      _ <- IntelligenceSql
+        .markSimilarityAnchor(IntelligenceSql.VectorKind.Event, anchor._1, anchor._5, "wireless")
+        .transact(xa)
+      stillOpen <-
+        sql"SELECT completed_at IS NULL FROM atheros_search.similarity_scan_state WHERE scope = 'proxy' AND vector_id = ${anchor._1}"
+          .query[Boolean]
+          .unique
+          .transact(xa)
+    yield
+      assert(!anchors.exists(_._2 == wireless))
+      assertEquals(candidates.map(_.rightDocumentId), List(right))
+      assert(wrongAnchor.isEmpty)
+      assert(stillOpen)
+  }
+
+  test("proxy dirty windows preserve legacy source keys and reconcile late observations without text churn") {
+    requireDocker()
+    def insert(id: String, time: String): IO[Unit] =
+      val json = circeParser
+        .parse(s"""{"event_id":"$id","type":"block","time":"$time",
+        "host":"WINDOW.Example:443","authority_raw":"WINDOW.Example:443","authority_source":"connect_authority",
+        "evidence_version":"proxy-evidence-v1","blocked":true,"bytes_up":0,"bytes_down":0}""")
+        .toOption
+        .get
+      val rows =
+        PostgresTransformService.transform(com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents, List(json))
+      schemaTransactor.insertProxyEvents("proxy-window-" + id, rows.proxyEvents, rows.blockedEvents).void
+    for
+      lease <- proxyLease
+      key <- sql"""SELECT CONCAT('proxy-window:', md5(jsonb_build_array('WINDOW.Example:443'::text, ''::text,
+        '2020-01-01T01:00:00Z'::timestamptz)::text))""".query[String].unique.transact(xa)
+      _ <- insert("13229101-31c3-43e2-9f3a-9e236b829bb1", "2020-01-01T01:30:00Z")
+      _ <- (0 until 3).toList.traverse_(_ =>
+        repository.prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000).map(requireRight)
+      )
+      first <-
+        sql"SELECT document_id::text, detail_json::text, host FROM atheros_search.search_documents WHERE source_key = $key AND status = 'active'"
+          .query[(String, String, String)]
+          .unique
+          .transact(xa)
+      _ <- insert("13229101-31c3-43e2-9f3a-9e236b829bb2", "2020-01-01T01:01:00Z")
+      _ <- (0 until 3).toList.traverse_(_ =>
+        repository.prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000).map(requireRight)
+      )
+      corrected <-
+        sql"SELECT document_id::text, detail_json::text FROM atheros_search.search_documents WHERE source_key = $key AND status = 'active'"
+          .query[(String, String)]
+          .unique
+          .transact(xa)
+    yield
+      assertEquals(first._1, corrected._1)
+      assertEquals(first._3, "WINDOW.Example:443")
+      assertEquals(circeParser.parse(first._2).toOption.get.hcursor.get[Int]("observed_blocked_events"), Right(1))
+      assertEquals(circeParser.parse(corrected._2).toOption.get.hcursor.get[Int]("observed_blocked_events"), Right(2))
+      assertEquals(
+        circeParser.parse(corrected._2).toOption.get.hcursor.get[String]("attempts_status"),
+        Right("unknown_coalesced")
+      )
+  }
+
+  test("proxy job reconciliation repairs missing coverage and retains terminal failure history") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val source = ProxyEvidence
+      .source(
+        circeParser.parse("""{"type":"http_proxied","host":"reconcile.example"}""").toOption.get,
+        "proxy-reconcile-fixture",
+        1L,
+        java.sql.Timestamp.from(java.time.Instant.now())
+      )
+      .get
+    val document = SearchDocumentPreparation.prepare(source).toOption.get
+    for
+      lease <- proxyLease
+      _ <- ProxyPreparationSql.persist(lease, source, "nomic-embed-text-v2-moe").transact(xa)
+      _ <- sql"""UPDATE atheros_search.embedding_jobs SET status = 'completed', attempt_count = 1,
+        completed_at = clock_timestamp(), last_error = 'retained historical diagnostic'
+        WHERE document_id = ${document.documentId}::uuid""".update.run.transact(xa)
+      _ <- (0 until 3).toList.traverse_(_ =>
+        repository
+          .prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+          .map(requireRight)
+      )
+      repaired <-
+        sql"SELECT status, attempt_count, last_error FROM atheros_search.embedding_jobs WHERE document_id = ${document.documentId}::uuid"
+          .query[(String, Int, Option[String])]
+          .unique
+          .transact(xa)
+      receipts <-
+        sql"""SELECT count(*) FROM atheros_search.embedding_repair_receipts receipt JOIN atheros_search.embedding_jobs job USING(job_id)
+        WHERE job.document_id = ${document.documentId}::uuid""".query[Long].unique.transact(xa)
+      _ <-
+        sql"UPDATE atheros_search.embedding_jobs SET status = 'failed' WHERE document_id = ${document.documentId}::uuid".update.run
+          .transact(xa)
+      _ <- repository
+        .prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+        .map(requireRight)
+      _ <- repository
+        .prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+        .map(requireRight)
+      terminal <- sql"SELECT status FROM atheros_search.embedding_jobs WHERE document_id = ${document.documentId}::uuid"
+        .query[String]
+        .unique
+        .transact(xa)
+    yield
+      assertEquals(repaired, ("pending", 1, Some("retained historical diagnostic")))
+      assertEquals(receipts, 1L)
+      assertEquals(terminal, "failed")
+  }
+
+  test("proxy preparation preserves replay identity, private evidence boundaries and newer corrections") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val id = "812d9705-2c5a-421e-a977-fb35250101ec"
+    val observed = java.sql.Timestamp.from(java.time.Instant.parse("2026-10-19T12:30:00Z"))
+    val payload = circeParser
+      .parse(s"""{"event_id":"$id","time":"2026-10-19T12:30:00Z",
+      "type":"http_proxied","host":"ChatGPT.com","authority_raw":"ChatGPT.com:8443","authority_source":"http_authority",
+      "evidence_version":"proxy-evidence-v1","classification":"essential_api","bytes_up":0,"bytes_down":0,
+      "peer_ip":"192.0.2.99","wg_pubkey":"private-key","device_id":"private-device"}""")
+      .toOption
+      .get
+    val rows = PostgresTransformService.transform(
+      com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,
+      List(payload)
+    )
+    for
+      lease <- proxyLease
+      _ <- schemaTransactor.insertProxyEvents("proxy-evidence-fixture", rows.proxyEvents, rows.blockedEvents)
+      revision <- sql"SELECT observation_revision FROM octopus_core.proxy_events WHERE event_id = $id"
+        .query[Long]
+        .unique
+        .transact(xa)
+      _ <- schemaTransactor.insertProxyEvents("proxy-evidence-fixture", rows.proxyEvents, rows.blockedEvents)
+      replayRevision <- sql"SELECT observation_revision FROM octopus_core.proxy_events WHERE event_id = $id"
+        .query[Long]
+        .unique
+        .transact(xa)
+      _ <- repository
+        .prepareProxySearch(lease, 100, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)
+        .map(requireRight)
+      first <- sql"""SELECT document_id::text, normalized_text, detail_json::text FROM atheros_search.search_documents
+        WHERE source_key = $id AND status = 'active'""".query[(String, String, String)].unique.transact(xa)
+      published <- sql"SELECT evidence::text FROM atheros_search.proxy_event_evidence WHERE event_id = $id"
+        .query[String]
+        .unique
+        .transact(xa)
+      source = ProxyEvidence
+        .source(payload, id, revision + 1000, observed)
+        .get
+        .copy(detailJson = "{\"correction\":true}")
+      _ <- ProxyPreparationSql.persist(lease, source, "nomic-embed-text-v2-moe").transact(xa)
+      _ <- ProxyPreparationSql
+        .persist(
+          lease,
+          source.copy(evidenceRevision = Some(revision), searchText = "stale old text"),
+          "nomic-embed-text-v2-moe"
+        )
+        .transact(xa)
+      corrected <-
+        sql"""SELECT document_id::text, detail_json::text, evidence_revision FROM atheros_search.search_documents
+        WHERE source_key = $id AND status = 'active'""".query[(String, String, Long)].unique.transact(xa)
+      jobs <- sql"SELECT count(*) FROM atheros_search.embedding_jobs WHERE document_id = ${first._1}::uuid"
+        .query[Long]
+        .unique
+        .transact(xa)
+      _ <-
+        sql"UPDATE octopus_core.work_leases SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE resource_id = 'proxy-search-preparer'".update.run
+          .transact(xa)
+      denied <- ProxyPreparationSql
+        .persist(
+          lease,
+          source.copy(evidenceRevision = Some(revision + 2000), searchText = "expired owner text"),
+          "nomic-embed-text-v2-moe"
+        )
+        .transact(xa)
+        .attempt
+      current <-
+        sql"SELECT document_id::text FROM atheros_search.search_documents WHERE source_key = $id AND status = 'active'"
+          .query[String]
+          .unique
+          .transact(xa)
+    yield
+      assertEquals(revision, replayRevision)
+      assertEquals(first._1, corrected._1)
+      assertEquals(corrected._3, revision + 1000)
+      assert(corrected._2.contains("correction"))
+      assertEquals(jobs, 1L)
+      List("192.0.2.99", "private-key", "private-device").foreach(value =>
+        assert(!first._2.contains(value) && !published.contains(value))
+      )
+      assert(published.contains("chatgpt.com:8443"))
+      assert(denied.isLeft)
+      assertEquals(current, first._1)
+  }
+
+  test("proxy source state, jobs and checkpoints roll back when ownership expires inside a transaction") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val source = ProxyEvidence
+      .source(
+        circeParser.parse("""{"type":"http_proxied","host":"rollback.example"}""").toOption.get,
+        "proxy-rollback-fixture",
+        1L,
+        java.sql.Timestamp.from(java.time.Instant.now())
+      )
+      .get
+    for
+      lease <- proxyLease
+      _ <-
+        sql"UPDATE octopus_core.work_leases SET lease_expires_at = clock_timestamp() + interval '100 milliseconds' WHERE resource_id = 'proxy-search-preparer'".update.run
+          .transact(xa)
+      outcome <- (for
+        _ <- ProxyPreparationSql.persist(lease, source, "nomic-embed-text-v2-moe")
+        _ <- sql"SELECT pg_sleep(0.15)".query[Unit].unique
+        _ <- ProxyPreparationSql.guard(lease)
+      yield ()).transact(xa).attempt
+      count <- sql"SELECT count(*) FROM atheros_search.proxy_document_state WHERE source_key = 'proxy-rollback-fixture'"
+        .query[Long]
+        .unique
+        .transact(xa)
+    yield
+      assert(outcome.isLeft)
+      assertEquals(count, 0L)
+  }
+
+  test("proxy preparation runs with no wireless privileges and honors scoped queue headroom") {
+    requireDocker()
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    for
+      lease <- proxyLease
+      _ <- sql"CREATE ROLE proxy_preparation_contract".update.run.transact(xa)
+      _ <- sql"GRANT USAGE ON SCHEMA octopus_core, atheros_search, public TO proxy_preparation_contract".update.run
+        .transact(xa)
+      _ <-
+        sql"""GRANT SELECT, INSERT, UPDATE, DELETE ON octopus_core.proxy_events, octopus_core.proxy_preparation_dirty,
+        octopus_core.proxy_preparation_progress, octopus_core.proxy_window_dirty, octopus_core.work_leases,
+        atheros_search.proxy_event_evidence, atheros_search.proxy_document_state, atheros_search.search_documents,
+        atheros_search.search_document_tokens, atheros_search.search_document_tags, atheros_search.embedding_jobs,
+        atheros_search.embedding_repair_receipts TO proxy_preparation_contract""".update.run.transact(xa)
+      _ <-
+        sql"GRANT SELECT ON atheros_search.embeddings, atheros_search.search_vectors_event TO proxy_preparation_contract".update.run
+          .transact(xa)
+      _ <-
+        sql"GRANT USAGE, SELECT ON SEQUENCE octopus_core.proxy_window_revision_seq TO proxy_preparation_contract".update.run
+          .transact(xa)
+      result <- (sql"SET LOCAL ROLE proxy_preparation_contract".update.run *>
+        ProxyPreparationSql.tick(lease, 10, "nomic-embed-text-v2-moe", "legacy_unknown", 1000)).transact(xa)
+      limited <- (sql"SET LOCAL ROLE proxy_preparation_contract".update.run *>
+        ProxyPreparationSql.tick(lease, 10, "nomic-embed-text-v2-moe", "legacy_unknown", 1)).transact(xa)
+    yield
+      assert(result <= 10)
+      assertEquals(limited, 0)
+  }
+
   private def requireRight[A](result: Either[DatabaseError, A]): A =
     result.fold(
       error => fail(s"${error.operation}: ${error.message}"),

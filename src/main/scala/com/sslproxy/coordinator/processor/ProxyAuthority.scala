@@ -45,12 +45,12 @@ object ProxyAuthority:
     raw match
       case None | Some("") => base.copy(authority_raw = raw, parse_status = "missing")
       case Some(value) if value.getBytes(StandardCharsets.UTF_8).length > 1024 ||
-          value.exists(Character.isISOControl) || hasUnpairedSurrogate(value) => base
+          value.exists(Character.isISOControl) || hasUnpairedSurrogate(value) || value.contains('@') => base
       case Some(value) =>
         val evidence = base.copy(authority_raw = Some(value))
         if sanitized || value.toLowerCase(Locale.ROOT).startsWith("hmac:") then
           evidence.copy(parse_status = "sanitized", sanitization_status = "sanitized")
-        else if !Sources.contains(source) || value.exists(c => "@/\\?#%".contains(c) ||
+        else if !Sources.contains(source) || value.exists(c => "/\\?#%".contains(c) ||
             Character.isWhitespace(c) || Character.isSpaceChar(c)) then evidence
         else parse(value, evidence)
 

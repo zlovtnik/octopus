@@ -693,6 +693,28 @@ class PostgresRepository(
         .map(_.sum)
     }
 
+  def prepareProxySearch(
+    lease: com.sslproxy.coordinator.processor.Lease,
+    limit: Int,
+    model: String,
+    inputRevision: String,
+    highWater: Int
+  ): IO[Either[DatabaseError, Int]] =
+    runDb("postgres.prepare_proxy_search") {
+      com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql.tick(lease, limit, model, inputRevision, highWater)
+    }.timeoutTo(
+      5.seconds,
+      IO.pure(
+        Left(
+          DatabaseError.Retryable(
+            "postgres.prepare_proxy_search",
+            new java.util.concurrent.TimeoutException("proxy preparation transaction budget exceeded"),
+            "proxy preparation transaction budget exceeded"
+          )
+        )
+      )
+    )
+
   def pendingEmbeddingJobCount: IO[Either[DatabaseError, Long]] =
     runDb("postgres.pending_embedding_job_count") {
       SearchPreparationSql.pendingEmbeddingJobCount.unique

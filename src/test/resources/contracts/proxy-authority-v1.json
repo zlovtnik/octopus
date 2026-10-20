@@ -573,7 +573,7 @@
         "sanitized": false
       },
       "expected": {
-        "authority_raw": "user@example.com",
+        "authority_raw": null,
         "host_raw": null,
         "host_normalized": null,
         "port": null,

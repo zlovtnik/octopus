@@ -17,6 +17,16 @@ private[coordinator] object ScheduledWorkloads:
   ): List[ProcessorWorkload] =
     List(
       ProcessorWorkload(
+        ProcessorId.ProxySearchPreparer,
+        cronScheduler.proxySearchPreparerStream(
+          cfg.processors.batchSize,
+          cfg.processors.intervalSeconds.seconds,
+          cfg.processors.embeddingModel,
+          cfg.processors.proxyInputRevision,
+          cfg.processors.embeddingPendingHighWater
+        )
+      ),
+      ProcessorWorkload(
         ProcessorId.SyncJobPlanner,
         cronScheduler.jobPlanningStream
       ),

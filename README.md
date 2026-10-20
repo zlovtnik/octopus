@@ -108,7 +108,7 @@ state. All 26 entries default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 25 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-audit-projection`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 26 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-audit-projection`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `proxy-search-preparer`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
 There is no Rails/console processor family. The `integration_console` database
@@ -281,9 +281,11 @@ Important gates:
 | `OCTOPUS_PROCESSOR_INTERVAL_SECONDS` | `10` | Periodic search preparation interval |
 | `OCTOPUS_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Only supported model; attached to newly prepared embedding jobs. Other values fail startup validation. |
 | `OCTOPUS_EMBEDDING_PENDING_HIGH_WATER` | `1000000` | Skips embedding job preparation while pending jobs are at or above this many, so the queue cannot grow without bound while workers are behind. `0` disables the guard. |
+| `OCTOPUS_PROXY_INPUT_REVISION` | `legacy_unknown` | Optional artifact/preprocessing identity for `proxy-search-preparer`: `legacy_unknown` or `nomic-prefix-v1:<artifact-sha256>`. Must match the reviewed Search worker/query profile. |
 | `OCTOPUS_EVENT_DUPLICATE_DISTANCE` | `0.05` | Characterized event-vector duplicate distance |
 | `OCTOPUS_BEHAVIOR_SIMILARITY_THRESHOLD` | `0.88` | Characterized behavior similarity threshold |
 | `OCTOPUS_SEQUENCE_DISTANCE_THRESHOLD` | `0.10` | Characterized frame-sequence distance threshold |
+
 | `OCTOPUS_ARCHIVE_ENABLED` | `false` | Required gate for `event-retention` |
 | `MINIO_ENDPOINT` | `http://minio:9000` | S3-compatible archive endpoint |
 | `MINIO_ACCESS_KEY_ID` / `MINIO_SECRET_ACCESS_KEY` | empty | Archive credentials sourced from the runtime secret |
@@ -299,6 +301,25 @@ Important gates:
 | `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `300` | Cache TTL for peak day/week DB aggregates |
 | `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
 
+`proxy-search-preparer` is opt-in and has no wireless processor dependency. It
+atomically publishes safe proxy evidence, prepares versioned proxy documents,
+reconciles current jobs and advances arrival/dirty-source progress under its
+persisted lease. The shared embedding text builder now prepares wireless kinds;
+proxy preparation requires the dedicated fenced path. A positive pending high
+water is mandatory for this processor and counts its proxy pending/leased jobs.
+Each tick caps changed items at 500, processes at most one closed UTC hour with
+at most 500 eligible blocked input observations, and uses five-second statement
+and one-second lock timeouts. Overflow and incomplete-source windows remain
+explicitly parked. Published evidence expires seven days after publication;
+search-document retention retains its existing independent policy.
+
+For a processor-only proxy profile, leave consumers disabled and select only
+`proxy-search-preparer`. Enabling consumers still unions the documented wireless
+consumer IDs; it does not establish a proxy-only intake. Shared threat,
+similarity, retention and reconciliation processors are separate opt-ins.
+Production activation requires measured capacity and backend preprocessing
+evidence; this code does not change the broker-drain profile.
+
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
 `POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
@@ -309,7 +330,7 @@ warn-only schema validation, and invalid consumer-group contracts.
 
 The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
 `OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
-processor catalog lists the 20 non-Kafka processor IDs; the remaining
+processor catalog lists the 21 non-Kafka processor IDs; the remaining
 four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
 is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
 is all 24 Octopus-owned processors.

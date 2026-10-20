@@ -105,7 +105,10 @@ final case class SimilarityCandidate(
   rightSensorId: Option[String],
   rightLocationId: Option[String],
   rightObservedAt: Option[Timestamp],
-  cosineDistance: Double
+  cosineDistance: Double,
+  scope: String = "wireless",
+  inputRevision: String = "legacy_unknown",
+  normalizationVersion: String = "legacy_unknown"
 )
 
 final case class SimilarityProjection(
@@ -272,7 +275,17 @@ object IntelligencePreparation:
       val ordered = Vector(candidate.leftDocumentId, candidate.rightDocumentId).sorted
       val pairId = ProjectionFunctions.stableId(
         "similarity-pair",
-        Vector(candidate.pairKind, candidate.embeddingModel) ++ ordered
+        (if candidate.scope == "wireless" && candidate.inputRevision == "legacy_unknown" && candidate.normalizationVersion == "legacy_unknown"
+         then Vector(candidate.pairKind, candidate.embeddingModel)
+         else
+           Vector(
+             candidate.scope,
+             candidate.inputRevision,
+             candidate.normalizationVersion,
+             candidate.pairKind,
+             candidate.embeddingModel
+           )
+        ) ++ ordered
       )
       Right(
         SimilarityProjection(

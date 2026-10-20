@@ -79,7 +79,8 @@ final case class ProxyEventInsert(
   eventSequence: Option[Long],
   durationMs: Option[Long],
   reason: Option[String],
-  rawJson: String
+  rawJson: String,
+  evidence: String = "{}"
 )
 
 final case class BlockedEventInsert(

@@ -181,8 +181,15 @@ object IntelligenceSql:
 
   def similarityAnchors(
     kind: VectorKind,
-    limit: Int
+    limit: Int,
+    scope: String = "wireless",
+    inputRevision: String = "legacy_unknown",
+    normalizationVersion: String = ""
   ): Query0[(Long, String, String, String, java.sql.Timestamp)] =
+    val normVersion =
+      if normalizationVersion.nonEmpty then normalizationVersion
+      else if scope == "proxy" then com.sslproxy.coordinator.processor.ProxyAuthority.Version
+      else "legacy_unknown"
     val vectorTable = Fragment.const(s" atheros_search.${kind.table} vector ")
     val embeddingKind = kind.embeddingKind
     val batchLimit = limit.max(1)
@@ -193,11 +200,17 @@ object IntelligenceSql:
              ON document.document_id = vector.document_id
             AND document.status = 'active'
            LEFT JOIN atheros_search.similarity_scan_state scanned
-             ON scanned.embedding_kind = $embeddingKind
-            AND scanned.vector_id = vector.vector_id
-           WHERE scanned.vector_id IS NULL
+             ON scanned.embedding_kind = $embeddingKind AND scanned.scope = $scope AND scanned.input_revision = $inputRevision
+            AND scanned.vector_id = vector.vector_id AND scanned.normalization_version = $normVersion
+           WHERE (scanned.vector_id IS NULL
               OR scanned.embedded_at < vector.embedded_at
-              OR scanned.completed_at IS NULL
+              OR scanned.completed_at IS NULL)
+             AND vector.content_sha256 = document.normalized_sha256
+             AND document.normalization_version = $normVersion
+             AND vector.input_revision = document.input_revision AND vector.input_revision = $inputRevision
+             AND document.normalized_sha256 = encode(sha256(convert_to(document.normalized_text, 'UTF8')), 'hex')
+             AND (CASE WHEN $scope = 'proxy' THEN document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+                       WHEN $scope = 'wireless' THEN document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window') ELSE FALSE END)
            ORDER BY vector.vector_id
            LIMIT $batchLimit""").query[(Long, String, String, String, java.sql.Timestamp)]
 
@@ -206,14 +219,21 @@ object IntelligenceSql:
     vectorId: Long,
     documentId: String,
     embeddingModel: String,
-    embeddedAt: java.sql.Timestamp
+    embeddedAt: java.sql.Timestamp,
+    scope: String = "wireless",
+    inputRevision: String = "legacy_unknown",
+    normalizationVersion: String = ""
   ): ConnectionIO[Unit] =
+    val normVersion =
+      if normalizationVersion.nonEmpty then normalizationVersion
+      else if scope == "proxy" then com.sslproxy.coordinator.processor.ProxyAuthority.Version
+      else "legacy_unknown"
     val embeddingKind = kind.embeddingKind
     val pairKind = kind.pairKind
     sql"""INSERT INTO atheros_search.similarity_scan_state (
-             embedding_kind, vector_id, embedded_at, scan_started_at, completed_at
-           ) VALUES ($embeddingKind, $vectorId, $embeddedAt, CURRENT_TIMESTAMP, NULL)
-           ON CONFLICT (embedding_kind, vector_id) DO UPDATE SET
+             embedding_kind, vector_id, embedded_at, scan_started_at, completed_at, scope, input_revision, normalization_version
+           ) VALUES ($embeddingKind, $vectorId, $embeddedAt, CURRENT_TIMESTAMP, NULL, $scope, $inputRevision, $normVersion)
+           ON CONFLICT (scope, input_revision, normalization_version, embedding_kind, vector_id) DO UPDATE SET
              embedded_at = EXCLUDED.embedded_at,
              scan_started_at = CURRENT_TIMESTAMP,
              completed_at = NULL
@@ -222,16 +242,29 @@ object IntelligenceSql:
         if restarted == 0 then ().pure[ConnectionIO]
         else sql"""DELETE FROM atheros_search.similarity_pairs
                  WHERE pair_kind = $pairKind
+                   AND scope = $scope AND input_revision = $inputRevision AND normalization_version = $normVersion
                    AND embedding_model = $embeddingModel
                    AND (left_document_id = CAST($documentId AS uuid)
                      OR right_document_id = CAST($documentId AS uuid))""".update.run.void
     }
 
-  def markSimilarityAnchor(kind: VectorKind, vectorId: Long, embeddedAt: java.sql.Timestamp): ConnectionIO[Int] =
+  def markSimilarityAnchor(
+    kind: VectorKind,
+    vectorId: Long,
+    embeddedAt: java.sql.Timestamp,
+    scope: String = "wireless",
+    inputRevision: String = "legacy_unknown",
+    normalizationVersion: String = ""
+  ): ConnectionIO[Int] =
+    val normVersion =
+      if normalizationVersion.nonEmpty then normalizationVersion
+      else if scope == "proxy" then com.sslproxy.coordinator.processor.ProxyAuthority.Version
+      else "legacy_unknown"
     val embeddingKind = kind.embeddingKind
     sql"""UPDATE atheros_search.similarity_scan_state
            SET completed_at = CURRENT_TIMESTAMP
            WHERE embedding_kind = $embeddingKind
+             AND scope = $scope AND input_revision = $inputRevision AND normalization_version = $normVersion
              AND vector_id = $vectorId
              AND embedded_at = $embeddedAt
              AND completed_at IS NULL""".update.run
@@ -242,8 +275,15 @@ object IntelligenceSql:
     anchorEmbeddingModel: String,
     anchorEmbedding: String,
     maximumDistance: Double,
-    limit: Int
+    limit: Int,
+    scope: String = "wireless",
+    inputRevision: String = "legacy_unknown",
+    normalizationVersion: String = ""
   ): Query0[SimilarityCandidate] =
+    val normVersion =
+      if normalizationVersion.nonEmpty then normalizationVersion
+      else if scope == "proxy" then com.sslproxy.coordinator.processor.ProxyAuthority.Version
+      else "legacy_unknown"
     val vectorTable = Fragment.const(s" atheros_search.${kind.table} ")
     val pairKind = kind.pairKind
     val embeddingKind = kind.embeddingKind
@@ -256,7 +296,7 @@ object IntelligenceSql:
                   left_document.sensor_id, left_document.location_id, left_document.observed_at,
                   right_document.source_table, right_document.source_key, right_document.source_mac,
                   right_document.sensor_id, right_document.location_id, right_document.observed_at,
-                  right_vector.cosine_distance
+                  right_vector.cosine_distance, $scope, $inputRevision, $normVersion
            FROM (
              SELECT candidate.vector_id, candidate.document_id,
                     candidate.embedding_model,
@@ -267,9 +307,29 @@ object IntelligenceSql:
               AND candidate_document.status = 'active'
              WHERE candidate.document_id <> CAST($anchorDocumentId AS uuid)
                AND candidate.embedding_model = $anchorEmbeddingModel
+               AND candidate.content_sha256 = candidate_document.normalized_sha256
+               AND candidate_document.normalization_version = $normVersion
+               AND candidate.input_revision = candidate_document.input_revision AND candidate.input_revision = $inputRevision
+               AND candidate_document.normalized_sha256 = encode(sha256(convert_to(candidate_document.normalized_text, 'UTF8')), 'hex')
+               AND EXISTS (SELECT 1 FROM atheros_search.embeddings anchor_vector
+                 JOIN atheros_search.search_documents anchor_current ON anchor_current.document_id = anchor_vector.document_id
+                 WHERE anchor_vector.document_id = CAST($anchorDocumentId AS uuid)
+                   AND anchor_current.status = 'active' AND anchor_vector.content_sha256 = anchor_current.normalized_sha256
+                   AND anchor_vector.embedding_kind = $embeddingKind AND anchor_vector.embedding_model = $anchorEmbeddingModel
+                   AND anchor_vector.input_revision = $inputRevision AND anchor_vector.input_revision = anchor_current.input_revision
+                   AND anchor_vector.embedding::text = CAST($anchorEmbedding AS public.vector)::text)
+               AND EXISTS (SELECT 1 FROM atheros_search.search_documents anchor_document
+                 WHERE anchor_document.document_id = CAST($anchorDocumentId AS uuid) AND anchor_document.status = 'active'
+                   AND anchor_document.input_revision = $inputRevision
+                   AND anchor_document.normalization_version = candidate_document.normalization_version
+                   AND (CASE WHEN $scope = 'proxy' THEN anchor_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+                             AND candidate_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+                             WHEN $scope = 'wireless' THEN anchor_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window')
+                             AND candidate_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window') ELSE FALSE END))
                AND NOT EXISTS (
                  SELECT 1 FROM atheros_search.similarity_pairs pair
                  WHERE pair.pair_kind = $pairKind
+                   AND pair.scope = $scope AND pair.input_revision = $inputRevision AND pair.normalization_version = $normVersion
                    AND pair.embedding_model = $anchorEmbeddingModel
                    AND (
                      (pair.left_document_id = CAST($anchorDocumentId AS uuid)
@@ -460,7 +520,7 @@ object IntelligenceSql:
              right_source_table, right_source_key, right_source_mac, right_sensor_id,
              right_location_id, right_observed_at,
              cosine_distance, cosine_similarity, pair_rank, evidence,
-             computed_at, projection_run_id
+             computed_at, projection_run_id, scope, input_revision, normalization_version
            ) VALUES (
              ${value.pairId}, ${candidate.pairKind}, ${candidate.embeddingModel},
              ${candidate.embeddingKind}, ${candidate.leftDocumentId}, ${candidate.rightDocumentId},
@@ -469,8 +529,8 @@ object IntelligenceSql:
              ${candidate.rightSourceTable}, ${candidate.rightSourceKey}, ${candidate.rightSourceMac},
              ${candidate.rightSensorId}, ${candidate.rightLocationId}, ${candidate.rightObservedAt},
              ${candidate.cosineDistance}, ${value.cosineSimilarity}, 1,
-             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId}
-           ) ON CONFLICT (pair_kind, embedding_model, left_document_id, right_document_id) DO UPDATE SET
+             CAST(${value.evidenceJson} AS JSON), CURRENT_TIMESTAMP, ${value.projectionRunId}, ${candidate.scope}, ${candidate.inputRevision}, ${candidate.normalizationVersion}
+           ) ON CONFLICT (scope, input_revision, normalization_version, pair_kind, embedding_model, left_document_id, right_document_id) DO UPDATE SET
              cosine_distance = EXCLUDED.cosine_distance,
              cosine_similarity = EXCLUDED.cosine_similarity,
              evidence = EXCLUDED.evidence,

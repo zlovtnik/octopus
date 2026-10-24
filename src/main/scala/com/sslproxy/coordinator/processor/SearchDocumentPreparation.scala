@@ -44,7 +44,11 @@ final case class SearchDocumentSource(
   blocked: Option[Boolean] = None,
   classification: Option[String] = None,
   windowStart: Option[java.sql.Timestamp] = None,
-  windowEnd: Option[java.sql.Timestamp] = None
+  windowEnd: Option[java.sql.Timestamp] = None,
+  evidenceRevision: Option[Long] = None,
+  templateVersion: String = "legacy_unknown",
+  normalizationVersion: String = "legacy_unknown",
+  inputRevision: String = "legacy_unknown"
 )
 
 final case class PreparedSearchDocument(
@@ -73,7 +77,11 @@ final case class PreparedSearchDocument(
   blocked: Option[Boolean] = None,
   classification: Option[String] = None,
   windowStart: Option[java.sql.Timestamp] = None,
-  windowEnd: Option[java.sql.Timestamp] = None
+  windowEnd: Option[java.sql.Timestamp] = None,
+  evidenceRevision: Option[Long] = None,
+  templateVersion: String = "legacy_unknown",
+  normalizationVersion: String = "legacy_unknown",
+  inputRevision: String = "legacy_unknown"
 )
 
 object SearchDocumentPreparation:
@@ -101,7 +109,7 @@ object SearchDocumentPreparation:
         source.bssid.map("bssid" -> _),
         source.ssid.map("ssid" -> _),
         source.frameSubtype.map("frame_subtype" -> _),
-        source.host.map("host" -> _),
+        source.host.filter(_.length <= 255).map("host" -> _),
         source.proxyDeviceId.map("proxy_device_id" -> _),
         source.proxyEventType.map("proxy_event_type" -> _),
         source.classification.map("classification" -> _),
@@ -142,7 +150,11 @@ object SearchDocumentPreparation:
           blocked = source.blocked,
           classification = source.classification,
           windowStart = source.windowStart,
-          windowEnd = source.windowEnd
+          windowEnd = source.windowEnd,
+          evidenceRevision = source.evidenceRevision,
+          templateVersion = source.templateVersion,
+          normalizationVersion = source.normalizationVersion,
+          inputRevision = source.inputRevision
         )
       )
 

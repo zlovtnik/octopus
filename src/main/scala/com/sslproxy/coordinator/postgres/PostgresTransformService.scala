@@ -95,7 +95,8 @@ object PostgresTransformService:
       eventSequence = optionalLong(row, "event_sequence"),
       durationMs = optionalLong(row, "duration_ms"),
       reason = optionalString(row, "reason"),
-      rawJson = raw
+      rawJson = raw,
+      evidence = com.sslproxy.coordinator.processor.ProxyEvidence.normalized(row).noSpaces
     )
 
   private def transformProxyPayloadAudit(rows: List[Json]): List[ProxyPayloadAuditInsert] =

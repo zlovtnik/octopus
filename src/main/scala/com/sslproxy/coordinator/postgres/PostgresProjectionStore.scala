@@ -5,6 +5,14 @@ import cats.effect.IO
 import com.sslproxy.coordinator.persistence.{DbResultT, ProjectionStore}
 
 final class PostgresProjectionStore(repository: PostgresRepository) extends ProjectionStore[IO]:
+  def prepareProxySearch(
+    lease: com.sslproxy.coordinator.processor.Lease,
+    limit: Int,
+    model: String,
+    inputRevision: String,
+    highWater: Int
+  ): DbResultT[IO, Int] =
+    EitherT(repository.prepareProxySearch(lease, limit, model, inputRevision, highWater))
   def generateRfAlerts(limit: Int): DbResultT[IO, List[String]] =
     EitherT(repository.generateShadowAlerts(limit))
 
@@ -39,14 +47,16 @@ final class PostgresProjectionStore(repository: PostgresRepository) extends Proj
     limit: Int,
     eventDuplicateDistance: Double,
     behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
+    sequenceDistanceThreshold: Double,
+    proxyInputRevision: String = "legacy_unknown"
   ): DbResultT[IO, Int] =
     EitherT(
       repository.projectSimilarities(
         limit,
         eventDuplicateDistance,
         behaviorSimilarityThreshold,
-        sequenceDistanceThreshold
+        sequenceDistanceThreshold,
+        proxyInputRevision
       )
     )
 

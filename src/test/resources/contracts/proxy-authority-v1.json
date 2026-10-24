@@ -1,0 +1,1229 @@
+{
+  "version": "proxy-authority-v1",
+  "idna_unicode_version": "15.0.0",
+  "psl_commit": "52b71b3c4576ff77450cc7ebcfc7f34a916af3f9",
+  "psl_sha256": "3d92f70d719426d7e82dc4aee181058d0ad570d2559f0ea3ece8e731a25e5f33",
+  "private_suffixes": true,
+  "cases": [
+    {
+      "id": "mixed-case-explicit-default",
+      "input": {
+        "authority": "ChatGPT.com:443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "ChatGPT.com:443",
+        "host_raw": "ChatGPT.com",
+        "host_normalized": "chatgpt.com",
+        "port": 443,
+        "authority_normalized": "chatgpt.com:443",
+        "registrable_domain": "chatgpt.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "nondefault",
+      "input": {
+        "authority": "example.com:8443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:8443",
+        "host_raw": "example.com",
+        "host_normalized": "example.com",
+        "port": 8443,
+        "authority_normalized": "example.com:8443",
+        "registrable_domain": "example.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "absent-port",
+      "input": {
+        "authority": "example.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com",
+        "host_raw": "example.com",
+        "host_normalized": "example.com",
+        "port": null,
+        "authority_normalized": "example.com",
+        "registrable_domain": "example.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "root-dot",
+      "input": {
+        "authority": "example.co.uk.",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.co.uk.",
+        "host_raw": "example.co.uk.",
+        "host_normalized": "example.co.uk",
+        "port": null,
+        "authority_normalized": "example.co.uk",
+        "registrable_domain": "example.co.uk",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unicode",
+      "input": {
+        "authority": "b\u00fccher.de",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "b\u00fccher.de",
+        "host_raw": "b\u00fccher.de",
+        "host_normalized": "xn--bcher-kva.de",
+        "port": null,
+        "authority_normalized": "xn--bcher-kva.de",
+        "registrable_domain": "xn--bcher-kva.de",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "punycode",
+      "input": {
+        "authority": "xn--bcher-kva.de",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "xn--bcher-kva.de",
+        "host_raw": "xn--bcher-kva.de",
+        "host_normalized": "xn--bcher-kva.de",
+        "port": null,
+        "authority_normalized": "xn--bcher-kva.de",
+        "registrable_domain": "xn--bcher-kva.de",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "nontransitional",
+      "input": {
+        "authority": "fa\u00df.de",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "fa\u00df.de",
+        "host_raw": "fa\u00df.de",
+        "host_normalized": "xn--fa-hia.de",
+        "port": null,
+        "authority_normalized": "xn--fa-hia.de",
+        "registrable_domain": "xn--fa-hia.de",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unicode-dot",
+      "input": {
+        "authority": "WWW\u3002Example.COM",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "WWW\u3002Example.COM",
+        "host_raw": "WWW\u3002Example.COM",
+        "host_normalized": "www.example.com",
+        "port": null,
+        "authority_normalized": "www.example.com",
+        "registrable_domain": "example.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "private-blogspot",
+      "input": {
+        "authority": "alice.blogspot.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "alice.blogspot.com",
+        "host_raw": "alice.blogspot.com",
+        "host_normalized": "alice.blogspot.com",
+        "port": null,
+        "authority_normalized": "alice.blogspot.com",
+        "registrable_domain": "alice.blogspot.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "private-github",
+      "input": {
+        "authority": "a.github.io",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a.github.io",
+        "host_raw": "a.github.io",
+        "host_normalized": "a.github.io",
+        "port": null,
+        "authority_normalized": "a.github.io",
+        "registrable_domain": "a.github.io",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "public-suffix-only",
+      "input": {
+        "authority": "co.uk",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "co.uk",
+        "host_raw": "co.uk",
+        "host_normalized": "co.uk",
+        "port": null,
+        "authority_normalized": "co.uk",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "private-suffix-only",
+      "input": {
+        "authority": "github.io",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "github.io",
+        "host_raw": "github.io",
+        "host_normalized": "github.io",
+        "port": null,
+        "authority_normalized": "github.io",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "psl-wildcard",
+      "input": {
+        "authority": "a.b.ck",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a.b.ck",
+        "host_raw": "a.b.ck",
+        "host_normalized": "a.b.ck",
+        "port": null,
+        "authority_normalized": "a.b.ck",
+        "registrable_domain": "a.b.ck",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "psl-exception",
+      "input": {
+        "authority": "www.ck",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "www.ck",
+        "host_raw": "www.ck",
+        "host_normalized": "www.ck",
+        "port": null,
+        "authority_normalized": "www.ck",
+        "registrable_domain": "www.ck",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "psl-japan-exception",
+      "input": {
+        "authority": "a.city.kawasaki.jp",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a.city.kawasaki.jp",
+        "host_raw": "a.city.kawasaki.jp",
+        "host_normalized": "a.city.kawasaki.jp",
+        "port": null,
+        "authority_normalized": "a.city.kawasaki.jp",
+        "registrable_domain": "city.kawasaki.jp",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unknown-tld",
+      "input": {
+        "authority": "a.example.invalid",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a.example.invalid",
+        "host_raw": "a.example.invalid",
+        "host_normalized": "a.example.invalid",
+        "port": null,
+        "authority_normalized": "a.example.invalid",
+        "registrable_domain": "example.invalid",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "single-label",
+      "input": {
+        "authority": "localhost",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "localhost",
+        "host_raw": "localhost",
+        "host_normalized": "localhost",
+        "port": null,
+        "authority_normalized": "localhost",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "ipv4",
+      "input": {
+        "authority": "192.0.2.1:443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "192.0.2.1:443",
+        "host_raw": "192.0.2.1",
+        "host_normalized": "192.0.2.1",
+        "port": 443,
+        "authority_normalized": "192.0.2.1:443",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv4",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "ipv6-bracket",
+      "input": {
+        "authority": "[2001:db8::1]:443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[2001:db8::1]:443",
+        "host_raw": "2001:db8::1",
+        "host_normalized": "2001:db8::1",
+        "port": 443,
+        "authority_normalized": "[2001:db8::1]:443",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv6",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "ipv6-bare",
+      "input": {
+        "authority": "2001:db8::1",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "2001:db8::1",
+        "host_raw": "2001:db8::1",
+        "host_normalized": "2001:db8::1",
+        "port": null,
+        "authority_normalized": "[2001:db8::1]",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv6",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "bare-ipv6-last-group-not-port",
+      "input": {
+        "authority": "2001:db8::1:443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "2001:db8::1:443",
+        "host_raw": "2001:db8::1:443",
+        "host_normalized": "2001:db8::1:443",
+        "port": null,
+        "authority_normalized": "[2001:db8::1:443]",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv6",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "ipv6-case-compress",
+      "input": {
+        "authority": "[2001:0DB8:0:0:1:0:0:1]",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[2001:0DB8:0:0:1:0:0:1]",
+        "host_raw": "2001:0DB8:0:0:1:0:0:1",
+        "host_normalized": "2001:db8::1:0:0:1",
+        "port": null,
+        "authority_normalized": "[2001:db8::1:0:0:1]",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv6",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "ipv6-mapped",
+      "input": {
+        "authority": "[::ffff:192.0.2.1]",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[::ffff:192.0.2.1]",
+        "host_raw": "::ffff:192.0.2.1",
+        "host_normalized": "::ffff:c000:201",
+        "port": null,
+        "authority_normalized": "[::ffff:c000:201]",
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_ipv6",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "port-leading-zero",
+      "input": {
+        "authority": "example.com:00443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:00443",
+        "host_raw": "example.com",
+        "host_normalized": "example.com",
+        "port": 443,
+        "authority_normalized": "example.com:443",
+        "registrable_domain": "example.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "sanitized-marker",
+      "input": {
+        "authority": "hmac:deadbeef",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "hmac:deadbeef",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "sanitized",
+        "authority_source": "query",
+        "sanitization_status": "sanitized"
+      }
+    },
+    {
+      "id": "sanitized-flag",
+      "input": {
+        "authority": "redacted.example",
+        "source": "query",
+        "sanitized": true
+      },
+      "expected": {
+        "authority_raw": "redacted.example",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "sanitized",
+        "authority_source": "query",
+        "sanitization_status": "sanitized"
+      }
+    },
+    {
+      "id": "missing",
+      "input": {
+        "authority": null,
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": null,
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "missing",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "empty",
+      "input": {
+        "authority": "",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "missing",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-28",
+      "input": {
+        "authority": "user@example.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": null,
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-29",
+      "input": {
+        "authority": "example.com/path",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com/path",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-30",
+      "input": {
+        "authority": "https://example.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "https://example.com",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-31",
+      "input": {
+        "authority": "example.com?x",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com?x",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-32",
+      "input": {
+        "authority": "example.com#x",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com#x",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-33",
+      "input": {
+        "authority": "a\\b.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a\\b.com",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-34",
+      "input": {
+        "authority": " example.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": " example.com",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-35",
+      "input": {
+        "authority": "example.com ",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com ",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-36",
+      "input": {
+        "authority": "example.com:0",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:0",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-37",
+      "input": {
+        "authority": "example.com:65536",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:65536",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-38",
+      "input": {
+        "authority": "example.com:",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-39",
+      "input": {
+        "authority": "example.com:+443",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:+443",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-40",
+      "input": {
+        "authority": "example.com:\uff14\uff14\uff13",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com:\uff14\uff14\uff13",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-41",
+      "input": {
+        "authority": "[::1",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[::1",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-42",
+      "input": {
+        "authority": "[::1]tail",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[::1]tail",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-43",
+      "input": {
+        "authority": "[fe80::1%eth0]",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[fe80::1%eth0]",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-44",
+      "input": {
+        "authority": "-a.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "-a.com",
+        "host_raw": "-a.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-45",
+      "input": {
+        "authority": "a_.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a_.com",
+        "host_raw": "a_.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-46",
+      "input": {
+        "authority": "a..com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a..com",
+        "host_raw": "a..com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-47",
+      "input": {
+        "authority": "example.com..",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com..",
+        "host_raw": "example.com..",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-48",
+      "input": {
+        "authority": "xn--.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "xn--.com",
+        "host_raw": "xn--.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-49",
+      "input": {
+        "authority": "01.2.3.4",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "01.2.3.4",
+        "host_raw": "01.2.3.4",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-50",
+      "input": {
+        "authority": "256.2.3.4",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "256.2.3.4",
+        "host_raw": "256.2.3.4",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-51",
+      "input": {
+        "authority": "[192.0.2.1]",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[192.0.2.1]",
+        "host_raw": "192.0.2.1",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-52",
+      "input": {
+        "authority": "2001:db8::1:65536",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "2001:db8::1:65536",
+        "host_raw": "2001:db8::1:65536",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-53",
+      "input": {
+        "authority": "[gggg::1]",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "[gggg::1]",
+        "host_raw": "gggg::1",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-54",
+      "input": {
+        "authority": "a\u200db.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "a\u200db.com",
+        "host_raw": "a\u200db.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "invalid-host-55",
+      "input": {
+        "authority": "\u05d0a.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "\u05d0a.com",
+        "host_raw": "\u05d0a.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unsafe-56",
+      "input": {
+        "authority": "bad\nhost",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": null,
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unsafe-57",
+      "input": {
+        "authority": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": null,
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "maximum-dns-label",
+      "input": {
+        "authority": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "host_raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "host_normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "port": null,
+        "authority_normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "registrable_domain": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "valid_dns",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "oversize-dns-label",
+      "input": {
+        "authority": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "source": "query",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "host_raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "query",
+        "sanitization_status": "not_sanitized"
+      }
+    },
+    {
+      "id": "unknown-source",
+      "input": {
+        "authority": "example.com",
+        "source": "untrusted",
+        "sanitized": false
+      },
+      "expected": {
+        "authority_raw": "example.com",
+        "host_raw": null,
+        "host_normalized": null,
+        "port": null,
+        "authority_normalized": null,
+        "registrable_domain": null,
+        "normalization_version": "proxy-authority-v1",
+        "parse_status": "invalid",
+        "authority_source": "untrusted",
+        "sanitization_status": "not_sanitized"
+      }
+    }
+  ]
+}

@@ -15,10 +15,14 @@ object BatchSinkSql:
       |  registered_device_id, bytes_up, bytes_down, status_code, blocked, classification,
       |  correlation_id, causation_id, payload, batch_id, row_sequence, event_timestamp_utc,
       |  wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
-      |  obfuscation_profile, event_sequence, duration_ms, reason, raw_json
-      |) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS uuid), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      |  obfuscation_profile, event_sequence, duration_ms, reason, raw_json, evidence
+      |) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS uuid), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
       |  ON CONFLICT (event_id) DO NOTHING
-      |  RETURNING event_id
+      |  RETURNING event_id, observation_revision
+      |), dirty AS (
+      | INSERT INTO proxy_preparation_dirty(event_id, source_revision)
+      | SELECT event_id, observation_revision FROM inserted_event
+      | ON CONFLICT(event_id) DO UPDATE SET source_revision = GREATEST(proxy_preparation_dirty.source_revision, EXCLUDED.source_revision), updated_at = CURRENT_TIMESTAMP
       |)
       |INSERT INTO proxy_blocked_host_rollups (
       |  host, blocked_attempts, blocked_bytes, frequency_hz, verdict, category,

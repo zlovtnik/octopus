@@ -56,6 +56,8 @@ enum ProcessorId(
       extends ProcessorId("embedding-lease-recovery", ProcessorOwner.AtherosSearch, ProcessorFamily.Embedding)
   case EmbeddingTextBuilder
       extends ProcessorId("embedding-text-builder", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
+  case ProxySearchPreparer
+      extends ProcessorId("proxy-search-preparer", ProcessorOwner.Octopus, ProcessorFamily.Embedding)
   case RfAlertProjector
       extends ProcessorId("rf-alert-projector", ProcessorOwner.Octopus, ProcessorFamily.SearchProjection)
   case EventRetention extends ProcessorId("event-retention", ProcessorOwner.Octopus, ProcessorFamily.Maintenance)
@@ -89,6 +91,7 @@ object ProcessorId:
     ProcessorId.EmbeddingCompleter,
     ProcessorId.EmbeddingLeaseRecovery,
     ProcessorId.EmbeddingTextBuilder,
+    ProcessorId.ProxySearchPreparer,
     ProcessorId.RfAlertProjector,
     ProcessorId.EventRetention,
     ProcessorId.SearchRetention,
@@ -317,6 +320,16 @@ object ProcessorCatalog:
       "embedding job",
       "park invalid source",
       "missing-job scan"
+    ),
+    periodic(
+      ProcessorId.ProxySearchPreparer,
+      List("proxy observations"),
+      List("proxy_event_evidence", "search_documents", "embedding_jobs"),
+      Nil,
+      "source/revision/input-revision",
+      "proxy preparation",
+      "retain terminal dispositions",
+      "bounded arrival and dirty-source scan"
     ),
     continuous(
       ProcessorId.EmbeddingCompleter,

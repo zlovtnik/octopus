@@ -148,6 +148,7 @@ final case class ProcessorConfig(
   intervalSeconds: Int = 10,
   embeddingModel: String = "nomic-embed-text-v2-moe",
   embeddingPendingHighWater: Int = 1000000,
+  proxyInputRevision: String = "legacy_unknown",
   eventDuplicateDistance: Double = 0.05d,
   behaviorSimilarityThreshold: Double = 0.88d,
   sequenceDistanceThreshold: Double = 0.10d
@@ -318,6 +319,16 @@ object AppConfig:
       ),
       Option.when(config.embeddingPendingHighWater < 0)(
         "processors.embedding-pending-high-water must not be negative"
+      ),
+      Option.when(config.enabled.contains("proxy-search-preparer") && config.embeddingPendingHighWater <= 0)(
+        "proxy-search-preparer requires a positive embedding-pending-high-water"
+      ),
+      Option.when(
+        config.proxyInputRevision != "legacy_unknown" && !config.proxyInputRevision.matches(
+          "nomic-prefix-v1:[0-9a-f]{64}"
+        )
+      )(
+        "processors.proxy-input-revision must be legacy_unknown or nomic-prefix-v1:<artifact-sha256>"
       ),
       Option.when(
         !config.eventDuplicateDistance.isFinite || config.eventDuplicateDistance < 0.0d || config.eventDuplicateDistance > 2.0d

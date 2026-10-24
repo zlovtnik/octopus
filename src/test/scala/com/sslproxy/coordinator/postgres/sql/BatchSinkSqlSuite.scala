@@ -73,7 +73,7 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("CAST(? AS jsonb)"))
     assert(statement.contains("ON CONFLICT (event_id) DO NOTHING"))
     assert(statement.contains("FROM inserted_event"))
-    assertEquals(statement.count(_ == '?'), 47)
+    assertEquals(statement.count(_ == '?'), 48)
 
   test("blocked host rollup conflict expressions qualify the target table"):
     val statement = BatchSinkSql.InsertProxyEvents

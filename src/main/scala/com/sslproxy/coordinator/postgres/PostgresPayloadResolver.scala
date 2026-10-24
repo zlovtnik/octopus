@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
 import com.sslproxy.coordinator.domain.{ResolvedScanRequestRecord, ScanRequestRecord}
+import com.sslproxy.coordinator.util.PayloadJsonInspection
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -10,17 +11,19 @@ class PostgresPayloadResolver(syncOutboxDir: String):
 
   def resolve(record: ScanRequestRecord): ResolvedScanRequestRecord =
     ResolvedScanRequestRecord
-      .from(record, resolvePayload(record.payloadRef))
+      .from(record, readPayload(record.payloadRef))
       .fold(throw _, identity)
 
   def resolvePayload(payloadRef: String): String =
+    val payload = readPayload(payloadRef)
+    PayloadJsonInspection.inspect(payload).fold(throw _, _ => payload)
+
+  private def readPayload(payloadRef: String): String =
     val ref = if payloadRef == null then "" else payloadRef
     if ref.startsWith("inline://json/") then
       val encoded = ref.substring("inline://json/".length())
       val bytes = Base64.getUrlDecoder.decode(paddedBase64(encoded))
-      val payload = new String(bytes, StandardCharsets.UTF_8)
-      validateJson(payload)
-      payload
+      new String(bytes, StandardCharsets.UTF_8)
     else if ref.startsWith("outbox://") then resolveOutbox(ref.substring("outbox://".length()))
     else throw new IllegalArgumentException(s"unsupported payload_ref scheme: $ref")
 
@@ -35,17 +38,13 @@ class PostgresPayloadResolver(syncOutboxDir: String):
       if !unresolved.startsWith(outboxBase) then throw new IllegalArgumentException("invalid outbox path escapes base")
       val resolved = unresolved.toRealPath()
       if !resolved.startsWith(outboxBase) then throw new IllegalArgumentException("invalid outbox path escapes base")
-      val payload = java.nio.file.Files.readString(resolved)
-      validateJson(payload)
-      payload // returned after successful validation
+      java.nio.file.Files.readString(resolved)
     catch
       case e: java.io.InterruptedIOException =>
         Thread.currentThread().interrupt()
         throw new PostgresPayloadReadException("outbox payload read interrupted", e)
       case e: java.io.IOException =>
         throw new PostgresPayloadReadException(s"outbox payload read failed: ${e.getMessage}", e)
-
-  private def validateJson(payload: String): Unit = StreamingPayloadRows.validate(payload)
 
   private def paddedBase64(encoded: String): String =
     val remainder = encoded.length % 4

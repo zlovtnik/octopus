@@ -91,6 +91,7 @@ lazy val root = (project in file("."))
       "io.micrometer" % "micrometer-registry-prometheus" % micrometerVersion,
       "io.minio" % "minio" % minioVersion,
       "com.squareup.okhttp3" % "okhttp-jvm" % "5.3.2",
+      "com.ibm.icu" % "icu4j" % "73.2",
       "io.opentelemetry" % "opentelemetry-sdk" % openTelemetryVersion,
       "io.opentelemetry" % "opentelemetry-exporter-otlp" % openTelemetryVersion,
       "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % openTelemetryVersion,

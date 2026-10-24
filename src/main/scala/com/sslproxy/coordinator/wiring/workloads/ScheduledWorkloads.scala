@@ -3,19 +3,33 @@ package com.sslproxy.coordinator.wiring.workloads
 import cats.effect.IO
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
-import com.sslproxy.coordinator.processor.{ProcessorId, ProcessorWorkload, SearchRetentionProcessor}
+import com.sslproxy.coordinator.processor.{
+  ProcessorId,
+  ProcessorWorkload,
+  SearchRetentionProcessor
+}
 import fs2.Stream
 
 import scala.concurrent.duration.*
 
 private[coordinator] object ScheduledWorkloads:
   def build(
-    cfg: AppConfig,
-    cronScheduler: CronScheduler,
-    searchRetentionProcessor: SearchRetentionProcessor[IO],
-    maintenanceInterval: FiniteDuration
+      cfg: AppConfig,
+      cronScheduler: CronScheduler,
+      searchRetentionProcessor: SearchRetentionProcessor[IO],
+      maintenanceInterval: FiniteDuration
   ): List[ProcessorWorkload] =
     List(
+      ProcessorWorkload(
+        ProcessorId.ProxySearchPreparer,
+        cronScheduler.proxySearchPreparerStream(
+          cfg.processors.batchSize,
+          cfg.processors.intervalSeconds.seconds,
+          cfg.processors.embeddingModel,
+          cfg.processors.proxyInputRevision,
+          cfg.processors.embeddingPendingHighWater
+        )
+      ),
       ProcessorWorkload(
         ProcessorId.SyncJobPlanner,
         cronScheduler.jobPlanningStream
@@ -83,7 +97,8 @@ private[coordinator] object ScheduledWorkloads:
           cfg.processors.intervalSeconds.seconds,
           cfg.processors.eventDuplicateDistance,
           cfg.processors.behaviorSimilarityThreshold,
-          cfg.processors.sequenceDistanceThreshold
+          cfg.processors.sequenceDistanceThreshold,
+          cfg.processors.proxyInputRevision
         )
       ),
       ProcessorWorkload(

@@ -14,8 +14,6 @@ class SearchPreparationSqlSuite extends FunSuite:
         "device",
         "behaviour_window",
         "frame_sequence",
-        "proxy_event",
-        "proxy_blocked_host_window",
         "device_profile",
         "ap_profile",
         "identity_summary",
@@ -29,13 +27,7 @@ class SearchPreparationSqlSuite extends FunSuite:
     assert(candidateSql(SearchDocumentKind.Device).contains("atheros_search.devices"))
     assert(candidateSql(SearchDocumentKind.Behaviour).contains("atheros_search.behaviour_snapshots"))
     assert(candidateSql(SearchDocumentKind.Sequence).contains("atheros_search.frame_sequences"))
-    assert(candidateSql(SearchDocumentKind.ProxyEvent).contains("octopus_core.proxy_events"))
-    assert(candidateSql(SearchDocumentKind.ProxyEvent).contains("event.event_id"))
-    assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("date_trunc('hour'"))
-    assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("event_type_counts"))
-    assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("classification_counts"))
-    assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("status_code_distribution"))
-    assert(candidateSql(SearchDocumentKind.ProxyBlockedHostWindow).contains("IS DISTINCT FROM"))
+    assert(!kinds.exists(_.sourceTable == "proxy_events"))
     assert(candidateSql(SearchDocumentKind.DeviceProfile).contains("wireless_topology_nodes"))
     assert(candidateSql(SearchDocumentKind.ApProfile).contains("wireless_topology_nodes"))
     assert(candidateSql(SearchDocumentKind.IdentitySummary).contains("identity_clusters"))

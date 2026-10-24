@@ -352,7 +352,8 @@ final class PostgresTransactor private (
           optLong(r.eventSequence),
           optLong(r.durationMs),
           optStr(r.reason),
-          r.rawJson
+          r.rawJson,
+          r.evidence
         )
         val rollupParams = blocked match
           case Some(value) =>

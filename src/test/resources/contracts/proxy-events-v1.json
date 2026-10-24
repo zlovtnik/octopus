@@ -1,0 +1,114 @@
+{
+  "fixture_version": "proxy-events-v1",
+  "synthetic": true,
+  "observations": [
+    {
+      "id": "block",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"type\":\"block\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:01-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"connect_authority\",\"blocked\":true,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"emitted\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "a378e2313e86cba6533c0aa85da2f67e44fee3318160fd4adcdfb53c8969723c",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "210ec86618ba8a9b62aeb7492f60e88f7380b883406ebc57e87792d620f136f9",
+        "payload_ref": "outbox://20261019T120001Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:01-04:00"
+      }
+    },
+    {
+      "id": "http_blocked",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000002\",\"type\":\"http_blocked\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:02-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"http_authority\",\"blocked\":true,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"emitted\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "3287d4edadf3a7b6eaabe5d9bbf0092fd23f75b0f3de6cd7693754f088bab651",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "0cac5665ea7b3308840d15efc0230058fa6983aa7b6665d50502a3944b45a5bf",
+        "payload_ref": "outbox://20261019T120002Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:02-04:00"
+      }
+    },
+    {
+      "id": "session.blocked",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000003\",\"type\":\"session.blocked\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:03-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"connect_authority\",\"blocked\":true,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"emitted\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "cead3a3bafc4ee8a5c94c1597f2a7d42f82ca3bb48a852ba7b23d44c133ac7c6",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "0449ca17b2a9142fc1698cecf4120426c6c198b2fef2a00678eceb3948383be8",
+        "payload_ref": "outbox://20261019T120003Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:03-04:00"
+      }
+    },
+    {
+      "id": "http_proxied",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000004\",\"type\":\"http_proxied\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:04-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"http_authority\",\"blocked\":false,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"not_applied\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "ecf1ad40928fa9dddea3cb7ec299a260d5287911752d5828f561539217814df3",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "9364d5f6585526063fa06e4fb797119778cae323a62859b384ff1390b4eb6354",
+        "payload_ref": "outbox://20261019T120004Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:04-04:00"
+      }
+    },
+    {
+      "id": "http_error",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000005\",\"type\":\"http_error\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:05-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"http_authority\",\"blocked\":false,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"not_applied\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "5457960b3e7418179e414764f4e6c7674f8176159274344807018f17518958ea",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "ba103d90caf835c7262c29fb8891283bd052e847c31c7c9ce34f08d09de5776b",
+        "payload_ref": "outbox://20261019T120005Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:05-04:00"
+      }
+    },
+    {
+      "id": "tunnel_open",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000006\",\"type\":\"tunnel_open\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:06-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"connect_authority\",\"blocked\":false,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"not_applied\",\"suppressed_previous_window\":0,\"window_ms\":500},\"correlation_id\":\"00000000-0000-4000-8000-000000000100\",\"event_sequence\":1,\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\",\"tls_evidence\":{\"offered_alpn\":\"h2\",\"offered_version\":\"TLS1.3\",\"parse_status\":\"parsed\",\"parser_version\":\"proxy-clienthello-v1\",\"semantics\":\"offered_not_negotiated\",\"source\":\"client_hello\"}}",
+      "payload_sha256": "47eca4311d1180d0050186a9ff0a60062df91752a2c3adf08f433ae75e084f9b",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "4559753a9cb5b3a9498e56f65be8b96bbb8af42491a124ffca5d49576e77301a",
+        "payload_ref": "outbox://20261019T120006Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:06-04:00"
+      }
+    },
+    {
+      "id": "tunnel_close",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000007\",\"type\":\"tunnel_close\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:07-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"connect_authority\",\"blocked\":false,\"bytes_down\":7,\"bytes_up\":5,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"not_applied\",\"suppressed_previous_window\":0,\"window_ms\":500},\"correlation_id\":\"00000000-0000-4000-8000-000000000100\",\"duration_ms\":100,\"event_sequence\":2,\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"measured_terminal\",\"duration_status\":\"connection_elapsed\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\",\"tls_evidence\":{\"offered_alpn\":\"h2\",\"offered_version\":\"TLS1.3\",\"parse_status\":\"parsed\",\"parser_version\":\"proxy-clienthello-v1\",\"semantics\":\"offered_not_negotiated\",\"source\":\"client_hello\"}}",
+      "payload_sha256": "31189806ec4e019ecb100935a09368bbec6faecba5d1d2f8aebcd9725dee1c1d",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "fabfd970f0dece4e078c7a762358a0ccb627ec9f72e43ab4c05303902b05116e",
+        "payload_ref": "outbox://20261019T120007Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:07-04:00"
+      }
+    },
+    {
+      "id": "http_proxied-sanitized",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000008\",\"type\":\"http_proxied\",\"host\":\"hmac:synthetic\",\"time\":\"2026-10-19T08:00:08-04:00\",\"authority_raw\":\"hmac:synthetic\",\"authority_source\":\"http_authority\",\"blocked\":false,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"not_applied\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"hmac:synthetic\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":null,\"routing_port\":443,\"sanitization_status\":\"sanitized\"}",
+      "payload_sha256": "3aea56d49bf03b256f6c2f63099dbde6a4581291694d4c65a276714bfbedbf59",
+      "source_count_delta": 1,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "620e7a96df19fc2ab9a002bf8422ceefcf25a3c61f73b37deb7341fbd0632512",
+        "payload_ref": "outbox://20261019T120008Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:08-04:00"
+      }
+    },
+    {
+      "id": "duplicate-delivery",
+      "raw_json": "{\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"type\":\"block\",\"host\":\"Example.COM\",\"time\":\"2026-10-19T08:00:01-04:00\",\"authority_raw\":\"Example.COM:443\",\"authority_source\":\"connect_authority\",\"blocked\":true,\"bytes_down\":0,\"bytes_up\":0,\"classification\":\"essential_api\",\"coalescing\":{\"loss_disposition\":\"unreported_final_windows_possible\",\"policy_version\":\"proxy-coalescing-v1\",\"status\":\"emitted\",\"suppressed_previous_window\":0,\"window_ms\":500},\"evidence_version\":\"proxy-evidence-v1\",\"host_raw\":\"Example.COM\",\"measurement\":{\"bytes_status\":\"unavailable\",\"duration_status\":\"unavailable\",\"version\":\"proxy-measurement-v1\"},\"port\":443,\"routing_port\":443,\"sanitization_status\":\"not_sanitized\"}",
+      "payload_sha256": "a378e2313e86cba6533c0aa85da2f67e44fee3318160fd4adcdfb53c8969723c",
+      "source_count_delta": 0,
+      "scan_request": {
+        "stream_name": "proxy.events",
+        "dedupe_key": "210ec86618ba8a9b62aeb7492f60e88f7380b883406ebc57e87792d620f136f9",
+        "payload_ref": "outbox://20261019T120001Z-fixture.json",
+        "observed_at": "2026-10-19T08:00:01-04:00"
+      }
+    }
+  ]
+}

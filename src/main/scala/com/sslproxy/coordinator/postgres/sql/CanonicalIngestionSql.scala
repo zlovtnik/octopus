@@ -379,7 +379,7 @@ object CanonicalIngestionSql:
                    $jobId, $documentId, 'event', $embeddingModel, $checksum,
                    'pending', 100, 0, 5, CURRENT_TIMESTAMP,
                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                 ) ON CONFLICT (document_id, embedding_kind, embedding_model, content_sha256)
+                 ) ON CONFLICT (document_id, embedding_kind, embedding_model, content_sha256, input_revision)
                    DO NOTHING""".update.run
     yield ()
 

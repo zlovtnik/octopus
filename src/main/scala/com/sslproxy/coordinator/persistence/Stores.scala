@@ -87,6 +87,13 @@ trait WirelessStore[F[_]]:
   def flushProbeBatch(probesJson: String): DbResultT[F, Int]
 
 trait ProjectionStore[F[_]]:
+  def prepareProxySearch(
+    lease: com.sslproxy.coordinator.processor.Lease,
+    limit: Int,
+    model: String,
+    inputRevision: String,
+    highWater: Int
+  ): DbResultT[F, Int]
   def generateRfAlerts(limit: Int): DbResultT[F, List[String]]
   def normalizeWirelessFrames(limit: Int): DbResultT[F, Int]
   def projectWirelessInventory(limit: Int): DbResultT[F, Int]
@@ -101,7 +108,8 @@ trait ProjectionStore[F[_]]:
     limit: Int,
     eventDuplicateDistance: Double,
     behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
+    sequenceDistanceThreshold: Double,
+    proxyInputRevision: String = "legacy_unknown"
   ): DbResultT[F, Int]
   def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]

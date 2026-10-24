@@ -9,13 +9,31 @@ execution and vector writes belong to Atheros Search.
 All runtime lanes are disabled by default. PostgreSQL is the only stack
 runtime database; MongoDB is not a fallback.
 
-## Current runtime
+## Workspace and local development
 
-Production runs one coordinator replica with a `Recreate` rollout, a 4 GiB
-container memory limit, and a 60% JVM heap ceiling. All consumer groups and
+Use the complete [ssl-proxy workspace](../../README.md), including submodules.
+The parent repository owns canonical SQL manifests, shared processor contracts,
+image build inputs, and Kubernetes desired state. Run the service commands below
+from `services/octopus` with JDK 21 and sbt; run repository checks from the
+workspace root. A standalone checkout does not provision a database or broker.
+
+The defaults permit a disabled-lane process for local inspection. Enabling
+durable processing requires the PostgreSQL schema executor's recorded manifest,
+verified TLS, scoped credentials, and the applicable broker and object-store
+configuration. Database integration tests provision ephemeral PostgreSQL through
+Testcontainers instead of using production state.
+
+## Deployment configuration
+
+The production manifests configure one coordinator replica with a `Recreate`
+rollout, a 4 GiB container memory limit, and a 60% JVM heap ceiling. All consumer groups and
 processors run inside that instance; Kafka assigns it the available partitions.
 Updates briefly pause consumption until the replacement starts and resumes from
-committed offsets. Staging currently reuses the production coordinator patch.
+committed offsets. Staging reuses that resource patch. Production additionally
+selects a broker-drain profile: the seven sync processors plus the two wireless
+consumer processors enabled by the consumer gate. Derived periodic projections
+remain disabled in that profile. Staging retains the base processor selection.
+These are checked-in desired-state settings, not a live health report.
 
 Behavior, timing, sequence, and baseline projections fetch rows through JDBC
 cursors in chunks of 128 and persist one complete window, session, or BSSID at a
@@ -57,7 +75,7 @@ The currently wired binary provides:
 - OTLP spans for locked Kafka consume/commit batches, outbox/DLQ publication,
   and every PostgreSQL durable operation, with error recording and bounded SDK shutdown.
 
-All 24 Octopus-owned processor IDs have exactly one workload declaration and
+All 26 Octopus-owned processor IDs have exactly one workload declaration and
 remain disabled by default.
 
 Successful load outcomes complete the matching `sync_events` row after its job
@@ -104,17 +122,17 @@ The machine-readable source of truth is
 [`sql/postgres/contracts/processors.json`](../../sql/postgres/contracts/processors.json).
 Every entry declares its owner, family, mode, inputs, outputs, dependencies,
 dedupe key, lease scope, terminal behavior, reconciliation policy, and default
-state. All 26 entries default to disabled.
+state. All 28 entries (26 Octopus-owned and two Search-owned) default to disabled.
 
 | Owner | Count | Processor IDs |
 |---|---:|---|
-| Octopus | 25 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-audit-projection`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
+| Octopus | 26 | `sync-scan-ingestion`, `sync-job-planner`, `sync-backlog-recovery`, `sync-load-dispatch`, `sync-load-consumer`, `sync-result-consumer`, `sync-outbox-publisher`, `wireless-audit-projection`, `wireless-heartbeat-ingestion`, `wireless-frame-normalizer`, `wireless-inventory-projector`, `wireless-identity-projector`, `wireless-behavior-projector`, `wireless-timing-projector`, `wireless-sequence-projector`, `wireless-baseline-projector`, `wireless-similarity-projector`, `threat-risk-projector`, `embedding-preparer`, `embedding-text-builder`, `proxy-search-preparer`, `rf-alert-projector`, `event-retention`, `search-retention`, `stale-worker-cleanup`, `scheduled-reconciliation` |
 | Atheros Search | 2 | `embedding-completer`, `embedding-lease-recovery` |
 
-There is no Rails/console processor family. The `integration_console` database
-remains reserved and provisioned with no runtime owner; the SolidJS Atheros
-Search UI remains active and reads through the Search API. Redis remains a
-non-authoritative shared cache.
+There is no Rails/console processor family. The SolidJS Atheros Search UI reads
+through the Search API. The canonical runtime schemas are `octopus_core`,
+`atheros_search`, `schema_migrator`, and `keycloak` in the external `sync`
+database. Redis remains a non-authoritative shared cache.
 
 ## Topic contracts
 
@@ -194,6 +212,7 @@ the reference and exercises the fail-closed bounds and conditional gates.
 | `wireless` | `WIRELESS_*` | Consumer count and poll bound must be positive; topics and versioned groups are required for an enabled consumer lane. `WIRELESS_PROJECTION_MODE` is `legacy`, `shadow`, or `projected`; ranges require reviewed calibration JSON. |
 | `processors` | `OCTOPUS_PROCESSOR_*`, `OCTOPUS_ENABLED_PROCESSORS`, similarity/distance variables | Enabled IDs must be Octopus-owned with dependencies enabled; delays, interval, and batch size positive; embedding pending high water not negative; scores finite and in range |
 | `archive` | `OCTOPUS_ARCHIVE_ENABLED`, `MINIO_*`, retention and archive variables | Credentials and bucket required when enabled; retention ordering, intervals, and batch size validated |
+| `dq` | `OCTOPUS_DQ_*` | Opt-in durable processor coordination; explicit installation, namespace, scope policy, approved digests, control identity, and artifact storage required when enabled |
 
 Both sink timeouts must be positive, at most 2147483 seconds, and the network
 timeout must exceed the statement timeout. Connection acquisition remains five
@@ -281,9 +300,11 @@ Important gates:
 | `OCTOPUS_PROCESSOR_INTERVAL_SECONDS` | `10` | Periodic search preparation interval |
 | `OCTOPUS_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Only supported model; attached to newly prepared embedding jobs. Other values fail startup validation. |
 | `OCTOPUS_EMBEDDING_PENDING_HIGH_WATER` | `1000000` | Skips embedding job preparation while pending jobs are at or above this many, so the queue cannot grow without bound while workers are behind. `0` disables the guard. |
+| `OCTOPUS_PROXY_INPUT_REVISION` | `legacy_unknown` | Optional artifact/preprocessing identity for `proxy-search-preparer`: `legacy_unknown` or `nomic-prefix-v1:<artifact-sha256>`. Must match the reviewed Search worker/query profile. |
 | `OCTOPUS_EVENT_DUPLICATE_DISTANCE` | `0.05` | Characterized event-vector duplicate distance |
 | `OCTOPUS_BEHAVIOR_SIMILARITY_THRESHOLD` | `0.88` | Characterized behavior similarity threshold |
 | `OCTOPUS_SEQUENCE_DISTANCE_THRESHOLD` | `0.10` | Characterized frame-sequence distance threshold |
+
 | `OCTOPUS_ARCHIVE_ENABLED` | `false` | Required gate for `event-retention` |
 | `MINIO_ENDPOINT` | `http://minio:9000` | S3-compatible archive endpoint |
 | `MINIO_ACCESS_KEY_ID` / `MINIO_SECRET_ACCESS_KEY` | empty | Archive credentials sourced from the runtime secret |
@@ -299,6 +320,25 @@ Important gates:
 | `OCTOPUS_PUBLIC_STATS_PEAKS_REFRESH_SECONDS` | `300` | Cache TTL for peak day/week DB aggregates |
 | `OCTOPUS_PUBLIC_STATS_RATE_WINDOW_SECONDS` | `300` | Window for in-process ingest rate calculation |
 
+`proxy-search-preparer` is opt-in and has no wireless processor dependency. It
+atomically publishes safe proxy evidence, prepares versioned proxy documents,
+reconciles current jobs and advances arrival/dirty-source progress under its
+persisted lease. The shared embedding text builder now prepares wireless kinds;
+proxy preparation requires the dedicated fenced path. A positive pending high
+water is mandatory for this processor and counts its proxy pending/leased jobs.
+Each tick caps changed items at 500, processes at most one closed UTC hour with
+at most 500 eligible blocked input observations, and uses five-second statement
+and one-second lock timeouts. Overflow and incomplete-source windows remain
+explicitly parked. Published evidence expires seven days after publication;
+search-document retention retains its existing independent policy.
+
+For a processor-only proxy profile, leave consumers disabled and select only
+`proxy-search-preparer`. Enabling consumers still unions the documented wireless
+consumer IDs; it does not establish a proxy-only intake. Shared threat,
+similarity, retention and reconciliation processors are separate opt-ins.
+Production activation requires measured capacity and backend preprocessing
+evidence; this code does not change the broker-drain profile.
+
 PostgreSQL uses `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD` (or the preferred, mutually exclusive `POSTGRES_PASSWORD_FILE`),
 `POSTGRES_POOL_SIZE`, and explicit `POSTGRES_SSL_MODE`. Canonical
@@ -307,12 +347,22 @@ Kustomize sets `verify-full` with the PgBouncer listener CA and
 mounted in Octopus. Enabled runtime rejects loopback, root accounts,
 warn-only schema validation, and invalid consumer-group contracts.
 
-The checked-in Kubernetes deployment sets `POSTGRES_ENABLED`,
-`OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. The
-processor catalog lists the 20 non-Kafka processor IDs; the remaining
-four Kafka consumer processor IDs start because `OCTOPUS_CONSUMERS_ENABLED`
-is true, not because they appear in `OCTOPUS_ENABLED_PROCESSORS`. Together that
-is all 24 Octopus-owned processors.
+The base Kubernetes deployment enables `POSTGRES_ENABLED`,
+`OCTOPUS_PROCESSORS_ENABLED`, `OCTOPUS_CONSUMERS_ENABLED`, and archival. Its
+`OCTOPUS_ENABLED_PROCESSORS` value lists 24 IDs, including four Kafka consumer
+IDs. The consumer gate adds the full five-ID Kafka set, yielding 25 distinct
+processors; `proxy-search-preparer` remains opt-in and absent from that selection.
+Production overrides the explicit list with its seven sync IDs in
+[`java-coordinator-broker-drain.yaml`](../../cyber-stack/matrix/prod/patches/java-coordinator-broker-drain.yaml),
+yielding nine distinct active IDs after the consumer union. Inspect the final
+environment render before assuming that a projection or retention job is active.
+
+DQ is a separate opt-in subsystem, disabled by `OCTOPUS_DQ_ENABLED=false`.
+Octopus owns its registry, admission ledger, leases, receipts, retry state,
+outbox, artifact lifecycle, and fenced projection application. The database-free
+[DQ manager and workers](../dq/README.md) dispatch and compute against that
+control API. Enabling DQ also adds its dependency readiness to `/ready`; the
+internal `/internal/dq/v1` routes require the configured service identity.
 
 A new consumer group replays every retained record; an existing group resumes
 from its committed Kafka offsets. Rollback must preserve consumer offsets,
@@ -323,12 +373,12 @@ schemas, and ingestion evidence.
 | Route | Meaning |
 |---|---|
 | `/live` | process is serving HTTP |
-| `/ready` | PostgreSQL is reachable and every enabled processor is ready or intentionally disabled |
+| `/ready` | PostgreSQL, enabled processors, and any enabled DQ dependencies satisfy readiness |
 | `/metrics` | Prometheus text exposition of Micrometer measurements |
 | `/health` | compatibility alias for readiness |
 | `/actuator/health` | Spring-compatible readiness response |
 | `/actuator/prometheus` | compatibility alias for metrics |
-| `/public/stats` | diagnostic JSON (peaks + live strip). The gateway still routes here until the reviewed stats-reader cutover |
+| `/public/stats` | compatibility diagnostic JSON (peaks + live strip); public gateway traffic uses stats-reader |
 | `/internal/metrics/live` | read-only in-process telemetry for the dedicated C++ metrics service; no database or store I/O |
 
 Public stats on this process use `Cache-Control: no-store`. Peak aggregates share one
@@ -377,11 +427,17 @@ rows, tombstones, or authoritative ingestion evidence.
 
 ## Build and verification
 
-Octopus is sbt-only:
+Octopus is sbt-only. From `services/octopus`:
 
 ```bash
 sbt test
 sbt assembly
+```
+
+After README, topic, route, or runtime-gate edits, run the focused contract check:
+
+```bash
+sbt "testOnly com.sslproxy.coordinator.DocumentationContractSuite"
 ```
 
 Coverage and BDD commands:
@@ -401,11 +457,12 @@ Docker-backed tests required, enforces the committed policy, and retains both
 the JaCoCo report and the Cucumber HTML, JSON, and JUnit reports as the
 `octopus-test-reports` artifact.
 
-Repository-level checks include:
+From the ssl-proxy workspace root, repository-level checks include:
 
 ```bash
 python3 scripts/check-postgres-schema-contract.py
 make dependency-boundaries
+python3 scripts/check-docs.py
 ```
 
 Docker-backed PostgreSQL tests skip when Docker is unavailable during local

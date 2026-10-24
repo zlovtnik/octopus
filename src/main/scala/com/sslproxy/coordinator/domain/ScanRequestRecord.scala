@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.domain
 
-import com.sslproxy.coordinator.util.Sha256Utils
-import io.circe.parser.{decode, parse}
+import com.sslproxy.coordinator.util.{PayloadJsonInspection, Sha256Utils}
+import io.circe.parser.decode
 import io.circe.{Decoder, HCursor}
 
 import java.nio.charset.StandardCharsets
@@ -84,20 +84,17 @@ final case class ResolvedScanRequestRecord(
 ):
   export source.{requestJson, sourceRecordSha256, streamName, dedupeKey, observedAt, payloadRef}
 
+  private[coordinator] lazy val inspection: Either[Throwable, PayloadJsonInspection.Metadata] =
+    PayloadJsonInspection.inspect(payloadJson)
+
 object ResolvedScanRequestRecord:
   def from(
     source: ScanRequestRecord,
     payloadJson: String
   ): Either[Throwable, ResolvedScanRequestRecord] =
-    parse(payloadJson).left.map(identity[Throwable]).flatMap {
-      case io.circe.Json.Null =>
-        Left(IllegalArgumentException("resolved scan event payload must not be JSON null"))
-      case _ =>
-        Right(
-          ResolvedScanRequestRecord(
-            source = source,
-            payloadJson = payloadJson,
-            eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
-          )
-        )
-    }
+    val record = ResolvedScanRequestRecord(
+      source = source,
+      payloadJson = payloadJson,
+      eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
+    )
+    record.inspection.map(_ => record)

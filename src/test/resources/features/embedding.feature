@@ -6,6 +6,9 @@ Feature: Embedding preparation processor contracts
   later complete windows may resume only those parking-cancelled jobs.
   Input revision changes migrate retained active proxy documents in bounded
   pages, preserving terminal history and making room in old worker queues.
+  Full queues validate subsequent dirty windows even when earlier windows remain
+  valid. Returning proxy content resumes eligible supersession-cancelled jobs;
+  input revision rollbacks preserve existing job IDs, including legacy IDs.
 
   Scenario Outline: An Octopus embedding processor has its declared durable contract
     Given processor "<processor>" belongs to "embedding"

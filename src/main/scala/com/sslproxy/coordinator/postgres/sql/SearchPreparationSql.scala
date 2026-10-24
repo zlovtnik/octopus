@@ -8,6 +8,8 @@ import io.circe.Json
 import io.circe.syntax.*
 
 object SearchPreparationSql:
+  private[sql] val SupersededDocumentError = "search document superseded; embedding job cancelled"
+
   val supportedKinds: List[SearchDocumentKind] =
     SearchDocumentKind.values.toList.filterNot(_.sourceTable == "proxy_events")
 
@@ -447,6 +449,7 @@ object SearchPreparationSql:
                 owner_id = NULL,
                 lease_token = NULL,
                 lease_expires_at = NULL,
+                last_error = $SupersededDocumentError,
                 next_attempt_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
           WHERE status IN ('pending', 'leased')

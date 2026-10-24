@@ -2613,7 +2613,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       original <- sql"SELECT document_id::text FROM atheros_search.search_documents WHERE source_key=$key AND status='active'"
         .query[String].unique.transact(xa)
       _ <- sql"""UPDATE atheros_search.embedding_jobs SET status='leased', owner_id='parked-worker',
-        lease_token='0353cb69-f01e-4e5b-8a7f-3993d761d053'::uuid, lease_fence=1,
+        lease_token=gen_random_uuid(), lease_fence=1,
         lease_expires_at=clock_timestamp()+interval '5 minutes', attempt_count=1
         WHERE document_id=$original::uuid""".update.run.transact(xa)
       _ <- sql"UPDATE octopus_core.proxy_events SET evidence='{}'::jsonb WHERE event_id='scoped-window-late'".update.run.transact(xa)
@@ -2770,6 +2770,50 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(terminal, "failed")
   }
 
+  test("proxy text rollbacks resume superseded unfinished jobs and preserve terminal history") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val model = "nomic-embed-text-v2-moe"
+    val source = ProxyEvidence.source(
+      circeParser.parse("""{"type":"http_proxied","host":"text-rollback.example"}""").toOption.get,
+      "proxy-text-rollback", 1L, java.sql.Timestamp.from(java.time.Instant.now())
+    ).get
+    val fixtures = List("pending", "leased", "completed", "failed", "cancelled").map { status =>
+      status -> source.copy(sourceKey = s"${source.sourceKey}-$status")
+    }
+    for
+      lease <- proxyLease
+      _ <- fixtures.traverse_ { case (status, original) =>
+        val document = SearchDocumentPreparation.prepare(original).toOption.get
+        for
+          _ <- ProxyPreparationSql.persist(lease, original, model).transact(xa)
+          _ <- sql"""UPDATE atheros_search.embedding_jobs SET status=$status, attempt_count=1,
+            owner_id=CASE WHEN $status='leased' THEN 'rollback-worker' ELSE NULL END,
+            lease_token=CASE WHEN $status='leased' THEN gen_random_uuid() ELSE NULL END,
+            lease_expires_at=CASE WHEN $status='leased' THEN clock_timestamp()+interval '5 minutes' ELSE NULL END,
+            last_error='retained diagnostic'
+            WHERE document_id=${document.documentId}::uuid""".update.run.transact(xa)
+          _ <- ProxyPreparationSql.persist(lease,
+            original.copy(evidenceRevision = Some(2L), searchText = "replacement proxy text"), model).transact(xa)
+          _ <- ProxyPreparationSql.persist(lease, original.copy(evidenceRevision = Some(3L)), model).transact(xa)
+          restored <- sql"""SELECT doc.status, job.status, job.attempt_count,
+            job.owner_id IS NULL AND job.lease_token IS NULL AND job.lease_expires_at IS NULL, job.last_error
+            FROM atheros_search.embedding_jobs job JOIN atheros_search.search_documents doc USING(document_id)
+            WHERE doc.document_id=${document.documentId}::uuid"""
+            .query[(String, String, Int, Boolean, Option[String])].unique.transact(xa)
+          jobs <- sql"""SELECT count(*) FROM atheros_search.embedding_jobs job
+            JOIN atheros_search.search_documents doc USING(document_id) WHERE doc.source_key=${original.sourceKey}"""
+            .query[Long].unique.transact(xa)
+        yield
+          val resumed = status == "pending" || status == "leased"
+          assertEquals(restored, ("active", if resumed then "pending" else status, 1, true,
+            if resumed then None else Some("retained diagnostic")))
+          assertEquals(jobs, 2L)
+      }
+    yield ()
+  }
+
   test("proxy preparation preserves replay identity, private evidence boundaries and newer corrections") {
     requireDocker()
     import com.sslproxy.coordinator.processor.*
@@ -2918,6 +2962,58 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(limited, 0)
   }
 
+  test("full proxy queues validate beyond valid pending windows and revisit them without publishing") {
+    requireDocker()
+    import com.sslproxy.coordinator.processor.*
+    val start = java.sql.Timestamp.from(java.time.Instant.parse("1991-01-01T01:00:00Z"))
+    val later = java.sql.Timestamp.from(start.toInstant.plusSeconds(3600))
+    val version = ProxyAuthority.Version
+    val evidence = s"""{"host_normalized":"validation.example","normalization_version":"$version"}"""
+    def tick(lease: Lease, limit: Int, highWater: Int): IO[Int] =
+      repository.prepareProxySearch(lease, limit, "nomic-embed-text-v2-moe", "legacy_unknown", highWater).map(requireRight)
+    for
+      // Isolate the bounded validation order from earlier suite fixtures.
+      _ <- sql"""TRUNCATE atheros_search.search_documents, atheros_search.embedding_jobs,
+        atheros_search.proxy_document_state, atheros_search.embeddings, atheros_search.search_vectors_event,
+        octopus_core.proxy_events, octopus_core.proxy_preparation_dirty, octopus_core.proxy_window_dirty,
+        octopus_core.proxy_preparation_progress CASCADE""".update.run.transact(xa)
+      lease <- proxyLease
+      _ <- sql"""INSERT INTO octopus_core.proxy_events(event_id,event_time,event_type,host,blocked,evidence)
+        VALUES ('validation-ready',$start,'block','validation.example',true,$evidence::jsonb),
+          ('validation-later',$later,'block','validation.example',true,$evidence::jsonb)""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_preparation_progress(scope,after_revision)
+        SELECT 'proxy-event-v2',max(observation_revision) FROM octopus_core.proxy_events""".update.run.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+        VALUES ($start,'validation.example',''),($later,'validation.example','')""".update.run.transact(xa)
+      _ <- tick(lease, 10, 1000)
+      _ <- tick(lease, 10, 1000)
+      initialJobs <- sql"SELECT count(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
+      _ <- sql"UPDATE octopus_core.proxy_events SET evidence='{}'::jsonb WHERE event_id='validation-later'".update.run.transact(xa)
+      _ <- sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+        VALUES ($start,'validation.example',''),($later,'validation.example','')""".update.run.transact(xa)
+      first <- tick(lease, 1, 1)
+      second <- tick(lease, 1, 1)
+      dispositions <- sql"SELECT disposition FROM octopus_core.proxy_window_dirty ORDER BY window_start"
+        .query[String].to[List].transact(xa)
+      active <- sql"SELECT window_start FROM atheros_search.search_documents WHERE status='active'"
+        .query[java.sql.Timestamp].to[List].transact(xa)
+      jobsAfterValidation <- sql"SELECT count(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
+      _ <- sql"UPDATE octopus_core.proxy_events SET evidence='{}'::jsonb WHERE event_id='validation-ready'".update.run.transact(xa)
+      _ <- (0 until 2).toList.traverse_(_ => tick(lease, 1, 1))
+      remaining <- sql"SELECT count(*) FROM atheros_search.search_documents WHERE status='active'"
+        .query[Long].unique.transact(xa)
+      finalJobs <- sql"SELECT count(*) FROM atheros_search.embedding_jobs".query[Long].unique.transact(xa)
+    yield
+      assertEquals(initialJobs, 2L)
+      assertEquals(first, 1)
+      assertEquals(second, 1)
+      assertEquals(dispositions, List("pending", "source_coverage_pending"))
+      assertEquals(active, List(start))
+      assertEquals(jobsAfterValidation, initialJobs)
+      assertEquals(remaining, 0L)
+      assertEquals(finalJobs, initialJobs)
+  }
+
   test("proxy input revision migration is bounded, drains a full old queue and preserves history") {
     requireDocker()
     import com.sslproxy.coordinator.processor.*
@@ -2949,10 +3045,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         WHERE source_key='migration-pending'""".update.run.transact(xa)
       _ <- sql"""INSERT INTO atheros_search.search_document_tags(document_id,tag_type,tag_value)
         SELECT document_id,'host',$unsafeHost FROM atheros_search.search_documents WHERE source_key='migration-pending'""".update.run.transact(xa)
-      _ <- sql"""UPDATE atheros_search.embedding_jobs job SET status='leased', owner_id='old-worker',
-        lease_token='0353cb69-f01e-4e5b-8a7f-3993d761d053'::uuid, lease_fence=1, attempt_count=1,
+      legacyJobId <- sql"""UPDATE atheros_search.embedding_jobs job SET job_id=gen_random_uuid(), status='leased', owner_id='old-worker',
+        lease_token=gen_random_uuid(), lease_fence=1, attempt_count=1,
         lease_expires_at=clock_timestamp()+interval '5 minutes'
-        FROM atheros_search.search_documents doc WHERE doc.document_id=job.document_id AND doc.source_key='migration-pending'""".update.run.transact(xa)
+        FROM atheros_search.search_documents doc WHERE doc.document_id=job.document_id AND doc.source_key='migration-pending'
+        RETURNING job.job_id::text""".query[String].unique.transact(xa)
       _ <- sql"""UPDATE atheros_search.embedding_jobs job SET status='completed', completed_at=clock_timestamp(), attempt_count=1
         FROM atheros_search.search_documents doc WHERE doc.document_id=job.document_id AND doc.source_key='migration-completed'""".update.run.transact(xa)
       _ <- sql"""UPDATE atheros_search.embedding_jobs job SET status='failed', attempt_count=max_attempts, last_error='retained terminal failure'
@@ -2991,6 +3088,10 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         FROM atheros_search.embedding_jobs job JOIN atheros_search.search_documents doc USING(document_id)
         WHERE doc.source_key='migration-pending' AND job.input_revision='legacy_unknown'"""
         .query[(String,Int,Boolean,Option[String])].unique.transact(xa)
+      restoredJobId <- sql"""SELECT job.job_id::text FROM atheros_search.embedding_jobs job
+        JOIN atheros_search.search_documents doc USING(document_id)
+        WHERE doc.source_key='migration-pending' AND job.input_revision='legacy_unknown'"""
+        .query[String].unique.transact(xa)
     yield
       assert(denied.isLeft)
       assertEquals(first,1)
@@ -3005,6 +3106,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assert(!List(sanitized._2,sanitized._3.getOrElse(""),sanitized._4).exists(_.contains("secret")))
       assertEquals(leakedTags,0L)
       assertEquals(restored,("pending",1,true,None))
+      assertEquals(restoredJobId,legacyJobId)
   }
 
   private def requireRight[A](result: Either[DatabaseError, A]): A =

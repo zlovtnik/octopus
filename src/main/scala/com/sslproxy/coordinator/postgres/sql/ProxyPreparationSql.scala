@@ -360,8 +360,10 @@ object ProxyPreparationSql:
       // Resume only preparer cancellations, preserving terminal outcomes.
       _ <- sql"""UPDATE atheros_search.embedding_jobs SET status = 'pending', last_error = NULL,
         next_attempt_at = clock_timestamp(), updated_at = clock_timestamp()
-        WHERE job_id = $id::uuid AND status = 'cancelled'
-          AND (last_error = $ObsoleteInputError OR ($resumeParked AND last_error = $ParkedWindowError))
+        WHERE document_id = $documentId::uuid AND embedding_kind = 'event' AND embedding_model = $model
+          AND content_sha256 = $checksum AND input_revision = $inputRevision AND status = 'cancelled'
+          AND (last_error = $ObsoleteInputError OR last_error = ${SearchPreparationSql.SupersededDocumentError}
+            OR ($resumeParked AND last_error = $ParkedWindowError))
           AND attempt_count < max_attempts""".update.run
     yield ()
 
@@ -492,10 +494,12 @@ object ProxyPreparationSql:
   ): ConnectionIO[Int] =
     if limit == 0 then 0.pure[ConnectionIO]
     else
-      sql"""SELECT window_start, host, device_key, revision FROM octopus_core.proxy_window_dirty
+      (fr"""SELECT window_start, host, device_key, revision FROM octopus_core.proxy_window_dirty
         WHERE window_start < date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-          AND disposition = 'pending'
-        ORDER BY window_start, host, device_key LIMIT $limit FOR UPDATE"""
+          AND disposition = 'pending'""" ++
+        (if allowPublish then fr"ORDER BY window_start, host, device_key"
+         else fr"ORDER BY revision, window_start, host, device_key") ++
+        fr"LIMIT $limit FOR UPDATE")
         .query[(Timestamp, String, String, Long)]
         .to[List]
         .flatMap { windows =>
@@ -548,7 +552,12 @@ object ProxyPreparationSql:
                       }, observed_rows_lower_bound = ${memberRows.size}
                 WHERE window_start = $start AND host = $rawHost AND device_key = $deviceKey AND revision = $revision""".update.run.void *>
                       retireWindow(key)
-                  else if !allowPublish then FC.unit
+                  else if !allowPublish then
+                    // Rotate validated work behind the remaining notifications.
+                    // A full queue must not pin every pass to one valid window.
+                    sql"""UPDATE octopus_core.proxy_window_dirty
+                      SET revision = nextval('octopus_core.proxy_window_revision_seq')
+                      WHERE window_start = $start AND host = $rawHost AND device_key = $deviceKey AND revision = $revision""".update.run.void
                   else
                     val host = hosts.head
                     val legacyHost = ProxyEvidence.safeHost(Some(rawHost), members.exists(_.sanitized))

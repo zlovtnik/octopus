@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.postgres
 
 import cats.effect.IO
+import cats.data.EitherT
 import cats.effect.implicits.*
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
@@ -30,7 +31,7 @@ import com.sslproxy.coordinator.postgres.sql.{
   WirelessSql
 }
 import com.sslproxy.coordinator.processor.{IntelligencePreparation, Lease, SearchDocumentPreparation}
-import com.sslproxy.coordinator.util.Sha256Utils
+import com.sslproxy.coordinator.util.{PayloadJsonInspection, Sha256Utils}
 import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
@@ -112,7 +113,7 @@ class PostgresRepository(
     if records.isEmpty then IO.pure(Right(0))
     else
       runDb("postgres.record_scan_request") {
-        records
+        records.traverse_(record => record.inspection.liftTo[ConnectionIO]) *> records
           .distinctBy(record => record.streamName -> record.dedupeKey)
           .traverse(record => ingestScanRequest(record, None))
           .map(_.count(_.disposition == IngestionDisposition.Processed))
@@ -150,42 +151,31 @@ class PostgresRepository(
     candidate: SyncEventHydrationCandidate,
     payloadJson: String
   ): IO[Either[DatabaseError, Boolean]] =
-    val parsed = circeParser.parse(payloadJson)
+    val inspection = PayloadJsonInspection.inspect(payloadJson)
     val eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
-    val eventKind = parsed.toOption.flatMap { value =>
-      value.hcursor
-        .get[String]("event_type")
-        .toOption
-        .filter(_.nonEmpty)
-        .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
-    }
 
     runDb("postgres.hydrate_existing_sync_event") {
-      parsed match
-        case Left(error) => FC.raiseError(error)
-        case Right(Json.Null) =>
-          FC.raiseError(IllegalArgumentException("resolved backfill payload must not be JSON null"))
-        case Right(_)
-            if candidate.streamName == "wireless.audit" &&
-              candidate.payloadJson.exists(_.nonEmpty) &&
-              candidate.payloadSha256.contains(candidate.dedupeKey) =>
+      inspection.liftTo[ConnectionIO].flatMap { inspected =>
+        if candidate.streamName == "wireless.audit" &&
+          candidate.payloadJson.exists(_.nonEmpty) &&
+          candidate.payloadSha256.contains(candidate.dedupeKey)
+        then
           hydrateWirelessProjection(candidate.dedupeKey, payloadJson).map(_ > 0)
-        case Right(_)
-            if candidate.streamName == "wireless.audit" &&
-              candidate.dedupeKey != eventPayloadSha256 =>
+        else if candidate.streamName == "wireless.audit" && candidate.dedupeKey != eventPayloadSha256 then
           FC.raiseError(
             IllegalArgumentException(
               "wireless.audit backfill dedupe_key does not match the resolved event payload hash"
             )
           )
-        case Right(_) =>
+        else
           hydrateSyncEvent(
             candidate.streamName,
             candidate.dedupeKey,
             payloadJson,
             eventPayloadSha256,
-            eventKind
+            inspected
           )
+      }
     }
 
   def quarantineSyncEventHydration(
@@ -203,14 +193,17 @@ class PostgresRepository(
     record: ResolvedScanRequestRecord,
     metadata: Option[BrokerRecordMetadata]
   ): ConnectionIO[IngestionDecision] =
-    val payloadRef = record.payloadRef
-    val eventKind = circeParser.parse(record.payloadJson).toOption.flatMap { value =>
-      value.hcursor
-        .get[String]("event_type")
-        .toOption
-        .filter(_.nonEmpty)
-        .orElse(value.hcursor.get[String]("type").toOption.filter(_.nonEmpty))
+    record.inspection.liftTo[ConnectionIO].flatMap { inspected =>
+      ingestInspectedScanRequest(record, metadata, inspected)
     }
+
+  private def ingestInspectedScanRequest(
+    record: ResolvedScanRequestRecord,
+    metadata: Option[BrokerRecordMetadata],
+    inspected: PayloadJsonInspection.Metadata
+  ): ConnectionIO[IngestionDecision] =
+    val payloadRef = record.payloadRef
+    val eventKind = inspected.eventKind
     val observedAt = Option(record.observedAt).filter(_.nonEmpty).flatMap(parseTs)
     val jobId = stableUuid("job", record.streamName, record.dedupeKey)
     val batchId = stableUuid("batch", record.streamName, record.dedupeKey)
@@ -284,7 +277,7 @@ class PostgresRepository(
             for
               existed <- IngestionSql.syncEventExists(record.streamName, record.dedupeKey).unique
               _ <- IngestionSql.insertSyncEvent(record, observedAt.orNull, eventKind).run
-              _ <- hydrateSyncEvent(record, eventKind)
+              _ <- hydrateSyncEvent(record, inspected)
               _ <- IngestionSql.insertJob(jobId, record.streamName, record.dedupeKey).run
               persistedJobId <- IngestionSql.jobId(record.streamName, record.dedupeKey).unique
               cursor <- IngestionSql.cursor(record.streamName).option.map(_.getOrElse("0"))
@@ -304,7 +297,7 @@ class PostgresRepository(
         existingEvidence(meta).flatMap {
           case Some(existing) =>
             verifyExisting(meta, existing) *>
-              hydrateSyncEvent(record, eventKind) *>
+              hydrateSyncEvent(record, inspected) *>
               decisionWithPersistedIds(IngestionDisposition.Deduplicated)
           case None =>
             createState.flatTap(decision => persistEvidence(meta, decision.disposition))
@@ -313,14 +306,14 @@ class PostgresRepository(
 
   private def hydrateSyncEvent(
     record: ResolvedScanRequestRecord,
-    eventKind: Option[String]
+    inspected: PayloadJsonInspection.Metadata
   ): ConnectionIO[Boolean] =
     hydrateSyncEvent(
       record.streamName,
       record.dedupeKey,
       record.payloadJson,
       record.eventPayloadSha256,
-      eventKind
+      inspected
     )
 
   private def hydrateSyncEvent(
@@ -328,27 +321,22 @@ class PostgresRepository(
     key: String,
     payloadJson: String,
     eventPayloadSha256: String,
-    eventKind: Option[String]
+    inspected: PayloadJsonInspection.Metadata
   ): ConnectionIO[Boolean] =
-    circeParser.parse(payloadJson) match
-      case Left(error) => FC.raiseError(error)
-      case Right(Json.Null) =>
-        FC.raiseError(IllegalArgumentException("resolved scan event payload must not be JSON null"))
-      case Right(_) =>
-        for
-          updated <- IngestionSql
-            .hydrateEvent(
-              stream,
-              key,
-              payloadJson,
-              eventPayloadSha256,
-              eventKind
-            )
-            .run
-          _ <-
-            if updated > 0 && stream == "wireless.audit" then hydrateWirelessProjection(key, payloadJson)
-            else 0.pure[ConnectionIO]
-        yield updated > 0
+    for
+      updated <- IngestionSql
+        .hydrateEvent(
+          stream,
+          key,
+          payloadJson,
+          eventPayloadSha256,
+          inspected.eventKind
+        )
+        .run
+      _ <-
+        if updated > 0 && stream == "wireless.audit" then hydrateWirelessProjection(key, payloadJson)
+        else 0.pure[ConnectionIO]
+    yield updated > 0
 
   private def hydrateWirelessProjection(
     dedupeKey: String,
@@ -804,17 +792,28 @@ class PostgresRepository(
     limit: Int,
     eventDuplicateDistance: Double,
     behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
+    sequenceDistanceThreshold: Double,
+    proxyInputRevision: String = "legacy_unknown"
   ): IO[Either[DatabaseError, Int]] =
-    projectSimilarityKinds(
-      "postgres.project_similarities",
-      limit,
-      List(
-        IntelligenceSql.VectorKind.Event -> eventDuplicateDistance,
-        IntelligenceSql.VectorKind.Behaviour -> (1.0d - behaviorSimilarityThreshold),
-        IntelligenceSql.VectorKind.Sequence -> sequenceDistanceThreshold
-      )
-    )
+    (for
+      wireless <- EitherT(projectSimilarityKinds(
+        "postgres.project_similarities",
+        limit,
+        List(
+          IntelligenceSql.VectorKind.Event -> eventDuplicateDistance,
+          IntelligenceSql.VectorKind.Behaviour -> (1.0d - behaviorSimilarityThreshold),
+          IntelligenceSql.VectorKind.Sequence -> sequenceDistanceThreshold
+        )
+      ))
+      proxy <- EitherT(projectSimilarityKinds(
+        "postgres.project_proxy_similarities",
+        limit,
+        List(IntelligenceSql.VectorKind.Event -> eventDuplicateDistance),
+        "proxy",
+        proxyInputRevision,
+        com.sslproxy.coordinator.processor.ProxyAuthority.Version
+      ))
+    yield wireless + proxy).value
 
   def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): IO[Either[DatabaseError, Int]] =
     projectSimilarityKinds(
@@ -826,7 +825,10 @@ class PostgresRepository(
   private def projectSimilarityKinds(
     operation: String,
     limit: Int,
-    candidates: List[(IntelligenceSql.VectorKind, Double)]
+    candidates: List[(IntelligenceSql.VectorKind, Double)],
+    scope: String = "wireless",
+    inputRevision: String = "legacy_unknown",
+    normalizationVersion: String = "legacy_unknown"
   ): IO[Either[DatabaseError, Int]] =
     runDb(operation) {
       candidates
@@ -834,15 +836,15 @@ class PostgresRepository(
           IntelligenceSql.annReady(kind).unique.flatMap {
             case false => 0.pure[ConnectionIO]
             case true =>
-              IntelligenceSql.similarityAnchors(kind, limit).to[List].flatMap { anchors =>
+              IntelligenceSql.similarityAnchors(kind, limit, scope, inputRevision, normalizationVersion).to[List].flatMap { anchors =>
                 anchors
                   .foldM((0, limit.max(1))) {
                     case ((written, remaining), (vectorId, documentId, model, embedding, embeddedAt)) =>
                       if remaining <= 0 then (written, remaining).pure[ConnectionIO]
                       else
-                        IntelligenceSql.beginSimilarityAnchor(kind, vectorId, documentId, model, embeddedAt) *>
+                        IntelligenceSql.beginSimilarityAnchor(kind, vectorId, documentId, model, embeddedAt, scope, inputRevision, normalizationVersion) *>
                           IntelligenceSql
-                            .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining)
+                            .similarityCandidatesForAnchor(kind, documentId, model, embedding, distance, remaining, scope, inputRevision, normalizationVersion)
                             .to[List]
                             .flatMap { values =>
                               values
@@ -857,7 +859,7 @@ class PostgresRepository(
                                 .flatMap { counts =>
                                   val progress = (written + counts.sum, remaining - values.size)
                                   if PostgresRepository.similarityAnchorExhausted(values.size, remaining) then
-                                    IntelligenceSql.markSimilarityAnchor(kind, vectorId, embeddedAt).as(progress)
+                                    IntelligenceSql.markSimilarityAnchor(kind, vectorId, embeddedAt, scope, inputRevision, normalizationVersion).as(progress)
                                   else progress.pure[ConnectionIO]
                                 }
                             }

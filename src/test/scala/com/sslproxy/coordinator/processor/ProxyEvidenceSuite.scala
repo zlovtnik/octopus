@@ -37,6 +37,60 @@ class ProxyEvidenceSuite extends FunSuite:
       }
     }
 
+  test("legacy host publication excludes unsafe values and preserves safe compatibility hosts"):
+    List("user:password@example.com:443", "example.com\tcredential", "example.com\ncredential", "x" * 1025, "\u00e9" * 513).foreach { host =>
+      assertEquals(ProxyEvidence.safeHost(Some(host), sanitized = false), None)
+    }
+    assertEquals(ProxyEvidence.safeHost(Some("private.example"), sanitized = true), None)
+    assertEquals(ProxyEvidence.safeHost(Some("hmac:synthetic"), sanitized = true), Some("hmac:synthetic"))
+    assertEquals(ProxyEvidence.safeHost(Some("WINDOW.Example:443"), sanitized = false), Some("WINDOW.Example:443"))
+    assertEquals(ProxyEvidence.safeHost(None, sanitized = false), None)
+    val credentialRow = row.deepMerge(Json.obj("host" -> "user:password@example.com:443".asJson,
+      "authority_raw" -> "example.com:443".asJson, "authority_source" -> "connect_authority".asJson))
+    val document = SearchDocumentPreparation.prepare(ProxyEvidence.source(credentialRow, "safe-host", 1L, observed).get).toOption.get
+    assertEquals(document.host, None)
+    assert(!document.detailJson.contains("password"))
+    assert(!document.title.exists(_.contains("password")))
+    assert(!document.normalizedText.contains("password"))
+
+  test("fallback hosts must parse independently of the normalized authority"):
+    val unsafe = List("example.com/path?token=secret", "example.com?token=secret", "example.com#secret",
+      "example.com\\secret", "example.com%2Fsecret", "example.com:99999", "hmac:token?secret", "hmac:token/secret")
+    unsafe.foreach { host =>
+      assertEquals(ProxyEvidence.safeHost(Some(host), sanitized = false), None)
+      assertEquals(ProxyEvidence.safeHost(Some(host), sanitized = true), None)
+      List(Json.obj(), Json.obj("authority_raw" -> "safe.example:443".asJson,
+        "authority_source" -> "connect_authority".asJson)).foreach { authority =>
+        val payload = row.deepMerge(Json.obj("host" -> host.asJson)).deepMerge(authority)
+        val source = ProxyEvidence.source(payload, "unsafe-host", 1L, observed).get
+        val document = SearchDocumentPreparation.prepare(source).toOption.get
+        assertEquals(document.host, None)
+        assertEquals(io.circe.parser.parse(document.detailJson).toOption.get.hcursor.get[Option[String]]("host"), Right(None))
+        assert(!document.title.exists(_.contains(host)))
+        assert(!document.tags.exists(_._1 == "host"))
+        assert(!document.normalizedText.contains("secret"))
+      }
+    }
+    List("WINDOW.Example:443", "192.0.2.4:443", "[2001:db8::1]:443", "2001:db8::1", "hmac:synthetic", "hmac:deadbeef").foreach { host =>
+      assertEquals(ProxyEvidence.safeHost(Some(host), sanitized = false), Some(host))
+    }
+
+  test("duration evidence requires both supported envelope versions"):
+    val measurement = Json.obj("duration_status" -> "connection_elapsed".asJson)
+    val versions = List((None, None), (None, Some("proxy-measurement-v1")),
+      (Some("unknown"), Some("proxy-measurement-v1")), (Some(ProxyEvidence.Version), None),
+      (Some(ProxyEvidence.Version), Some("unknown")), (Some(ProxyEvidence.Version), Some("proxy-measurement-v1")))
+    versions.foreach { case (envelope, version) =>
+      val supported = envelope.contains(ProxyEvidence.Version) && version.contains("proxy-measurement-v1")
+      val payload = row.deepMerge(Json.obj("evidence_version" -> envelope.asJson, "duration_ms" -> 1234.asJson,
+        "measurement" -> measurement.deepMerge(Json.obj("version" -> version.asJson))))
+      val normalized = ProxyEvidence.normalized(payload).hcursor.downField("measurement")
+      assertEquals(normalized.get[String]("duration_status"), Right(if supported then "connection_elapsed" else "legacy_unknown"))
+      assertEquals(normalized.get[Option[Long]]("duration_ms"), Right(Option.when(supported)(1234L)))
+      val source = ProxyEvidence.source(payload, "duration", 1L, observed).get
+      assertEquals(source.searchText.contains("short connection duration"), supported)
+    }
+
   test("legacy zero is unavailable; measured terminal zero is explicit"):
     val legacy = ProxyEvidence.normalized(row)
     assertEquals(legacy.hcursor.downField("measurement").get[String]("bytes_status"), Right("legacy_unknown"))

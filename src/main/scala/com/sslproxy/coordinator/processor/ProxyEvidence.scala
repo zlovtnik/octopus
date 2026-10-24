@@ -29,8 +29,9 @@ object ProxyEvidence:
     else parsed
     val modern = cursor.get[String]("evidence_version").contains(Version)
     val measurement = cursor.downField("measurement")
+    val supportedMeasurement = modern && measurement.get[String]("version").contains("proxy-measurement-v1")
     val declaredStatus = measurement.get[String]("bytes_status").toOption
-      .filter(_ => modern && measurement.get[String]("version").contains("proxy-measurement-v1"))
+      .filter(_ => supportedMeasurement)
       .filter(Set("measured_terminal", "partial", "unavailable")).getOrElse("legacy_unknown")
     val countersValid = List("bytes_up", "bytes_down").forall(key => cursor.get[Long](key).toOption.exists(_ >= 0))
     val status = if Set("measured_terminal", "partial")(declaredStatus) && !countersValid then "unavailable_invalid_counters" else declaredStatus
@@ -45,8 +46,9 @@ object ProxyEvidence:
         "bytes_up" -> (if Set("measured_terminal", "partial").contains(status) then nonnegative("bytes_up") else Json.Null),
         "bytes_down" -> (if Set("measured_terminal", "partial").contains(status) then nonnegative("bytes_down") else Json.Null),
         "duration_status" -> measurement.get[String]("duration_status").toOption
+          .filter(_ => supportedMeasurement)
           .filter(Set("connection_elapsed", "header_latency", "unavailable")).getOrElse("legacy_unknown").asJson,
-        "duration_ms" -> nonnegative("duration_ms"), "byte_unit" -> "bytes".asJson,
+        "duration_ms" -> (if supportedMeasurement then nonnegative("duration_ms") else Json.Null), "byte_unit" -> "bytes".asJson,
         "directions" -> "up_client_to_destination_down_destination_to_client".asJson
       ),
       "tls" -> Json.obj(
@@ -79,6 +81,12 @@ object ProxyEvidence:
   def publicEvidence(evidence: Json): Json =
     evidence.mapObject(_.remove("authority_raw").remove("host_raw"))
 
+  def safeHost(rawHost: Option[String], sanitized: Boolean): Option[String] =
+    rawHost.filter { value =>
+      val token = value.matches("hmac:[A-Za-z0-9_-]+") && value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 1024
+      token || (!sanitized && ProxyAuthority.normalize(Some(value), "legacy_host").host_normalized.isDefined)
+    }
+
   def source(row: Json, eventId: String, revision: Long, observedAt: java.sql.Timestamp): Option[SearchDocumentSource] =
     val c = row.hcursor
     val eventType = c.get[String]("type").getOrElse("")
@@ -88,8 +96,7 @@ object ProxyEvidence:
       val evidence = normalized(row)
       val safe = publicEvidence(evidence)
       val host = evidence.hcursor.get[String]("host_normalized").toOption
-      val legacyHost = rawHost.filter(value => value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 1024 && !value.contains('@') &&
-        (!c.get[String]("sanitization_status").contains("sanitized") || value.startsWith("hmac:")))
+      val legacyHost = safeHost(rawHost, c.get[String]("sanitization_status").contains("sanitized"))
       val classification = c.get[String]("classification").toOption.orElse(c.get[String]("category").toOption)
         .filter(Classifications).getOrElse("unknown")
       val blocked = c.get[Boolean]("blocked").getOrElse(Set("block", "http_blocked", "session.blocked")(eventType))

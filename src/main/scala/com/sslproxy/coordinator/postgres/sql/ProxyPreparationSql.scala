@@ -20,6 +20,8 @@ object ProxyPreparationSql:
   private val Scope = "proxy-event-v2"
   private val MaxWindowRows = 500
   private val PreparationGeneration = 2L
+  private val ParkedWindowError = "proxy window parked; embedding job cancelled"
+  private val ObsoleteInputError = "proxy input revision changed; embedding job cancelled"
   private case class WindowObservation(
       eventId: String,
       normalizedHost: Option[String],
@@ -32,7 +34,8 @@ object ProxyPreparationSql:
       statusCode: Option[Int],
       bytesUp: Long,
       bytesDown: Long,
-      observedAt: Timestamp
+      observedAt: Timestamp,
+      sanitized: Boolean
   )
 
   def guard(lease: Lease): ConnectionIO[Unit] =
@@ -87,6 +90,9 @@ object ProxyPreparationSql:
       after <-
         sql"""SELECT after_revision FROM octopus_core.proxy_preparation_progress
         WHERE scope = $Scope FOR UPDATE""".query[Long].unique
+      // Old-revision jobs cannot be claimed by the replacement worker fleet.
+      // Retire a bounded page before headroom checks so a full old queue drains.
+      cancelled <- cancelObsoleteInputJobs(limit, inputRevision)
       // Count only the bounded prefix necessary to establish scoped headroom.
       pending <- sql"""SELECT count(*) FROM (
         SELECT job.job_id FROM atheros_search.embedding_jobs job
@@ -95,7 +101,13 @@ object ProxyPreparationSql:
           AND job.status IN ('pending', 'leased')
         LIMIT ${highWater.max(1)}
       ) bounded""".query[Long].unique
-      budget = (highWater.toLong - pending).max(0L).min(limit.toLong).toInt
+      // A full queue prevents new work, but must not keep invalidated windows
+      // searchable. This bounded validation pass never publishes/enqueues.
+      retiredWindows <-
+        if pending >= highWater.max(1) then
+          prepareWindows(lease, (limit - cancelled).max(0).min(1), model, inputRevision, allowPublish = false)
+        else 0.pure[ConnectionIO]
+      budget = (highWater.toLong - pending).max(0L).min((limit - cancelled - retiredWindows).toLong).toInt
       changed <-
         if budget == 0 then 0.pure[ConnectionIO]
         else
@@ -198,17 +210,49 @@ object ProxyPreparationSql:
               model,
               inputRevision
             )
+            migrated <- migrateInputRevisions(
+              (budget - (history ++ dirty).map(_._1).distinct.size - windows).max(0),
+              model,
+              inputRevision
+            )
             repaired <- reconcile(
               lease,
-              (budget - (history ++ dirty).map(_._1).distinct.size - windows)
+              (budget - (history ++ dirty).map(_._1).distinct.size - windows - migrated)
                 .max(0),
               model,
               inputRevision
             )
             _ <- guard(lease)
-          yield (history ++ dirty).map(_._1).distinct.size + windows + repaired
+          yield (history ++ dirty).map(_._1).distinct.size + windows + migrated + repaired
       _ <- guard(lease)
-    yield changed
+    yield changed + cancelled + retiredWindows
+
+  private def cancelObsoleteInputJobs(limit: Int, inputRevision: String): ConnectionIO[Int] =
+    sql"""SELECT job.job_id::text, doc.source_table, doc.source_key
+      FROM atheros_search.embedding_jobs job
+      JOIN atheros_search.search_documents doc ON doc.document_id = job.document_id
+      WHERE doc.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+        AND job.input_revision <> $inputRevision AND job.status IN ('pending', 'leased')
+      ORDER BY job.job_id LIMIT $limit""".query[(String, String, String)].to[List].flatMap { jobs =>
+      jobs.traverse { case (id, table, key) =>
+        for
+          _ <- guardGeneration(table, key)
+          _ <- sql"""SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(CAST($table AS text), CAST($key AS text))::text, 0)) IS NULL"""
+            .query[Boolean].unique
+          count <- sql"""UPDATE atheros_search.embedding_jobs SET status = 'cancelled', owner_id = NULL,
+            lease_token = NULL, lease_expires_at = NULL, last_error = $ObsoleteInputError, updated_at = clock_timestamp()
+            WHERE job_id = $id::uuid AND input_revision <> $inputRevision AND status IN ('pending', 'leased')""".update.run
+        yield count
+      }.map(_.sum)
+    }
+
+  private def guardGeneration(table: String, key: String): ConnectionIO[Unit] =
+    sql"""SELECT preparation_generation FROM atheros_search.proxy_document_state
+      WHERE source_table = $table AND source_key = $key FOR UPDATE""".query[Long].option.flatMap {
+      case Some(generation) if generation > PreparationGeneration =>
+        FC.raiseError(IllegalStateException("proxy preparation generation is stale"))
+      case _ => FC.unit
+    }
 
   private def publish(
       id: String,
@@ -286,31 +330,82 @@ object ProxyPreparationSql:
             document_id = ${document.documentId}::uuid, template_version = ${source.templateVersion},
             normalization_version = ${source.normalizationVersion}, disposition = 'prepared', updated_at = clock_timestamp()
             WHERE source_table = $table AND source_key = ${source.sourceKey}""".update.run
-            id = UUID
-              .nameUUIDFromBytes(
-                List(
-                  document.documentId,
-                  model,
-                  source.inputRevision,
-                  document.normalizedSha256
-                )
-                  .map(p => s"${p.length}:$p")
-                  .mkString
-                  .getBytes(UTF_8)
-              )
-              .toString
             _ <-
               sql"""UPDATE atheros_search.embedding_jobs SET status = 'cancelled', owner_id = NULL,
-            lease_token = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+            lease_token = NULL, lease_expires_at = NULL,
+            last_error = CASE WHEN input_revision <> ${source.inputRevision} THEN $ObsoleteInputError ELSE last_error END,
+            updated_at = clock_timestamp()
             WHERE document_id = ${document.documentId}::uuid AND embedding_model = $model AND status IN ('pending', 'leased')
               AND (input_revision <> ${source.inputRevision} OR content_sha256 <> ${document.normalizedSha256})""".update.run
-            _ <-
-              sql"""INSERT INTO atheros_search.embedding_jobs(job_id, document_id, embedding_kind, embedding_model,
-            content_sha256, input_revision) VALUES ($id::uuid, ${document.documentId}::uuid, 'event', $model,
-            ${document.normalizedSha256}, ${source.inputRevision}) ON CONFLICT DO NOTHING""".update.run
+            _ <- enqueueJob(document.documentId, document.normalizedSha256, model, source.inputRevision,
+              source.kind == SearchDocumentKind.ProxyBlockedHostWindow)
           yield ()
       _ <- guard(lease)
     yield ()
+
+  private def enqueueJob(
+      documentId: String,
+      checksum: String,
+      model: String,
+      inputRevision: String,
+      resumeParked: Boolean = false
+  ): ConnectionIO[Unit] =
+    val id = UUID.nameUUIDFromBytes(List(documentId, model, inputRevision, checksum)
+      .map(p => s"${p.length}:$p").mkString.getBytes(UTF_8)).toString
+    for
+      _ <- sql"""INSERT INTO atheros_search.embedding_jobs(job_id, document_id, embedding_kind, embedding_model,
+        content_sha256, input_revision) VALUES ($id::uuid, $documentId::uuid, 'event', $model,
+        $checksum, $inputRevision) ON CONFLICT DO NOTHING""".update.run
+      // Revision rollbacks and metadata corrections retain job identity.
+      // Resume only preparer cancellations, preserving terminal outcomes.
+      _ <- sql"""UPDATE atheros_search.embedding_jobs SET status = 'pending', last_error = NULL,
+        next_attempt_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE job_id = $id::uuid AND status = 'cancelled'
+          AND (last_error = $ObsoleteInputError OR ($resumeParked AND last_error = $ParkedWindowError))
+          AND attempt_count < max_attempts""".update.run
+    yield ()
+
+  private def migrateInputRevisions(budget: Int, model: String, inputRevision: String): ConnectionIO[Int] =
+    if budget <= 0 then 0.pure[ConnectionIO]
+    else
+      sql"""SELECT document_id::text, source_table, source_key FROM atheros_search.search_documents
+        WHERE source_kind IN ('proxy_event', 'proxy_blocked_host_window') AND status = 'active'
+          AND input_revision <> $inputRevision
+        ORDER BY document_id LIMIT $budget""".query[(String, String, String)].to[List].flatMap { documents =>
+        documents.traverse { case (id, table, key) =>
+          for
+            _ <- guardGeneration(table, key)
+            _ <- sql"""SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(CAST($table AS text), CAST($key AS text))::text, 0)) IS NULL"""
+              .query[Boolean].unique
+            // Recheck after taking the same source lock as worker completion.
+            current <- sql"""SELECT normalized_sha256, host, detail_json::text, proxy_event_type, tags::text
+              FROM atheros_search.search_documents
+              WHERE document_id = $id::uuid AND status = 'active' AND input_revision <> $inputRevision
+              FOR UPDATE""".query[(String, Option[String], String, Option[String], String)].option
+            _ <- current.traverse_ { case (checksum, rawHost, rawDetail, eventType, rawTags) =>
+              for
+                detail <- parser.parse(rawDetail).fold(FC.raiseError[Json], _.pure[ConnectionIO])
+                tags <- parser.parse(rawTags).flatMap(json => json.asArray.toRight(
+                  io.circe.DecodingFailure("proxy tags must be an array", Nil))).fold(FC.raiseError[Vector[Json]], _.pure[ConnectionIO])
+                host = ProxyEvidence.safeHost(rawHost, detail.hcursor.get[String]("sanitization_status").contains("sanitized"))
+                safeDetail = ProxyEvidence.publicEvidence(detail).deepMerge(Json.obj("host" -> host.asJson)).noSpaces
+                titleParts = List(eventType, host).flatten.map(_.trim).filter(_.nonEmpty).distinct
+                title = Option.when(titleParts.nonEmpty)(titleParts.mkString(" ").take(512))
+                tagHost = host.filter(_.length <= 255)
+                safeTags = (tags.filterNot(_.hcursor.get[String]("type").contains("host")) ++ tagHost.map(value =>
+                  Json.obj("type" -> "host".asJson, "value" -> value.asJson))).asJson.noSpaces
+                _ <- sql"""UPDATE atheros_search.search_documents SET input_revision = $inputRevision,
+                  host = $host, detail_json = $safeDetail::jsonb, title = $title, tags = $safeTags::jsonb,
+                  updated_at = clock_timestamp() WHERE document_id = $id::uuid""".update.run
+                _ <- sql"DELETE FROM atheros_search.search_document_tags WHERE document_id = $id::uuid AND tag_type = 'host'".update.run
+                _ <- tagHost.traverse_(value => sql"""INSERT INTO atheros_search.search_document_tags(document_id,tag_type,tag_value)
+                  VALUES ($id::uuid,'host',$value)""".update.run)
+                _ <- enqueueJob(id, checksum, model, inputRevision)
+              yield ()
+            }
+          yield current.fold(0)(_ => 1)
+        }.map(_.sum)
+      }
 
   private def reconcile(
       lease: Lease,
@@ -339,18 +434,8 @@ object ProxyPreparationSql:
             .query[(String, String)]
             .to[List]
         _ <- documents.traverse_ { case (documentId, checksum) =>
-          val id = UUID
-            .nameUUIDFromBytes(
-              List(documentId, model, inputRevision, checksum)
-                .map(p => s"${p.length}:$p")
-                .mkString
-                .getBytes(UTF_8)
-            )
-            .toString
           for
-            _ <-
-              sql"""INSERT INTO atheros_search.embedding_jobs(job_id, document_id, embedding_kind, embedding_model, content_sha256, input_revision)
-              VALUES ($id::uuid, $documentId::uuid, 'event', $model, $checksum, $inputRevision) ON CONFLICT DO NOTHING""".update.run
+            _ <- enqueueJob(documentId, checksum, model, inputRevision)
             _ <- sql"""WITH repair AS (
               SELECT job.job_id FROM atheros_search.embedding_jobs job
               WHERE job.document_id = $documentId::uuid AND job.embedding_model = $model AND job.embedding_kind = 'event'
@@ -380,11 +465,30 @@ object ProxyPreparationSql:
         _ <- guard(lease)
       yield documents.size
 
+  private def retireWindow(key: String): ConnectionIO[Unit] =
+    val table = SearchDocumentKind.ProxyBlockedHostWindow.sourceTable
+    for
+      _ <- guardGeneration(table, key)
+      // Serialize retirement against both publication and worker completion.
+      _ <- sql"""SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(CAST($table AS text), CAST($key AS text))::text, 0)) IS NULL"""
+        .query[Boolean].unique
+      ids <- sql"""UPDATE atheros_search.search_documents SET status = 'superseded', updated_at = clock_timestamp()
+        WHERE source_table = $table AND source_key = $key AND source_kind = 'proxy_blocked_host_window'
+          AND status = 'active' RETURNING document_id::text""".query[String].to[List]
+      _ <- ids.traverse_ { id =>
+        sql"""UPDATE atheros_search.embedding_jobs SET status = 'cancelled', owner_id = NULL,
+          lease_token = NULL, lease_expires_at = NULL, last_error = $ParkedWindowError,
+          updated_at = clock_timestamp()
+          WHERE document_id = $id::uuid AND status IN ('pending', 'leased')""".update.run.void
+      }
+    yield ()
+
   private def prepareWindows(
       lease: Lease,
       limit: Int,
       model: String,
-      inputRevision: String
+      inputRevision: String,
+      allowPublish: Boolean = true
   ): ConnectionIO[Int] =
     if limit == 0 then 0.pure[ConnectionIO]
     else
@@ -407,7 +511,8 @@ object ProxyPreparationSql:
                     .unique
                 rows <- sql"""SELECT event_id, evidence->>'host_normalized', COALESCE(registered_device_id::text, ''),
                 evidence->>'normalization_version', observation_revision, host, event_type, classification,
-                status_code, bytes_up, bytes_down, event_time FROM octopus_core.proxy_events
+                status_code, bytes_up, bytes_down, event_time,
+                COALESCE(evidence->>'sanitization_status', '') = 'sanitized' FROM octopus_core.proxy_events
               WHERE blocked AND event_time >= $start AND event_time < $end
                 AND event_type IN ('block', 'http_blocked', 'session.blocked', 'http_proxied', 'http_error', 'tunnel_open', 'tunnel_close')
               ORDER BY event_time, event_id LIMIT ${MaxWindowRows + 1}"""
@@ -416,7 +521,8 @@ object ProxyPreparationSql:
                 memberRows <-
                   sql"""SELECT event_id, evidence->>'host_normalized', COALESCE(registered_device_id::text, ''),
                 evidence->>'normalization_version', observation_revision, host, event_type, classification,
-                status_code, bytes_up, bytes_down, event_time FROM octopus_core.proxy_events
+                status_code, bytes_up, bytes_down, event_time,
+                COALESCE(evidence->>'sanitization_status', '') = 'sanitized' FROM octopus_core.proxy_events
               WHERE blocked AND event_time >= $start AND event_time < $end
                 AND event_type IN ('block', 'http_blocked', 'session.blocked', 'http_proxied', 'http_error', 'tunnel_open', 'tunnel_close')
                 AND host = $rawHost AND COALESCE(registered_device_id::text, '') = $deviceKey
@@ -440,11 +546,14 @@ object ProxyPreparationSql:
                         else if memberRows.size > MaxWindowRows then "input_limit"
                         else "ambiguous_normalization"
                       }, observed_rows_lower_bound = ${memberRows.size}
-                WHERE window_start = $start AND host = $rawHost AND device_key = $deviceKey AND revision = $revision""".update.run.void
+                WHERE window_start = $start AND host = $rawHost AND device_key = $deviceKey AND revision = $revision""".update.run.void *>
+                      retireWindow(key)
+                  else if !allowPublish then FC.unit
                   else
                     val host = hosts.head
+                    val legacyHost = ProxyEvidence.safeHost(Some(rawHost), members.exists(_.sanitized))
                     val detail = Json.obj(
-                      "host" -> rawHost.asJson,
+                      "host" -> legacyHost.asJson,
                       "host_normalized" -> host.asJson,
                       "window_start" -> start.toInstant.toString.asJson,
                       "window_end" -> end.toInstant.toString.asJson,
@@ -498,7 +607,7 @@ object ProxyPreparationSql:
                       false,
                       s"blocked proxy host window $host blocked observations attempts unknown",
                       detail.noSpaces,
-                      host = Some(rawHost),
+                      host = legacyHost,
                       proxyDeviceId =
                         Option.when(deviceKey.nonEmpty)(deviceKey),
                       blocked = Some(true),

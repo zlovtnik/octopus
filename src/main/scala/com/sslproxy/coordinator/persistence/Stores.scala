@@ -108,7 +108,8 @@ trait ProjectionStore[F[_]]:
     limit: Int,
     eventDuplicateDistance: Double,
     behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
+    sequenceDistanceThreshold: Double,
+    proxyInputRevision: String = "legacy_unknown"
   ): DbResultT[F, Int]
   def projectDeviceSimilarities(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]
   def projectClusterCandidates(limit: Int, minimumSimilarity: Double): DbResultT[F, Int]

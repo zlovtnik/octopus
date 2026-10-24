@@ -4,6 +4,8 @@ Feature: Wireless processor contracts
   Wireless projection receipts use group/topic/partition/offset identities.
   A new broker history uses a new versioned consumer group while shared
   payload hashes prevent duplicate projection effects across histories.
+  Similarity projection runs separate wireless and proxy passes; proxy pairs
+  use the configured input revision and current authority normalization version.
 
   Scenario Outline: An Octopus wireless processor has its declared durable contract
     Given processor "<processor>" belongs to "wireless"

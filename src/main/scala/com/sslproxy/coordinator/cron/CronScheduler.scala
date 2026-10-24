@@ -189,7 +189,8 @@ final class CronScheduler private (
     interval: FiniteDuration,
     eventDuplicateDistance: Double,
     behaviorSimilarityThreshold: Double,
-    sequenceDistanceThreshold: Double
+    sequenceDistanceThreshold: Double,
+    proxyInputRevision: String = "legacy_unknown"
   ): Stream[IO, Unit] =
     projectionStream(
       ProcessorId.WirelessSimilarityProjector,
@@ -199,7 +200,8 @@ final class CronScheduler private (
           batchSize,
           eventDuplicateDistance,
           behaviorSimilarityThreshold,
-          sequenceDistanceThreshold
+          sequenceDistanceThreshold,
+          proxyInputRevision
         )
         .value
     )

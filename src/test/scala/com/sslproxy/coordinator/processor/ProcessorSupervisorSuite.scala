@@ -2,10 +2,11 @@ package com.sslproxy.coordinator.processor
 
 import cats.data.EitherT
 import cats.effect.{Deferred, IO, Ref}
-import com.sslproxy.coordinator.config.ProcessorConfig
+import com.sslproxy.coordinator.config.{ProcessorConfig, RuntimeConfig}
 import com.sslproxy.coordinator.domain.{DatabaseError, RetryableDependencyException}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.{DatabaseOperationException, ProcessorStateStore}
+import com.sslproxy.coordinator.wiring.RuntimeStreams
 import fs2.Stream
 import munit.CatsEffectSuite
 
@@ -171,6 +172,57 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
         runtimeEnabled.foreach { id =>
           assertEquals(statuses(id).lifecycle, ProcessorLifecycle.Starting)
         }
+      }
+  }
+
+  test("proxy preparation starts without executing any wireless or shared preparation workload") {
+    val proxy = ProcessorId.ProxySearchPreparer
+    val config = ProcessorConfig(List(proxy.value), 1L, 10L)
+    for
+      executed <- Ref.of[IO, Set[ProcessorId]](Set.empty)
+      proxyStarted <- Deferred[IO, Unit]
+      supervisor <- ProcessorSupervisor.create(config)
+      workloads = ProcessorId.octopusOwned.map { id =>
+        val observed = executed.update(_ + id) *>
+          (if id == proxy then proxyStarted.complete(()).void else IO.unit)
+        ProcessorWorkload(id, Stream.eval(observed) ++ Stream.never[IO])
+      }
+      fiber <- supervisor.run(workloads).compile.drain.start
+      _ <- (for
+        _ <- proxyStarted.get.timeout(2.seconds)
+        statuses <- supervisor.readiness.statuses
+        observed <- executed.get
+      yield
+        assertEquals(observed, Set(proxy))
+        assertEquals(statuses(proxy).lifecycle, ProcessorLifecycle.Ready)
+        assert(statuses.filterNot(_._1 == proxy).values.forall(_.lifecycle == ProcessorLifecycle.Disabled))
+      ).guarantee(fiber.cancel)
+    yield ()
+  }
+
+  test("consumer union stays visible alongside a proxy-only preparation selection") {
+    val proxy = ProcessorId.ProxySearchPreparer
+    val config = ProcessorConfig(List(proxy.value), 1L, 10L)
+    val runtime = RuntimeConfig(processorsEnabled = true, consumersEnabled = true)
+    val consumers = RuntimeStreams.runtimeConsumerProcessorIds(runtime)
+
+    assertEquals(consumers, Set(
+      ProcessorId.SyncScanIngestion,
+      ProcessorId.SyncLoadConsumer,
+      ProcessorId.SyncResultConsumer,
+      ProcessorId.WirelessAuditProjection,
+      ProcessorId.WirelessHeartbeatIngestion
+    ))
+    assertEquals(RuntimeStreams.runtimeConsumerProcessorIds(runtime.copy(consumersEnabled = false)), Set.empty[ProcessorId])
+    ProcessorSupervisor
+      .create(config, RecordingProcessorStateStore.volatile, None, consumers)
+      .flatMap(_.readiness.statuses)
+      .map { statuses =>
+        val starting = statuses.collect { case (id, status) if status.lifecycle == ProcessorLifecycle.Starting => id }.toSet
+        assertEquals(starting, consumers + proxy)
+        assertEquals(statuses(ProcessorId.EmbeddingTextBuilder).lifecycle, ProcessorLifecycle.Disabled)
+        assertEquals(statuses(ProcessorId.EmbeddingPreparer).lifecycle, ProcessorLifecycle.Disabled)
+        assertEquals(statuses(ProcessorId.WirelessInventoryProjector).lifecycle, ProcessorLifecycle.Disabled)
       }
   }
 

@@ -43,6 +43,10 @@ object ProxyEvidence:
       "evidence_version" -> (if modern then Version else "legacy_unknown").asJson,
       "measurement" -> Json.obj(
         "bytes_status" -> status.asJson,
+        "source" -> measurement.get[String]("source").toOption.filter(_ => supportedMeasurement)
+          .filter(Set("successful_socket_writes", "unavailable")).getOrElse("legacy_unknown").asJson,
+        "termination" -> measurement.get[String]("termination").toOption.filter(_ => supportedMeasurement)
+          .filter(Set("measured_terminal", "partial", "unavailable")).getOrElse("legacy_unknown").asJson,
         "bytes_up" -> (if Set("measured_terminal", "partial").contains(status) then nonnegative("bytes_up") else Json.Null),
         "bytes_down" -> (if Set("measured_terminal", "partial").contains(status) then nonnegative("bytes_down") else Json.Null),
         "duration_status" -> measurement.get[String]("duration_status").toOption
@@ -55,7 +59,8 @@ object ProxyEvidence:
         "semantics" -> "clienthello_offers_not_negotiated".asJson,
         "parse_status" -> tls.get[String]("parse_status").toOption
           .filter(Set("parsed", "incomplete", "non_tls_or_invalid", "parse_failure", "non_tls", "read_error", "timeout", "unavailable")).getOrElse("legacy_unknown").asJson,
-        "parser_version" -> (if modern then "proxy-clienthello-v1" else "legacy_unknown").asJson,
+        "parser_version" -> tls.get[String]("parser_version").toOption.filter(_ => modern)
+          .filter(Set("proxy-clienthello-v1", "proxy-clienthello-v2")).getOrElse("legacy_unknown").asJson,
         "offered_version" -> tls.get[String]("offered_version").toOption.filter(Set("TLS1.0", "TLS1.1", "TLS1.2", "TLS1.3")).asJson,
         "offered_alpn" -> tls.get[String]("offered_alpn").toOption.filter(_.matches("[A-Za-z0-9,./_-]{1,64}")).asJson
       ),

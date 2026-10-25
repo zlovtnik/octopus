@@ -206,6 +206,15 @@ object IntelligenceSql:
               OR scanned.embedded_at < vector.embedded_at
               OR scanned.completed_at IS NULL)
              AND vector.content_sha256 = document.normalized_sha256
+             AND EXISTS (
+               SELECT 1 FROM atheros_search.embeddings unified
+               WHERE unified.document_id = vector.document_id
+                 AND unified.embedding_kind = $embeddingKind
+                 AND unified.embedding_model = vector.embedding_model
+                 AND unified.input_revision = vector.input_revision
+                 AND unified.content_sha256 = vector.content_sha256
+                 AND unified.embedding OPERATOR(public.=) vector.embedding
+             )
              AND document.normalization_version = $normVersion
              AND vector.input_revision = document.input_revision AND vector.input_revision = $inputRevision
              AND document.normalized_sha256 = encode(sha256(convert_to(document.normalized_text, 'UTF8')), 'hex')
@@ -308,6 +317,15 @@ object IntelligenceSql:
              WHERE candidate.document_id <> CAST($anchorDocumentId AS uuid)
                AND candidate.embedding_model = $anchorEmbeddingModel
                AND candidate.content_sha256 = candidate_document.normalized_sha256
+               AND EXISTS (
+                 SELECT 1 FROM atheros_search.embeddings unified
+                 WHERE unified.document_id = candidate.document_id
+                   AND unified.embedding_kind = $embeddingKind
+                   AND unified.embedding_model = candidate.embedding_model
+                   AND unified.input_revision = candidate.input_revision
+                   AND unified.content_sha256 = candidate.content_sha256
+                   AND unified.embedding OPERATOR(public.=) candidate.embedding
+               )
                AND candidate_document.normalization_version = $normVersion
                AND candidate.input_revision = candidate_document.input_revision AND candidate.input_revision = $inputRevision
                AND candidate_document.normalized_sha256 = encode(sha256(convert_to(candidate_document.normalized_text, 'UTF8')), 'hex')
@@ -315,9 +333,16 @@ object IntelligenceSql:
                  JOIN atheros_search.search_documents anchor_current ON anchor_current.document_id = anchor_vector.document_id
                  WHERE anchor_vector.document_id = CAST($anchorDocumentId AS uuid)
                    AND anchor_current.status = 'active' AND anchor_vector.content_sha256 = anchor_current.normalized_sha256
+                   AND anchor_current.normalized_sha256 = encode(sha256(convert_to(anchor_current.normalized_text, 'UTF8')), 'hex')
                    AND anchor_vector.embedding_kind = $embeddingKind AND anchor_vector.embedding_model = $anchorEmbeddingModel
                    AND anchor_vector.input_revision = $inputRevision AND anchor_vector.input_revision = anchor_current.input_revision
-                   AND anchor_vector.embedding::text = CAST($anchorEmbedding AS public.vector)::text)
+                   AND anchor_vector.embedding OPERATOR(public.=) CAST($anchorEmbedding AS public.vector)
+                   AND EXISTS (SELECT 1 FROM""" ++ Fragment.const(s" atheros_search.${kind.table} ") ++ fr"""anchor_per_kind
+                     WHERE anchor_per_kind.document_id = anchor_vector.document_id
+                       AND anchor_per_kind.embedding_model = anchor_vector.embedding_model
+                       AND anchor_per_kind.input_revision = anchor_vector.input_revision
+                       AND anchor_per_kind.content_sha256 = anchor_vector.content_sha256
+                       AND anchor_per_kind.embedding OPERATOR(public.=) anchor_vector.embedding))
                AND EXISTS (SELECT 1 FROM atheros_search.search_documents anchor_document
                  WHERE anchor_document.document_id = CAST($anchorDocumentId AS uuid) AND anchor_document.status = 'active'
                    AND anchor_document.input_revision = $inputRevision

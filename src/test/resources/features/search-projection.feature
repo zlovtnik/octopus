@@ -1,5 +1,11 @@
 @processor-rf-alert-projector @processor-threat-risk-projector
 Feature: Search projection processor contracts
+  Legacy blocked-host intensity remains explicitly uncalibrated observation
+  evidence, with no claim of measured transfer, attempts or a confirmed threat.
+  Expired or corrected source evidence resolves its signal; renewed qualifying
+  observations may reopen it. Late observations preserve event-time latest
+  rollup metadata. Similarity requires current text and matching unified and
+  per-kind vectors on both sides within the selected scope and input revision.
 
   Scenario Outline: An Octopus search projection processor has its declared durable contract
     Given processor "<processor>" belongs to "search_projection"

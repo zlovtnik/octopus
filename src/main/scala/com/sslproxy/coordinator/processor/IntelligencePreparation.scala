@@ -331,8 +331,10 @@ object IntelligencePreparation:
   def dnsThreat(candidate: DnsThreatCandidate): DnsThreatProjection =
     val blocked = candidate.blockedCount.max(0L)
     val denominator = blocked.max(1L)
-    val averageBytes = candidate.attemptedBytes.toDouble / denominator.toDouble
-    val recencyWeight = 1.0d + (2.0d * candidate.recentCount.max(0L).toDouble / denominator.toDouble)
+    val bytes = candidate.attemptedBytes.max(0L)
+    val recent = candidate.recentCount.max(0L).min(blocked)
+    val averageBytes = bytes.toDouble / denominator.toDouble
+    val recencyWeight = 1.0d + (2.0d * recent.toDouble / denominator.toDouble)
     val score = blocked.toDouble * (averageBytes + 1.0d) * recencyWeight
     val severity =
       if score >= 1000.0d then "critical"
@@ -350,7 +352,12 @@ object IntelligencePreparation:
           "blocked_count_7d" -> Json.fromLong(candidate.blockedCount),
           "attempted_bytes_7d" -> Json.fromLong(candidate.attemptedBytes),
           "recent_count_24h" -> Json.fromLong(candidate.recentCount),
-          "legacy_recency_weight" -> Json.fromDoubleOrNull(recencyWeight)
+          "legacy_recency_weight" -> Json.fromDoubleOrNull(recencyWeight),
+          "score_version" -> Json.fromString("legacy-blocked-intensity-v1"),
+          "calibration_status" -> Json.fromString("uncalibrated"),
+          "count_semantics" -> Json.fromString("retained_observations_not_attempts"),
+          "byte_semantics" -> Json.fromString("legacy_scalar_sum_not_validated_transfer"),
+          "confirmed_threat" -> Json.fromBoolean(false)
         )
         .noSpaces,
       candidate.lastSeen,

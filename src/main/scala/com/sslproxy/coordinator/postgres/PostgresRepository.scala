@@ -905,10 +905,14 @@ class PostgresRepository(
 
   def projectDnsThreats(limit: Int): IO[Either[DatabaseError, Int]] =
     runDb("postgres.project_dns_threats") {
-      ThreatRiskSql.dnsCandidates(limit).to[List].flatMap { candidates =>
-        candidates
-          .traverse(candidate => ThreatRiskSql.persistDnsThreat(IntelligencePreparation.dnsThreat(candidate)))
-          .map(_.sum)
+      val budget = limit.max(1)
+      ThreatRiskSql.resolveStaleDnsThreats(budget).flatMap { resolved =>
+        if resolved >= budget then resolved.pure[ConnectionIO]
+        else ThreatRiskSql.dnsCandidates(budget - resolved).to[List].flatMap { candidates =>
+          candidates
+            .traverse(candidate => ThreatRiskSql.persistDnsThreat(IntelligencePreparation.dnsThreat(candidate)))
+            .map(_.sum + resolved)
+        }
       }
     }
 

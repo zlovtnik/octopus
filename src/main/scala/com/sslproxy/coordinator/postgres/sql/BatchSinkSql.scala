@@ -35,20 +35,33 @@ object BatchSinkSql:
       |ON CONFLICT (host) DO UPDATE SET
       |  blocked_attempts = proxy_blocked_host_rollups.blocked_attempts + 1,
       |  blocked_bytes = proxy_blocked_host_rollups.blocked_bytes + EXCLUDED.blocked_bytes,
-      |  frequency_hz = COALESCE(EXCLUDED.frequency_hz, proxy_blocked_host_rollups.frequency_hz),
-      |  verdict = COALESCE(EXCLUDED.verdict, proxy_blocked_host_rollups.verdict),
-      |  category = COALESCE(EXCLUDED.category, proxy_blocked_host_rollups.category),
-      |  risk_score = COALESCE(EXCLUDED.risk_score, proxy_blocked_host_rollups.risk_score),
+      |  frequency_hz = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.frequency_hz, proxy_blocked_host_rollups.frequency_hz) ELSE proxy_blocked_host_rollups.frequency_hz END,
+      |  verdict = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.verdict, proxy_blocked_host_rollups.verdict) ELSE proxy_blocked_host_rollups.verdict END,
+      |  category = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.category, proxy_blocked_host_rollups.category) ELSE proxy_blocked_host_rollups.category END,
+      |  risk_score = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.risk_score, proxy_blocked_host_rollups.risk_score) ELSE proxy_blocked_host_rollups.risk_score END,
       |  tarpit_held_ms = proxy_blocked_host_rollups.tarpit_held_ms + COALESCE(EXCLUDED.tarpit_held_ms, 0),
-      |  iat_ms = COALESCE(EXCLUDED.iat_ms, proxy_blocked_host_rollups.iat_ms),
-      |  consecutive_blocks = COALESCE(EXCLUDED.consecutive_blocks, proxy_blocked_host_rollups.consecutive_blocks + 1),
-      |  last_verdict = COALESCE(EXCLUDED.last_verdict, EXCLUDED.verdict, proxy_blocked_host_rollups.last_verdict),
-      |  tls_ver = COALESCE(EXCLUDED.tls_ver, proxy_blocked_host_rollups.tls_ver),
-      |  alpn = COALESCE(EXCLUDED.alpn, proxy_blocked_host_rollups.alpn),
-      |  ja3_lite = COALESCE(EXCLUDED.ja3_lite, proxy_blocked_host_rollups.ja3_lite),
-      |  resolved_ip = COALESCE(EXCLUDED.resolved_ip, proxy_blocked_host_rollups.resolved_ip),
-      |  asn_org = COALESCE(EXCLUDED.asn_org, proxy_blocked_host_rollups.asn_org),
-      |  updated_at = CURRENT_TIMESTAMP""".stripMargin
+      |  iat_ms = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.iat_ms, proxy_blocked_host_rollups.iat_ms) ELSE proxy_blocked_host_rollups.iat_ms END,
+      |  consecutive_blocks = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.consecutive_blocks, proxy_blocked_host_rollups.consecutive_blocks + 1) ELSE proxy_blocked_host_rollups.consecutive_blocks END,
+      |  last_verdict = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.last_verdict, EXCLUDED.verdict, proxy_blocked_host_rollups.last_verdict) ELSE proxy_blocked_host_rollups.last_verdict END,
+      |  tls_ver = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.tls_ver, proxy_blocked_host_rollups.tls_ver) ELSE proxy_blocked_host_rollups.tls_ver END,
+      |  alpn = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.alpn, proxy_blocked_host_rollups.alpn) ELSE proxy_blocked_host_rollups.alpn END,
+      |  ja3_lite = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.ja3_lite, proxy_blocked_host_rollups.ja3_lite) ELSE proxy_blocked_host_rollups.ja3_lite END,
+      |  resolved_ip = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.resolved_ip, proxy_blocked_host_rollups.resolved_ip) ELSE proxy_blocked_host_rollups.resolved_ip END,
+      |  asn_org = CASE WHEN EXCLUDED.updated_at >= proxy_blocked_host_rollups.updated_at
+      |    THEN COALESCE(EXCLUDED.asn_org, proxy_blocked_host_rollups.asn_org) ELSE proxy_blocked_host_rollups.asn_org END,
+      |  first_seen = LEAST(proxy_blocked_host_rollups.first_seen, EXCLUDED.first_seen),
+      |  updated_at = GREATEST(proxy_blocked_host_rollups.updated_at, EXCLUDED.updated_at)""".stripMargin
 
   val InsertProxyPayloadAudit: String =
     """INSERT INTO proxy_payload_audit (

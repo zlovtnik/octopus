@@ -99,6 +99,41 @@ class ProxyEvidenceSuite extends FunSuite:
       "measurement" -> Json.obj("version" -> "proxy-measurement-v1".asJson, "bytes_status" -> "measured_terminal".asJson)))
     assertEquals(ProxyEvidence.normalized(modern).hcursor.downField("measurement").get[Long]("bytes_up"), Right(0L))
 
+  test("public measurement evidence retains supported source and termination without copying arbitrary values"):
+    val versions = List((None, None), (None, Some("proxy-measurement-v1")),
+      (Some(ProxyEvidence.Version), None), (Some(ProxyEvidence.Version), Some("unknown")),
+      (Some(ProxyEvidence.Version), Some("proxy-measurement-v1")))
+    versions.foreach { case (envelope, version) =>
+      val supported = envelope.contains(ProxyEvidence.Version) && version.contains("proxy-measurement-v1")
+      List("measured_terminal", "partial", "unavailable", "private-device").foreach { termination =>
+        List("successful_socket_writes", "unavailable", "private-device").foreach { source =>
+          val payload = row.deepMerge(Json.obj("evidence_version" -> envelope.asJson,
+            "measurement" -> Json.obj("version" -> version.asJson, "bytes_status" -> "partial".asJson,
+              "source" -> source.asJson, "termination" -> termination.asJson)))
+          val measurement = ProxyEvidence.publicEvidence(ProxyEvidence.normalized(payload)).hcursor.downField("measurement")
+          assertEquals(measurement.get[String]("source"),
+            Right(if supported && Set("successful_socket_writes", "unavailable")(source) then source else "legacy_unknown"))
+          assertEquals(measurement.get[String]("termination"),
+            Right(if supported && Set("measured_terminal", "partial", "unavailable")(termination) then termination else "legacy_unknown"))
+          assert(!measurement.focus.get.noSpaces.contains("private-device"))
+        }
+      }
+    }
+
+  test("ClientHello parser revisions are preserved without inventing legacy provenance"):
+    for
+      modern <- List(false, true)
+      version <- List(None, Some("proxy-clienthello-v1"), Some("proxy-clienthello-v2"), Some("private-device"))
+    do
+      val payload = row.deepMerge(Json.obj(
+        "evidence_version" -> Option.when(modern)(ProxyEvidence.Version).asJson,
+        "tls_evidence" -> Json.obj("parser_version" -> version.asJson)))
+      val expected = version.filter(_ => modern)
+        .filter(Set("proxy-clienthello-v1", "proxy-clienthello-v2")).getOrElse("legacy_unknown")
+      val published = ProxyEvidence.publicEvidence(ProxyEvidence.normalized(payload))
+      assertEquals(published.hcursor.downField("tls").get[String]("parser_version"), Right(expected))
+      assert(!published.noSpaces.contains("private-device"))
+
   test("sanitized and truncated authorities cannot acquire exact grouping fields"):
     List(row.deepMerge(Json.obj("sanitization_status" -> "sanitized".asJson)),
       row.deepMerge(Json.obj("authority_truncated" -> true.asJson))).foreach { value =>

@@ -5,6 +5,30 @@ import doobie.implicits.*
 import doobie.{ConnectionIO, Query0}
 
 object ThreatRiskSql:
+  // Keep the historical row and its evidence. Resolution records absence of the
+  // qualifying retained observations, not confirmation that a threat ended.
+  def resolveStaleDnsThreats(limit: Int): ConnectionIO[Int] =
+    sql"""WITH stale AS (
+             SELECT signal.source_key
+             FROM atheros_search.threat_signals signal
+             WHERE signal.signal_type = 'dns_blocked_host'
+               AND signal.resolved_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM proxy_events event
+                 WHERE event.host = substring(signal.source_key from 5)
+                   AND event.blocked = TRUE
+                   AND event.event_time >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                   AND event.event_time <= CURRENT_TIMESTAMP
+                 OFFSET 1 LIMIT 1
+               )
+             ORDER BY signal.detected_at, signal.source_key
+             LIMIT ${limit.max(1)}
+             FOR UPDATE SKIP LOCKED
+           )
+           UPDATE atheros_search.threat_signals signal
+           SET resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           FROM stale WHERE signal.source_key = stale.source_key""".update.run
+
   def dnsCandidates(limit: Int): Query0[DnsThreatCandidate] =
     sql"""SELECT host,
                   COUNT(*),
@@ -14,6 +38,7 @@ object ThreatRiskSql:
            FROM proxy_events
            WHERE blocked = true
              AND event_time >= (CURRENT_TIMESTAMP + (-7) * INTERVAL '1 day')
+             AND event_time <= CURRENT_TIMESTAMP
            GROUP BY host
            HAVING COUNT(*) > 1
            ORDER BY MAX(event_time) DESC, host
@@ -29,7 +54,7 @@ object ThreatRiskSql:
              ${value.sourceKey}, FALSE, FALSE, ${value.score}, 0, 1,
              ${value.signalId}, 'dns_blocked_host', ${value.signalId},
              ${value.score}, ${value.severity},
-             ${s"blocked DNS/host activity exceeded the characterized seven-day score for ${value.sourceKey}"},
+             ${s"uncalibrated seven-day blocked-observation intensity for ${value.sourceKey}; not a confirmed threat"},
              CAST(${value.evidenceJson} AS JSON), ${value.detectedAt}, ${value.projectionRunId},
              CURRENT_TIMESTAMP
            ) ON CONFLICT (source_key) DO UPDATE SET
@@ -39,6 +64,7 @@ object ThreatRiskSql:
              explanation_text = EXCLUDED.explanation_text,
              evidence = EXCLUDED.evidence,
              detected_at = EXCLUDED.detected_at,
+             resolved_at = NULL,
              projection_run_id = EXCLUDED.projection_run_id,
              updated_at = CURRENT_TIMESTAMP""".update.run
 

@@ -321,7 +321,6 @@ final class PostgresTransactor private (
     val stmt = conn.prepareStatement(BatchSinkSql.InsertProxyEvents)
     try
       val blockedBySequence = blockedRows.map(row => row.rowSequence -> row).toMap
-      val now = Timestamp.from(Instant.now())
       val allRows = rows.zipWithIndex.map { case (r, idx) =>
         val blocked = blockedBySequence.get(rowOffset + idx)
         val eventParams = Seq[Any](
@@ -374,8 +373,8 @@ final class PostgresTransactor private (
               optStr(value.ja3Lite),
               optStr(value.resolvedIp),
               optStr(value.asnOrg),
-              now,
-              now,
+              ts(r.eventTime),
+              ts(r.eventTime),
               true
             )
           case None =>
@@ -396,8 +395,8 @@ final class PostgresTransactor private (
               null,
               null,
               null,
-              now,
-              now,
+              ts(r.eventTime),
+              ts(r.eventTime),
               false
             )
         eventParams ++ rollupParams

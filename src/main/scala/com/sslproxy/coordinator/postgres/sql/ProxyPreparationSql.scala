@@ -101,13 +101,31 @@ object ProxyPreparationSql:
           AND job.status IN ('pending', 'leased')
         LIMIT ${highWater.max(1)}
       ) bounded""".query[Long].unique
+      eventValidationFirst <-
+        if pending >= highWater.max(1) && limit - cancelled == 1 then
+          // A one-item budget still alternates both validation lanes. Neither
+          // valid windows nor valid dirty events may starve the other lane.
+          sql"""INSERT INTO octopus_core.proxy_preparation_progress(scope,after_revision)
+            VALUES ('proxy-full-queue-validation-turn',1)
+            ON CONFLICT(scope) DO UPDATE SET after_revision=1-proxy_preparation_progress.after_revision
+            RETURNING after_revision""".query[Long].unique.map(_ == 1)
+        else false.pure[ConnectionIO]
       // A full queue prevents new work, but must not keep invalidated windows
       // searchable. This bounded validation pass never publishes/enqueues.
-      retiredWindows <-
-        if pending >= highWater.max(1) then
+      firstWindowWork <-
+        if pending >= highWater.max(1) && !eventValidationFirst then
           prepareWindows(lease, (limit - cancelled).max(0).min(1), model, inputRevision, allowPublish = false)
         else 0.pure[ConnectionIO]
-      budget = (highWater.toLong - pending).max(0L).min((limit - cancelled - retiredWindows).toLong).toInt
+      validatedEvents <-
+        if pending >= highWater.max(1) then
+          validateDirtyEvents(lease, (limit - cancelled - firstWindowWork).max(0).min(1), model, inputRevision)
+        else 0.pure[ConnectionIO]
+      fallbackWindowWork <-
+        if eventValidationFirst && validatedEvents == 0 then
+          prepareWindows(lease, (limit - cancelled).max(0).min(1), model, inputRevision, allowPublish = false)
+        else 0.pure[ConnectionIO]
+      retiredWindows = firstWindowWork + fallbackWindowWork
+      budget = (highWater.toLong - pending).max(0L).min((limit - cancelled - retiredWindows - validatedEvents).toLong).toInt
       changed <-
         if budget == 0 then 0.pure[ConnectionIO]
         else
@@ -129,68 +147,8 @@ object ProxyPreparationSql:
               .groupMapReduce(_._1)(_._2)(_.max(_))
               .toList
               .sortBy(_._2)
-              .traverse_ { case (id, _) =>
-                sql"""SELECT observation_revision, event_time, payload::text, registered_device_id::text FROM octopus_core.proxy_events
-              WHERE event_id = $id FOR UPDATE"""
-                  .query[(Long, Timestamp, String, Option[String])]
-                  .option
-                  .flatMap {
-                    case None =>
-                      sql"DELETE FROM octopus_core.proxy_preparation_dirty WHERE event_id = $id".update.run.void
-                    case Some((revision, observedAt, raw, deviceId)) =>
-                      for
-                        json <- parser
-                          .parse(raw)
-                          .fold(
-                            _ =>
-                              FC.raiseError[Json](
-                                IllegalArgumentException(
-                                  "invalid retained proxy JSON"
-                                )
-                              ),
-                            _.pure[ConnectionIO]
-                          )
-                        evidence = ProxyEvidence.normalized(json)
-                        _ <-
-                          sql"UPDATE octopus_core.proxy_events SET evidence = ${evidence.noSpaces}::jsonb WHERE event_id = $id".update.run
-                        _ <- publish(id, revision, observedAt, evidence)
-                        _ <- ProxyEvidence.source(
-                          json,
-                          id,
-                          revision,
-                          observedAt
-                        ) match
-                          case None         => FC.unit
-                          case Some(source) =>
-                            persist(
-                              lease,
-                              source.copy(
-                                inputRevision = inputRevision,
-                                proxyDeviceId = deviceId
-                              ),
-                              model
-                            )
-                        host = evidence.hcursor
-                          .get[String]("host_normalized")
-                          .toOption
-                        _ <-
-                          if host.isDefined && ProxyEvidence.AllowedEvents(
-                              json.hcursor.get[String]("type").getOrElse("")
-                            ) && json.hcursor
-                              .get[Boolean]("blocked")
-                              .getOrElse(false)
-                          then
-                            sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start, host, device_key)
-                      SELECT date_trunc('hour', event_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC', host, ${deviceId
-                                .getOrElse("")}
-                      FROM octopus_core.proxy_events WHERE event_id = $id
-                      ON CONFLICT(window_start, host, device_key) DO UPDATE
-                      SET revision = nextval('octopus_core.proxy_window_revision_seq'), disposition = 'pending', observed_rows_lower_bound = NULL""".update.run.void
-                          else FC.unit
-                        _ <-
-                          sql"DELETE FROM octopus_core.proxy_preparation_dirty WHERE event_id = $id AND source_revision <= $revision".update.run
-                      yield ()
-                  }
+              .traverse_ { case (id, revision) =>
+                prepareEvent(lease, id, revision, model, inputRevision)
               }
             _ <- history.lastOption.traverse_ { case (_, cursor) =>
               if cursor <= after then
@@ -225,7 +183,165 @@ object ProxyPreparationSql:
             _ <- guard(lease)
           yield (history ++ dirty).map(_._1).distinct.size + windows + migrated + repaired
       _ <- guard(lease)
-    yield changed + cancelled + retiredWindows
+    yield changed + cancelled + retiredWindows + validatedEvents
+
+  private def validateDirtyEvents(
+      lease: Lease,
+      limit: Int,
+      model: String,
+      inputRevision: String
+  ): ConnectionIO[Int] =
+    if limit == 0 then 0.pure[ConnectionIO]
+    else
+      val scope = "proxy-event-validation-v2"
+      for
+        _ <- sql"INSERT INTO octopus_core.proxy_preparation_progress(scope) VALUES ($scope) ON CONFLICT DO NOTHING".update.run
+        after <- sql"SELECT after_revision,after_key FROM octopus_core.proxy_preparation_progress WHERE scope=$scope FOR UPDATE"
+          .query[(Long,String)].unique
+        notifications <- sql"""SELECT event_id,source_revision FROM octopus_core.proxy_preparation_dirty
+          WHERE (source_revision,event_id) > (${after._1},${after._2})
+          ORDER BY source_revision,event_id LIMIT $limit FOR UPDATE""".query[(String,Long)].to[List]
+        _ <- notifications.traverse_ { case (id,revision) =>
+          prepareEvent(lease,id,revision,model,inputRevision,allowPublish=false)
+        }
+        cursor = notifications.lastOption.getOrElse(("",0L))
+        _ <- sql"""UPDATE octopus_core.proxy_preparation_progress SET after_revision=${cursor._2},
+          after_key=${cursor._1},updated_at=clock_timestamp() WHERE scope=$scope""".update.run
+      yield notifications.size
+
+  private def prepareEvent(
+      lease: Lease,
+      id: String,
+      notificationRevision: Long,
+      model: String,
+      inputRevision: String,
+      allowPublish: Boolean = true
+  ): ConnectionIO[Unit] =
+    sql"""SELECT observation_revision,event_time,payload::text,registered_device_id::text FROM octopus_core.proxy_events
+      WHERE event_id=$id FOR UPDATE""".query[(Long,Timestamp,String,Option[String])].option.flatMap {
+      case None =>
+        retireEvent(lease,id,notificationRevision,"source_missing") *>
+          sql"DELETE FROM octopus_core.proxy_preparation_dirty WHERE event_id=$id AND source_revision <= $notificationRevision".update.run.void
+      case Some((revision,observedAt,raw,deviceId)) =>
+        for
+          json <- parser.parse(raw).fold(
+            _ => FC.raiseError[Json](IllegalArgumentException("invalid retained proxy JSON")), _.pure[ConnectionIO])
+          source = ProxyEvidence.source(json,id,revision,observedAt)
+          _ <- if !allowPublish && source.isDefined then
+            for
+              _ <- guardGeneration(SearchDocumentKind.ProxyEvent.sourceTable,id)
+              previous <- sql"""SELECT source_revision,document_id IS NOT NULL FROM atheros_search.proxy_document_state
+                WHERE source_table=${SearchDocumentKind.ProxyEvent.sourceTable} AND source_key=$id FOR UPDATE""".query[(Long,Boolean)].option
+              // Retire stale evidence immediately without spending headroom on
+              // its replacement. The notification remains for later publication.
+              _ <- if previous.exists { case (oldRevision,hasDocument) => oldRevision < revision && hasDocument } then
+                retireEvent(lease,id,revision,"deferred")
+                else FC.unit
+            yield ()
+            else for
+              _ <- guardGeneration(SearchDocumentKind.ProxyEvent.sourceTable,id)
+              current <- sql"""SELECT source_revision FROM atheros_search.proxy_document_state
+                WHERE source_table=${SearchDocumentKind.ProxyEvent.sourceTable} AND source_key=$id FOR UPDATE""".query[Long].option
+              _ <- if current.exists(_ > revision) then FC.unit
+                else for
+                  // Remember the old grouping before replacing current metadata.
+                  // Host, device, hour and blocked-state corrections must invalidate it.
+                  _ <- if source.isDefined then dirtyFormerWindow(id,revision) else FC.unit
+                  evidence = ProxyEvidence.normalized(json)
+                  _ <- sql"UPDATE octopus_core.proxy_events SET evidence=${evidence.noSpaces}::jsonb WHERE event_id=$id".update.run
+                  _ <- publish(id,revision,observedAt,evidence)
+                  _ <- source match
+                    case None => retireEvent(lease,id,revision,"excluded")
+                    case Some(value) =>
+                      for
+                        windowKey <- sql"""SELECT CONCAT('proxy-window:',md5(jsonb_build_array(host,
+                          COALESCE(registered_device_id::text,''),date_trunc('hour',event_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::text))
+                          FROM octopus_core.proxy_events WHERE event_id=$id""".query[String].unique
+                        detail <- parser.parse(value.detailJson).fold(FC.raiseError[Json],_.pure[ConnectionIO])
+                        _ <- persist(lease,value.copy(inputRevision=inputRevision,proxyDeviceId=deviceId,
+                          detailJson=detail.deepMerge(Json.obj("blocked_window_source_key" -> windowKey.asJson)).noSpaces),model)
+                      yield ()
+                  _ <- if source.exists(_.blocked.contains(true)) && evidence.hcursor.get[String]("host_normalized").isRight then
+                    sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+                      SELECT date_trunc('hour',event_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',host,${deviceId.getOrElse("")}
+                      FROM octopus_core.proxy_events WHERE event_id=$id
+                      ON CONFLICT(window_start,host,device_key) DO UPDATE
+                      SET revision=nextval('octopus_core.proxy_window_revision_seq'),disposition='pending',observed_rows_lower_bound=NULL""".update.run.void
+                    else FC.unit
+                yield ()
+              _ <- sql"DELETE FROM octopus_core.proxy_preparation_dirty WHERE event_id=$id AND source_revision <= $revision".update.run
+            yield ()
+        yield ()
+    }
+
+  private def dirtyFormerWindow(id: String,revision: Long,missing: Boolean = false): ConnectionIO[Unit] =
+    sql"""SELECT date_trunc('hour',observed_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',host,
+      COALESCE(proxy_device_id::text,''),detail_json->>'blocked_window_source_key'
+      FROM atheros_search.search_documents WHERE source_table=${SearchDocumentKind.ProxyEvent.sourceTable} AND source_key=$id
+        AND source_kind='proxy_event' AND status='active' AND blocked AND observed_at IS NOT NULL
+        AND ($missing OR evidence_revision IS NULL OR evidence_revision < $revision)"""
+      .query[(Timestamp,Option[String],String,Option[String])].to[List].flatMap { previous =>
+        previous.traverse_ { case (start,host,device,key) =>
+          def queue(rawHost: String,deviceKey: String): ConnectionIO[Unit] =
+            sql"""INSERT INTO octopus_core.proxy_window_dirty(window_start,host,device_key)
+              VALUES ($start,$rawHost,$deviceKey) ON CONFLICT(window_start,host,device_key) DO UPDATE
+              SET revision=nextval('octopus_core.proxy_window_revision_seq'),disposition='pending',observed_rows_lower_bound=NULL""".update.run.void
+          for
+            // The opaque source key survives host privacy filtering. Never
+            // leave the former aggregate searchable while awaiting recompute.
+            _ <- key.traverse_(retireWindow)
+            _ <- host match
+              case Some(rawHost) => queue(rawHost,device)
+              case None => key.traverse_ { windowKey =>
+                val end = Timestamp.from(start.toInstant.plusSeconds(3600))
+                for
+                  candidates <- sql"""SELECT host,COALESCE(registered_device_id::text,''),
+                    CONCAT('proxy-window:',md5(jsonb_build_array(host,COALESCE(registered_device_id::text,''),$start::timestamptz)::text))
+                    FROM octopus_core.proxy_events WHERE blocked AND event_time >= $start AND event_time < $end
+                    ORDER BY event_time,event_id LIMIT ${MaxWindowRows+1}""".query[(String,String,String)].to[List]
+                  _ <- if candidates.size <= MaxWindowRows then
+                    candidates.find(_._3 == windowKey).traverse_ { case (rawHost,deviceKey,_) => queue(rawHost,deviceKey) }
+                    else FC.unit
+                  _ <- sql"""UPDATE atheros_search.proxy_document_state SET disposition=${
+                    if candidates.size > MaxWindowRows then "retired_reconciliation_required" else "retired_source_correction"},updated_at=clock_timestamp()
+                    WHERE source_table=${SearchDocumentKind.ProxyBlockedHostWindow.sourceTable} AND source_key=$windowKey""".update.run
+                yield ()
+              }
+          yield ()
+        }
+      }
+
+  private def retireEvent(lease: Lease,id: String,revision: Long,disposition: String): ConnectionIO[Unit] =
+    val table = SearchDocumentKind.ProxyEvent.sourceTable
+    for
+      _ <- guard(lease)
+      _ <- sql"""INSERT INTO atheros_search.proxy_document_state(source_table,source_key,source_revision,
+        template_version,normalization_version,disposition,preparation_generation)
+        VALUES ($table,$id,$revision,${ProxyEvidence.TemplateVersion},${ProxyAuthority.Version},$disposition,$PreparationGeneration)
+        ON CONFLICT(source_table,source_key) DO NOTHING""".update.run
+      _ <- guardGeneration(table,id)
+      current <- sql"SELECT source_revision FROM atheros_search.proxy_document_state WHERE source_table=$table AND source_key=$id FOR UPDATE"
+        .query[Long].unique
+      _ <- if current > revision then FC.unit
+        else for
+          _ <- sql"""SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(CAST($table AS text),CAST($id AS text))::text,0)) IS NULL"""
+            .query[Boolean].unique
+          _ <- dirtyFormerWindow(id,revision,missing=disposition == "source_missing")
+          ids <- sql"""UPDATE atheros_search.search_documents SET status='superseded',updated_at=clock_timestamp()
+            WHERE source_table=$table AND source_key=$id AND source_kind='proxy_event' AND status='active'
+            RETURNING document_id::text""".query[String].to[List]
+          _ <- ids.traverse_(documentId => sql"""UPDATE atheros_search.embedding_jobs SET status='cancelled',owner_id=NULL,
+            lease_token=NULL,lease_expires_at=NULL,last_error=${SearchPreparationSql.SupersededDocumentError},updated_at=clock_timestamp()
+            WHERE document_id=$documentId::uuid AND status IN ('pending','leased')""".update.run)
+          _ <- sql"""UPDATE atheros_search.proxy_document_state SET source_revision=$revision,document_id=NULL,
+            disposition=$disposition,preparation_generation=$PreparationGeneration,updated_at=clock_timestamp()
+            WHERE source_table=$table AND source_key=$id""".update.run
+          _ <- if disposition == "source_missing" then
+            sql"DELETE FROM atheros_search.proxy_event_evidence WHERE event_id=$id AND source_revision <= $revision".update.run.void
+            else FC.unit
+        yield ()
+      _ <- guard(lease)
+    yield ()
 
   private def cancelObsoleteInputJobs(limit: Int, inputRevision: String): ConnectionIO[Int] =
     sql"""SELECT job.job_id::text, doc.source_table, doc.source_key
@@ -281,6 +397,7 @@ object ProxyPreparationSql:
         .getOrElse("unknown")}, ${ProxyEvidence.Version},
         ${ProxyEvidence.publicEvidence(evidence).noSpaces}::jsonb)
       ON CONFLICT(event_id) DO UPDATE SET source_revision = EXCLUDED.source_revision,
+        observed_at = EXCLUDED.observed_at,
         host_normalized = EXCLUDED.host_normalized, port = EXCLUDED.port,
         authority_normalized = EXCLUDED.authority_normalized, registrable_domain = EXCLUDED.registrable_domain,
         normalization_version = EXCLUDED.normalization_version, parse_status = EXCLUDED.parse_status,
@@ -308,9 +425,9 @@ object ProxyPreparationSql:
         VALUES ($table, ${source.sourceKey}, $revision, ${source.templateVersion}, ${source.normalizationVersion}, 'preparing', $PreparationGeneration)
         ON CONFLICT(source_table, source_key) DO NOTHING""".update.run
       current <-
-        sql"""SELECT source_revision, document_id::text, preparation_generation FROM atheros_search.proxy_document_state
+        sql"""SELECT source_revision, document_id::text, preparation_generation, disposition FROM atheros_search.proxy_document_state
         WHERE source_table = $table AND source_key = ${source.sourceKey} FOR UPDATE"""
-          .query[(Long, Option[String], Long)]
+          .query[(Long, Option[String], Long, String)]
           .unique
       _ <-
         if current._3 > PreparationGeneration then
@@ -318,8 +435,8 @@ object ProxyPreparationSql:
             IllegalStateException("proxy preparation generation is stale")
           )
         else if current._1 > revision ||
-          (current._1 == revision && current._3 == PreparationGeneration && current._2
-            .exists(_ != document.documentId))
+          (current._1 == revision && current._3 == PreparationGeneration &&
+            (Set("excluded","source_missing")(current._4) || current._2.exists(_ != document.documentId)))
         then FC.unit
         else
           for

@@ -101,7 +101,7 @@ final class BatchDispatchService(
   }
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[DispatchResult] =
-    val message = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
+    val message = com.sslproxy.coordinator.util.ErrorSanitizer.message(cause)
     store.fail(record, message, retryBaseSeconds, retryMaxSeconds).value.flatMap {
       case Right(disposition) =>
         val status = disposition match

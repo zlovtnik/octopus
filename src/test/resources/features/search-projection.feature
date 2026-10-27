@@ -6,6 +6,8 @@ Feature: Search projection processor contracts
   observations may reopen it. Late observations preserve event-time latest
   rollup metadata. Similarity requires current text and matching unified and
   per-kind vectors on both sides within the selected scope and input revision.
+  Bounded DNS and AP risk passes prioritize never-projected and oldest-projected
+  candidates so recent sources cannot permanently starve the retained backlog.
 
   Scenario Outline: An Octopus search projection processor has its declared durable contract
     Given processor "<processor>" belongs to "search_projection"

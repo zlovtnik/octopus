@@ -4,6 +4,37 @@ import cats.effect.{IO, Ref}
 import munit.CatsEffectSuite
 
 class DqRuntimeSuite extends CatsEffectSuite:
+  test("maintenance recovery cannot mask a disconnected report consumer or failed report partition") {
+    for
+      ready <- Ref.of[IO, Boolean](false)
+      health <- DqRuntime.Readiness.create(ready)
+      _ <- health.maintenance(true)
+      disconnected <- ready.get
+      _ = assert(!disconnected)
+      _ <- health.reports(true)
+      healthy <- ready.get
+      _ = assert(healthy)
+      _ <- health.partition(0, false)
+      _ <- health.partition(1, false)
+      _ <- health.maintenance(true)
+      _ <- health.partition(0, true)
+      failedPartition <- ready.get
+      _ = assert(!failedPartition)
+      _ <- health.partition(1, true)
+      recovered <- ready.get
+      _ = assert(recovered)
+      _ <- health.reports(false)
+      _ <- health.maintenance(true)
+      failedConsumer <- ready.get
+      _ = assert(!failedConsumer)
+      _ <- health.reports(true)
+      _ <- health.partition(0, false)
+      _ <- health.assignments(Set(1))
+      revoked <- ready.get
+      _ = assert(revoked)
+    yield ()
+  }
+
   test("leases begin one at a time after previous work completes and draining is bounded") {
     for
       events <- Ref.of[IO, Vector[String]](Vector.empty)

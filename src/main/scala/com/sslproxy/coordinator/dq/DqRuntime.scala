@@ -197,10 +197,10 @@ final class DqRuntime(
       )
     yield ()
 
-  private def guardedTick: IO[Unit] = tick.attempt.flatMap {
-    case Right(_) => readiness.set(true)
+  private def guardedTick(health: DqRuntime.Readiness): IO[Unit] = tick.attempt.flatMap {
+    case Right(_) => health.maintenance(true)
     case Left(error) =>
-      readiness.set(false) *> IO(
+      health.maintenance(false) *> IO(
         log.warn(
           "dq_runtime",
           "status" -> (error match
@@ -217,7 +217,7 @@ final class DqRuntime(
       )
   }
 
-  private def reports: Stream[IO, Unit] =
+  private def reports(health: DqRuntime.Readiness): Stream[IO, Unit] =
     val settings = ConsumerSettings[IO, String, Array[Byte]]
       .withBootstrapServers(kafka.bootstrapServers)
       .withGroupId(group)
@@ -251,9 +251,11 @@ final class DqRuntime(
                 }
                 .attempt
                 .flatMap {
-                  case Right(_) => record.offset.commit.as(Right(()))
+                  case Right(_) =>
+                    record.offset.commit *> health.reports(true) *> health.partition(record.record.partition, true)
+                      .as(Right(()))
                   case Left(_) =>
-                    readiness.set(false) *>
+                    health.partition(record.record.partition, false) *>
                       IO.sleep((1000L * (1L << retry.min(5))).millis).as(Left((retry + 1).min(5)))
                 }
             }
@@ -268,33 +270,69 @@ final class DqRuntime(
         )
         .metered(5.seconds)
         .onFinalize(IO(metrics.clearKafkaMetrics(group)))
-      records.concurrently(lag)
+      val assignments = consumer.assignmentStream.evalMap(partitions => health.assignments(partitions.map(_.partition)))
+      records.concurrently(lag).concurrently(assignments)
     }
 
-  private def reportsForever: IO[Unit] = Monad[IO].tailRecM[Int, Unit](0) { retry =>
-    reports.compile.drain.attempt.flatMap {
+  private def reportsForever(health: DqRuntime.Readiness): IO[Unit] = Monad[IO].tailRecM[Int, Unit](0) { retry =>
+    reports(health).compile.drain.guarantee(health.reports(false)).attempt.flatMap {
       case Right(_) => IO.pure(Right(()))
       case Left(_) =>
-        readiness.set(false) *> IO
+        IO
           .sleep((1000L * (1L << retry.min(5))).millis)
           .as(Left((retry + 1).min(5)))
     }
   }
 
   def stream: Stream[IO, Unit] =
-    (Stream.eval(guardedTick) ++ Stream.awakeEvery[IO](config.pollIntervalMs.millis).evalMap(_ => guardedTick))
-      .merge(Stream.eval(reportsForever))
-      .concurrently(
-        Stream
-          .repeatEval(
-            DqMetrics
-              .sample(store, metrics, dbSemaphore)
-              .handleErrorWith(_ => IO(log.warn("dq_metrics", "status" -> "sample_unavailable")))
-          )
-          .metered(5.seconds)
-      )
+    Stream.eval(DqRuntime.Readiness.create(readiness)).flatMap { health =>
+      (Stream.eval(guardedTick(health)) ++
+        Stream.awakeEvery[IO](config.pollIntervalMs.millis).evalMap(_ => guardedTick(health)))
+        .merge(Stream.eval(reportsForever(health)))
+        .concurrently(
+          Stream
+            .repeatEval(
+              DqMetrics
+                .sample(store, metrics, dbSemaphore)
+                .handleErrorWith(_ => IO(log.warn("dq_metrics", "status" -> "sample_unavailable")))
+            )
+            .metered(5.seconds)
+        )
+        .onFinalize(readiness.set(false))
+    }
 
 object DqRuntime:
+  private final case class Health(maintenance: Boolean, reports: Boolean, failedPartitions: Set[Int]):
+    def ready: Boolean = maintenance && reports && failedPartitions.isEmpty
+
+  private[dq] final class Readiness private (
+    state: Ref[IO, Health],
+    gate: Semaphore[IO],
+    output: Ref[IO, Boolean]
+  ):
+    // Serialize both the component update and its published aggregate. A stale
+    // healthy tick must never overwrite a newer report-consumer failure.
+    private def update(f: Health => Health): IO[Unit] =
+      gate.permit.use(_ => state.updateAndGet(f).flatMap(value => output.set(value.ready)))
+
+    def maintenance(healthy: Boolean): IO[Unit] = update(_.copy(maintenance = healthy))
+    def reports(healthy: Boolean): IO[Unit] =
+      update(value => value.copy(reports = healthy, failedPartitions = if healthy then value.failedPartitions else Set.empty))
+    def partition(id: Int, healthy: Boolean): IO[Unit] =
+      update(value => value.copy(failedPartitions =
+        if healthy then value.failedPartitions - id else value.failedPartitions + id
+      ))
+    def assignments(partitions: Set[Int]): IO[Unit] =
+      update(value => value.copy(failedPartitions = value.failedPartitions.intersect(partitions)))
+
+  private[dq] object Readiness:
+    def create(output: Ref[IO, Boolean]): IO[Readiness] =
+      for
+        state <- Ref.of[IO, Health](Health(false, false, Set.empty))
+        gate <- Semaphore[IO](1)
+        _ <- output.set(false)
+      yield new Readiness(state, gate, output)
+
   private[dq] def attemptStages(stages: List[IO[Unit]]): IO[Unit] =
     stages.traverse(_.attempt).flatMap(_.collectFirst { case Left(error) => error }.fold(IO.unit)(IO.raiseError))
 

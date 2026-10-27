@@ -78,11 +78,13 @@ object OutboxSql:
                           AND lease_token = ${record.lease.token}
                           AND fence = ${record.lease.fence}
                           AND lease_expires_at > CURRENT_TIMESTAMP""".update.run
+      batchUpdated <-
+        if updated == 1 then loadBatchId.fold(true.pure[ConnectionIO])(
+          markBatchDispatched(record.outboxId, _, record.messageKey)
+        )
+        else false.pure[ConnectionIO]
       _ <- if updated == 1 then publishAttempt(record, "published", None) else ().pure[ConnectionIO]
-      _ <-
-        if updated == 1 then loadBatchId.traverse_(markBatchDispatched(record.outboxId, _))
-        else ().pure[ConnectionIO]
-    yield updated == 1
+    yield updated == 1 && batchUpdated
 
   def parkMalformed(record: OutboxRecord, errorText: String): ConnectionIO[Boolean] =
     for
@@ -170,18 +172,36 @@ object OutboxSql:
              error_text = EXCLUDED.error_text,
              attempted_at = CURRENT_TIMESTAMP""".update.run.void
 
-  private def markBatchDispatched(outboxId: String, batchId: String): ConnectionIO[Unit] =
+  private def markBatchDispatched(outboxId: String, batchId: String, messageKey: String): ConnectionIO[Boolean] =
+    val prefix = s"$batchId:"
+    val expectedAttempt =
+      Option.when(messageKey.startsWith(prefix))(messageKey.substring(prefix.length))
+        .flatMap(_.toIntOption)
+        .filter(_ > 0)
+    expectedAttempt match
+      case None => doobie.free.connection.raiseError(IllegalArgumentException("load outbox message key is invalid"))
+      case Some(attempt) => markBatchDispatched(outboxId, batchId, attempt)
+
+  private def markBatchDispatched(outboxId: String, batchId: String, attempt: Int): ConnectionIO[Boolean] =
     sql"""UPDATE sync_batches
            SET status = 'dispatched',
-               attempt_count = attempt_count + 1,
+               attempt_count = $attempt,
                outbox_id = $outboxId,
+               last_error = NULL,
                updated_at = CURRENT_TIMESTAMP
            WHERE batch_id = $batchId
-             AND status IN ('pending', 'dispatched')""".update.run.void *>
-      sql"""UPDATE sync_jobs AS j
-             SET status = 'running',
-                 started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP)
-             FROM sync_batches AS b
-             WHERE b.job_id = j.job_id
-               AND b.batch_id = $batchId
-               AND j.status IN ('pending', 'running')""".update.run.void
+             AND status = 'pending'
+             AND attempt_count = ${attempt - 1}""".update.run.flatMap { updated =>
+      if updated == 1 then true.pure[ConnectionIO] else false.pure[ConnectionIO]
+    }.flatTap {
+      case true =>
+        sql"""UPDATE sync_jobs AS j
+               SET status = 'running',
+                   started_at = COALESCE(j.started_at, CURRENT_TIMESTAMP)
+               FROM sync_batches AS b
+               WHERE b.job_id = j.job_id
+                 AND b.batch_id = $batchId
+                 AND b.status = 'dispatched'
+                 AND j.status IN ('pending', 'running')""".update.run.void
+      case false => ().pure[ConnectionIO]
+    }

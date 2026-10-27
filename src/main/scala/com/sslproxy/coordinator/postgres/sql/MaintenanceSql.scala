@@ -203,7 +203,7 @@ object MaintenanceSql:
              )
              AND NOT EXISTS (
                SELECT 1 FROM sync_batches batch
-               JOIN outbox_events outbox ON outbox.source_id = batch.batch_id::text
+               JOIN outbox_events outbox ON split_part(outbox.source_id, ':', 1) = batch.batch_id::text
                WHERE batch.dedupe_key = e.dedupe_key
                  AND batch.stream_name = e.stream_name
                  AND outbox.status NOT IN ('published', 'failed', 'cancelled')
@@ -252,12 +252,12 @@ object MaintenanceSql:
       _ <- sql"""DELETE FROM outbox_publish_attempts attempt
                    USING outbox_events outbox, sync_batches batch
                    WHERE outbox.outbox_id = attempt.outbox_id
-                     AND batch.batch_id::text = outbox.source_id
+                     AND batch.batch_id::text = split_part(outbox.source_id, ':', 1)
                      AND batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
                      AND outbox.status IN ('published', 'failed', 'cancelled')""".update.run
       _ <- sql"""DELETE FROM outbox_events outbox
                    USING sync_batches batch
-                   WHERE batch.batch_id::text = outbox.source_id
+                   WHERE batch.batch_id::text = split_part(outbox.source_id, ':', 1)
                      AND batch.dedupe_key = $dedupeKey AND batch.stream_name = $streamName
                      AND outbox.status IN ('published', 'failed', 'cancelled')""".update.run
       _ <- sql"""DELETE FROM sync_errors error_row
@@ -335,6 +335,21 @@ object MaintenanceSql:
       _ <-
         if guarded.contains(1) then FC.unit
         else FC.raiseError(IllegalStateException(s"maintenance lease ${lease.scope} was lost"))
+      // Vector IDs are local to each kind. Remove progress before its source
+      // vectors, matching both columns so overlapping IDs retain their progress.
+      _ <- sql"""DELETE FROM atheros_search.similarity_scan_state state
+                   WHERE (state.embedding_kind, state.vector_id) IN (
+                     SELECT 'event', vector_id FROM atheros_search.search_vectors_event WHERE document_id = $documentId
+                     UNION ALL
+                     SELECT 'device', vector_id FROM atheros_search.search_vectors_device WHERE document_id = $documentId
+                     UNION ALL
+                     SELECT 'behaviour', vector_id FROM atheros_search.search_vectors_behaviour WHERE document_id = $documentId
+                     UNION ALL
+                     SELECT 'sequence', vector_id FROM atheros_search.search_vectors_sequence WHERE document_id = $documentId
+                   )""".update.run
+      _ <- sql"""DELETE FROM atheros_search.similarity_pairs
+                   WHERE left_document_id = $documentId OR right_document_id = $documentId""".update.run
+      _ <- sql"""DELETE FROM atheros_search.embeddings WHERE document_id = $documentId""".update.run
       _ <- sql"""DELETE FROM atheros_search.search_vectors_event
                    WHERE document_id = $documentId""".update.run
       _ <- sql"""DELETE FROM atheros_search.search_vectors_device

@@ -8,9 +8,9 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
 - Package roots live under `src/main/scala/com/sslproxy/coordinator/`.
 - `config/` owns PureConfig models, environment overrides, and fail-closed
   validation. `application.conf` is the accepted variable list.
-- `ingest/` owns scan hydration and `proxy.payload_audit` consumption.
-- `kafka/` owns locked scan/load/result consumers and wireless request/reply
-  streams.
+- `ingest/` owns compatibility hydration of staged payload references.
+- `kafka/` owns the shared durable intake policy and locked scan/load/result,
+  wireless audit and heartbeat consumers.
 - `postgres/` and `postgres/sql/` own repositories, transforms, checksums,
   schema preflight, typed sinks, and named parameterized SQL.
 - `processor/` owns IDs, catalog contracts, leases, retry, and supervision.
@@ -25,8 +25,8 @@ This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
   `DocumentationContractSuite`, and `FeatureContractSuite`; features are one per `ProcessorFamily`.
 
 ## Guardrails
-- Keep `proxy.payload_audit` and wireless operational topics retry-safe with
-  DLQ parking for poison.
+- Preserve fail-closed replay evidence; park poison only after durable DLQ
+  publication. Scan stream names select optional sinks, not intake admission.
 - `OCTOPUS_CONSUMERS_ENABLED` unions `ProcessorId.kafkaConsumers` into the
   enabled set. Do not assume every running consumer ID is listed in
   `OCTOPUS_ENABLED_PROCESSORS`.

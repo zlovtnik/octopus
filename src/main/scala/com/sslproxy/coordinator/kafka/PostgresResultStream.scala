@@ -3,9 +3,10 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.domain.BrokerRecordMetadata
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.ResultStore
-import com.sslproxy.coordinator.postgres.PostgresErrorClass
+import com.sslproxy.coordinator.postgres.PostgresResult
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 
@@ -30,26 +31,19 @@ object PostgresResultStream:
     ) { lockedRecords =>
       for
         handled <- lockedRecords.traverse { locked =>
-          resultStore.recordResultWithEvidence(locked.decoded, locked.metadata).value.flatMap {
-            case Right(_) => IO.pure(Some(locked))
-            case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
-              LockedTopicConsumer
-                .parkNonRetriable(
-                  producer,
-                  cfg.resultTopic + cfg.dlqSuffix,
-                  cfg.resultConsumer,
-                  locked.record,
-                  error.cause
-                )
-                .as(None)
-            case Left(error) =>
-              IO.raiseError(
-                new RuntimeException(
-                  s"${error.operation}: ${Option(error.message).getOrElse("")}",
-                  error.cause
-                )
+          persistResult(
+            locked.decoded,
+            locked.metadata,
+            resultStore,
+            error =>
+              LockedTopicConsumer.parkNonRetriable(
+                producer,
+                cfg.resultTopic + cfg.dlqSuffix,
+                cfg.resultConsumer,
+                locked.record,
+                error
               )
-          }
+          ).map(recorded => Option.when(recorded)(locked))
         }
         _ <- handled.flatten.traverse_ { locked =>
           val result = locked.decoded
@@ -66,4 +60,17 @@ object PostgresResultStream:
           )
         }
       yield ()
+    }
+
+  private[kafka] def persistResult(
+    result: PostgresResult,
+    metadata: BrokerRecordMetadata,
+    resultStore: ResultStore[IO],
+    park: Throwable => IO[Unit]
+  ): IO[Boolean] =
+    resultStore.recordResultWithEvidence(result, metadata).value.flatMap {
+      case Right(_) => IO.pure(true)
+      case Left(error) if DurableIngestion.isParkable(error) =>
+        park(error.cause).as(false)
+      case other => KafkaDatabaseResult.require(IO.pure(other)).as(true)
     }

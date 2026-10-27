@@ -14,6 +14,7 @@ object ResultSql:
     cursorStart: String,
     cursorEnd: String,
     batchNo: Int,
+    status: String,
     attemptCount: Int,
     maxAttempts: Int
   )
@@ -48,12 +49,12 @@ object ResultSql:
 
   def batchForUpdate(batchId: String): Query0[BatchState] =
     sql"""SELECT b.job_id, b.stream_name, b.payload_ref,
-                  b.cursor_start, b.cursor_end, b.batch_no,
+                  b.cursor_start, b.cursor_end, b.batch_no, b.status,
                   b.attempt_count, b.max_attempts
            FROM sync_batches b
            WHERE b.batch_id = $batchId
            FOR UPDATE"""
-      .query[(String, String, String, String, String, Int, Int, Int)]
+      .query[(String, String, String, String, String, Int, String, Int, Int)]
       .map(BatchState.apply.tupled)
 
   def completeSuccessful(
@@ -155,15 +156,36 @@ object ResultSql:
     yield repaired
 
   def scheduleRetry(result: PostgresResult, batch: BatchState): ConnectionIO[Unit] =
-    sql"""UPDATE sync_batches
+    val nextAttempt = batch.attemptCount + (if batch.status == "pending" then 2 else 1)
+    for
+      updated <- sql"""UPDATE sync_batches
            SET status = 'pending',
+               attempt_count = attempt_count + CASE WHEN status = 'pending' THEN 1 ELSE 0 END,
                last_error = ${result.errorText},
                updated_at = CURRENT_TIMESTAMP
            WHERE batch_id = ${result.batchId}
              AND job_id = ${batch.jobId}
-             AND status IN ('pending', 'dispatched', 'running')""".update.run.flatMap { updated =>
-      requireSingleTransition("schedule retry", result.batchId, updated)
-    }
+             AND status IN ('pending', 'dispatched', 'running')""".update.run
+      _ <- requireSingleTransition("schedule retry", result.batchId, updated)
+      _ <- enqueueLoadRetry(result.batchId, batch, nextAttempt)
+    yield ()
+
+  private def enqueueLoadRetry(batchId: String, batch: BatchState, attempt: Int): ConnectionIO[Unit] =
+    val sourceId = s"$batchId:$attempt"
+    sql"""INSERT INTO outbox_events (
+             outbox_id, source_type, source_id, event_type,
+             destination_topic, message_key, payload, status,
+             attempt_count, max_attempts, next_attempt_at, created_at, updated_at
+           ) VALUES (
+             gen_random_uuid(), 'sync_batch_retry', $sourceId, 'sync.load.requested',
+             'sync.oracle.load', $sourceId,
+             jsonb_build_object(
+               'job_id', ${batch.jobId}, 'batch_id', $batchId, 'batch_no', ${batch.batchNo},
+               'stream_name', ${batch.streamName}, 'payload_ref', ${batch.payloadRef},
+               'cursor_start', ${batch.cursorStart}, 'cursor_end', ${batch.cursorEnd}, 'attempt', $attempt
+             ),
+             'pending', 0, ${batch.maxAttempts}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           ) ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO NOTHING""".update.run.void
 
   def completeFailed(result: PostgresResult, batch: BatchState): ConnectionIO[Unit] =
     for

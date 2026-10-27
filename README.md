@@ -6,6 +6,12 @@ monotonic cursors, job and batch state, fenced outbox publication, PostgreSQL lo
 results, wireless normalization inputs, and maintained projections. Embedding
 execution and vector writes belong to Atheros Search.
 
+The [capability and ingestion audit](INGESTION-AUDIT.md) maps every wired
+consumer, downstream processor, DQ workflow, HTTP surface and external dependency
+to its implementation. Intake persists event payloads and broker evidence;
+projection, search preparation, DQ, archival and retention remain optional
+downstream capabilities.
+
 All runtime lanes are disabled by default. PostgreSQL is the only stack
 runtime database; MongoDB is not a fallback.
 
@@ -44,15 +50,17 @@ add an outer row limit: partial groups would corrupt counts and replay detection
 
 The currently wired binary provides:
 
-- ordinary Kafka consumer-group restart positions for the three locked consumers;
+- ordinary Kafka consumer-group restart positions for the five wired consumers;
 - at-least-once ingestion evidence keyed by consumer group, topic, partition,
   and offset;
-- durable scan ingestion from `sync.scan.request`;
+- durable scan ingestion from `sync.scan.request` for any valid stream name,
+  including raw persistence without typed load jobs for unknown stream types;
 - PostgreSQL load work on `sync.oracle.load` and outcomes on
   `sync.oracle.result`;
 - durable jobs, batches, cursors, outbox leases, retry state, and DLQ handling;
 - `wireless.sensor.heartbeat` ingestion via `wireless-heartbeat-ingestion`,
-  with malformed records sanitized and parked on `wireless.sensor.heartbeat.dlq`;
+  with monotonic sensor updates, no unsupported load jobs, and malformed records
+  sanitized and parked on `wireless.sensor.heartbeat.dlq`;
 - JSON hydration and typed JDBC batch sinks for proxy and wireless rows;
 - persisted processor state/runs, dependency validation, deterministic retry
   jitter, backpressure, expired outbox-lease recovery, shadow-alert generation,
@@ -98,7 +106,7 @@ and does not enable retention processors.
 |---|---|
 | `config` | PureConfig model, environment overrides, and fail-closed validation |
 | `wiring` | Resource ownership, service assembly, workload declarations, HTTP setup, and runtime gates |
-| `ingest` | Scan-request hydration and `proxy.payload_audit` consumption |
+| `ingest` | Historical scan-request payload hydration |
 | `domain` | Scan request, load, payload-audit, and broker metadata types |
 | `kafka` | Locked consumers, committed-offset restart, DLQ conversion, and wireless handlers |
 | `postgres` | Repository implementations, transaction retry, transforms, checksums, schema preflight, and typed batch sinks |
@@ -108,7 +116,8 @@ and does not enable retention processors.
 | `archive` | Hash-verified, idempotent MinIO payload storage acquired as a `Resource` |
 | `cron` | Currently wired periodic ingest, recovery, dispatch, audit, and manifest checks |
 | `dispatch` | Backpressure and durable outbox publication |
-| `http` | Liveness, readiness, compatibility health, and metrics routes |
+| `http` | Liveness, readiness, compatibility health, metrics and optional DQ control routes |
+| `dq` | Optional durable worker coordination, artifact lifecycle and fenced projection application |
 | `observability` | Structured logs, Micrometer counters/gauges, and OTLP tracing |
 
 The generic metadata-driven sink, metadata cache, `SinkPipe`, and
@@ -146,21 +155,28 @@ These names and meanings are locked:
 | `wireless.audit` | Atheros Sensor to Redpanda/Octopus | versioned wireless evidence |
 
 The additional currently consumed topic is `wireless.sensor.heartbeat`.
-Request/reply destinations are validated before
-publication. Non-retryable poison messages go to `<source-topic>.dlq`.
+`proxy.payload_audit` is an ingest payload type carried by `sync.scan.request`,
+not a separate direct subscription. Non-retryable poison messages go to
+`<source-topic>.dlq`.
 
 `wireless-heartbeat-ingestion` translates each `wireless.sensor.heartbeat`
-record into a scan request with an explicit `event_id` or a payload-SHA-256
-fallback. Empty or invalid payloads are parked on
+record into a durable event with an explicit `event_id` or a payload-SHA-256
+fallback. Its transaction persists raw evidence and sensor state without creating
+typed load jobs. Empty or invalid payloads are parked on
 `wireless.sensor.heartbeat.dlq` before the consumer commits the offset.
 Retryable persistence failures propagate to processor supervision, which
 applies bounded exponential backoff; permanent failures are parked on the same
 DLQ so poison does not redeliver forever.
 
-Hydration and load planning use the configured ingest stream names (defaults
-include `proxy.events`, `wireless.audit`, wireless alerts, and
-`proxy.payload_audit`). Override with `SYNC_STREAM_NAMES` /
-`COORDINATOR_STREAM_NAMES` and `COORDINATOR_LOAD_STREAM_NAMES`.
+Scan intake accepts every valid `stream_name`; subscribing to another broker
+topic still requires an explicit consumer contract. Known typed streams retain
+the job/batch/load pipeline, while unknown streams finish at raw PostgreSQL
+persistence. Historical planning and load dispatch use the configured stream
+names (defaults include `proxy.events`, `wireless.audit`, wireless alerts, and
+`proxy.payload_audit`). Override those downstream selections with
+`SYNC_STREAM_NAMES` / `COORDINATOR_STREAM_NAMES` and
+`COORDINATOR_LOAD_STREAM_NAMES`. Compatibility `outbox://` payload references
+still require their local file; inline JSON payloads travel entirely in Redpanda.
 
 ## Persistence and delivery guarantees
 

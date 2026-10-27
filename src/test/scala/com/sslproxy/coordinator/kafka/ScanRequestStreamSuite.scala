@@ -6,28 +6,23 @@ import munit.FunSuite
 import java.nio.file.{AccessDeniedException, NoSuchFileException}
 
 class ScanRequestStreamSuite extends FunSuite:
-  private val configured = Set(
+  private val streamNames = Set(
     "proxy.events",
     "wireless.audit",
     "wireless.alert.rogue_ap",
     "proxy.payload_audit"
   )
 
-  test("every configured proxy and wireless stream is accepted for durable ingestion"):
-    configured.foreach { streamName =>
-      assert(ScanRequestStream.isConfiguredStream(streamName, configured), streamName)
+  test("known and unknown event streams are accepted independently of typed load configuration"):
+    (streamNames + "wireless.unknown" + "custom.new-event").foreach { streamName =>
+      assert(ScanRequestStream.shouldIngest(streamName, wirelessProjectionOnly = false), streamName)
     }
 
-  test("unknown streams are rejected instead of silently skipped"):
-    assert(!ScanRequestStream.isConfiguredStream("wireless.unknown", configured))
-
-  test("configured stream names use the same trimming behavior as the ingest ledger"):
-    assertEquals(
-      ScanRequestStream.configuredStreamNames(
-        List(" proxy.events ", "", "wireless.audit", "proxy.events")
-      ),
-      Set("proxy.events", "wireless.audit")
-    )
+  test("projection-only mode suppresses only the companion wireless audit discovery record"):
+    assert(!ScanRequestStream.shouldIngest("wireless.audit", wirelessProjectionOnly = true))
+    (streamNames - "wireless.audit" + "wireless.unknown").foreach { streamName =>
+      assert(ScanRequestStream.shouldIngest(streamName, wirelessProjectionOnly = true), streamName)
+    }
 
   test("missing or malformed payload references are non-retriable poison records"):
     assert(ScanRequestStream.isNonRetriableResolutionError(IllegalArgumentException("bad payload")))

@@ -4,9 +4,10 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.domain.{DatabaseError, IngestionInvariantViolation}
 import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
 import com.sslproxy.coordinator.persistence.ResultStore
-import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresLoadHandler}
+import com.sslproxy.coordinator.postgres.{PostgresErrorClass, PostgresLoad, PostgresLoadHandler, PostgresResult}
 import fs2.Stream
 import fs2.kafka.KafkaProducer
 
@@ -46,8 +47,10 @@ object PostgresLoadStream:
             )
           ) *>
             dbSemaphore.permit.use(_ => handler.handle(load)).attempt.flatMap {
-              case Right(result) => IO.pure(Some((locked, load, result)))
-              case Left(error) if PostgresErrorClass.classify(error) == PostgresErrorClass.Permanent =>
+              case Right(result) => IO.pure(Some((locked, result)))
+              case Left(error)
+                  if !PostgresErrorClass.exceptions(error).exists(_.isInstanceOf[IngestionInvariantViolation]) &&
+                    PostgresErrorClass.classify(error) == PostgresErrorClass.Permanent =>
                 LockedTopicConsumer
                   .parkNonRetriable(
                     producer,
@@ -60,35 +63,24 @@ object PostgresLoadStream:
               case Left(error) => IO.raiseError(error)
             }
         }
-        successful = handled.flatten
-        _ <-
-          if successful.isEmpty then IO.unit
-          else
-            resultStore
-              .recordLoadResultsWithEvidence(
-                successful.map { case (locked, load, result) => (load, result, locked.metadata) }
-              )
-              .value
-              .flatMap {
-                case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
-                  successful.traverse_ { case (locked, _, _) =>
-                    LockedTopicConsumer.parkNonRetriable(
-                      producer,
-                      cfg.loadTopic + cfg.dlqSuffix,
-                      cfg.loadConsumer,
-                      locked.record,
-                      error.cause
-                    )
-                  }
-                case other =>
-                  KafkaDatabaseResult.require(IO.pure(other)).void
-              }
-        _ <- successful.traverse_ { case (_, load, result) =>
+        durable <- persistResults(
+          handled.flatten,
+          resultStore,
+          (locked, error) =>
+            LockedTopicConsumer.parkNonRetriable(
+              producer,
+              cfg.loadTopic + cfg.dlqSuffix,
+              cfg.loadConsumer,
+              locked.record,
+              error
+            )
+        )
+        _ <- durable.traverse_ { case (locked, result) =>
           IO(
             log.info(
               "postgres_load_consumer",
               "status" -> "durable",
-              "batch_id" -> load.batchId,
+              "batch_id" -> locked.decoded.batchId,
               "result_status" -> result.status,
               "row_count" -> result.rowCount.toString
             )
@@ -96,3 +88,35 @@ object PostgresLoadStream:
         }
       yield ()
     }
+
+  private[kafka] def persistResults(
+    records: List[(LockedBrokerRecord[PostgresLoad], PostgresResult)],
+    resultStore: ResultStore[IO],
+    park: (LockedBrokerRecord[PostgresLoad], Throwable) => IO[Unit]
+  ): IO[List[(LockedBrokerRecord[PostgresLoad], PostgresResult)]] =
+    def writeBatch(batch: List[(LockedBrokerRecord[PostgresLoad], PostgresResult)]): IO[Either[DatabaseError, Unit]] =
+      resultStore
+        .recordLoadResultsWithEvidence(batch.map { case (locked, result) =>
+          (locked.decoded, result, locked.metadata)
+        })
+        .value
+
+    if records.isEmpty then IO.pure(Nil)
+    else
+      writeBatch(records)
+        .flatMap {
+          case Left(error) if DurableIngestion.isParkable(error) && records.size > 1 =>
+            // The failed transaction rolled back every result. Isolate poison so
+            // healthy peers still obtain their durable result and outbox evidence.
+            records.traverseFilter { record =>
+              writeBatch(List(record)).flatMap {
+                case Right(_) => IO.pure(Some(record))
+                case Left(singleError) if DurableIngestion.isParkable(singleError) =>
+                  park(record._1, singleError.cause).as(None)
+                case other => KafkaDatabaseResult.require(IO.pure(other)).as(Some(record))
+              }
+            }
+          case Left(error) if DurableIngestion.isParkable(error) =>
+            records.traverse_ { case (locked, _) => park(locked, error.cause) }.as(Nil)
+          case other => KafkaDatabaseResult.require(IO.pure(other)).as(records)
+        }

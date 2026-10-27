@@ -12,8 +12,9 @@ import io.circe.parser.decode
 object DispatchAuthorizationSql:
   def authorizeLoad(load: PostgresLoad): ConnectionIO[Unit] =
     sql"""SELECT o.payload::text
-           FROM outbox_events o JOIN sync_batches b ON b.batch_id = o.source_id
-           WHERE o.source_type = 'sync_batch' AND o.source_id = ${load.batchId}
+           FROM outbox_events o JOIN sync_batches b ON b.batch_id = split_part(o.source_id, ':', 1)::uuid
+           WHERE o.source_type IN ('sync_batch', 'sync_batch_retry')
+             AND split_part(o.source_id, ':', 1) = ${load.batchId}
              AND o.event_type = 'sync.load.requested' AND o.destination_topic = 'sync.oracle.load'
              AND o.message_key = ${s"${load.batchId}:${load.attempt}"}
              AND o.status IN ('pending', 'leased', 'published')
@@ -36,8 +37,9 @@ object DispatchAuthorizationSql:
   ): ConnectionIO[Unit] =
     sql"""SELECT o.payload::text
            FROM outbox_events o JOIN sync_batches b ON b.batch_id = o.source_id
-           JOIN outbox_events dispatch ON dispatch.source_id = b.batch_id
-             AND dispatch.source_type = 'sync_batch' AND dispatch.event_type = 'sync.load.requested'
+           JOIN outbox_events dispatch ON split_part(dispatch.source_id, ':', 1) = b.batch_id::text
+             AND dispatch.source_type IN ('sync_batch', 'sync_batch_retry')
+             AND dispatch.event_type = 'sync.load.requested'
              AND dispatch.destination_topic = 'sync.oracle.load' AND dispatch.message_key = o.message_key
            WHERE o.source_type = 'sync_batch' AND o.source_id = ${result.batchId}
              AND o.event_type = 'sync.load.result' AND o.destination_topic = 'sync.oracle.result'

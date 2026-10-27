@@ -11,6 +11,7 @@ import com.sslproxy.coordinator.domain.{
   DatabaseError,
   IngestionDecision,
   IngestionDisposition,
+  IngestionInvariantViolation,
   ResolvedScanRequestRecord
 }
 import com.sslproxy.coordinator.observability.{CoordinatorTracing, StructuredLogger}
@@ -203,7 +204,8 @@ class PostgresRepository(
     inspected: PayloadJsonInspection.Metadata
   ): ConnectionIO[IngestionDecision] =
     val payloadRef = record.payloadRef
-    val eventKind = inspected.eventKind
+    val eventKind = inspected.eventKind.filter(_.length <= 64)
+    val loadEligible = PostgresSinkTarget.fromStreamName(record.streamName).nonEmpty
     val observedAt = Option(record.observedAt).filter(_.nonEmpty).flatMap(parseTs)
     val jobId = stableUuid("job", record.streamName, record.dedupeKey)
     val batchId = stableUuid("batch", record.streamName, record.dedupeKey)
@@ -230,7 +232,7 @@ class PostgresRepository(
       val (payloadSha, _, dedupeKey) = existing
       if payloadSha != record.sourceRecordSha256 || dedupeKey != record.dedupeKey then
         FC.raiseError(
-          IllegalStateException(
+          IngestionInvariantViolation(
             s"broker coordinate ${meta.topic}/${meta.partition}/${meta.offset}/${meta.consumerGroup} changed after ingestion"
           )
         )
@@ -276,16 +278,26 @@ class PostgresRepository(
           else
             for
               existed <- IngestionSql.syncEventExists(record.streamName, record.dedupeKey).unique
-              _ <- IngestionSql.insertSyncEvent(record, observedAt.orNull, eventKind).run
+              _ <- IngestionSql.insertSyncEvent(record, observedAt.orNull, eventKind, loadEligible).run
+              storedHash <- IngestionSql.eventPayloadHash(record.streamName, record.dedupeKey).unique
+              _ <- if storedHash.exists(_ != record.eventPayloadSha256) then
+                FC.raiseError(IngestionInvariantViolation("event identity changed payload hash after ingestion"))
+              else ().pure[ConnectionIO]
               _ <- hydrateSyncEvent(record, inspected)
-              _ <- IngestionSql.insertJob(jobId, record.streamName, record.dedupeKey).run
-              persistedJobId <- IngestionSql.jobId(record.streamName, record.dedupeKey).unique
-              cursor <- IngestionSql.cursor(record.streamName).option.map(_.getOrElse("0"))
-              cursorEnd =
-                if record.streamName == "wireless.audit" then
-                  observedAt.fold(record.dedupeKey)(_.toInstant.getEpochSecond.toString)
-                else record.dedupeKey
-              _ <- IngestionSql.insertBatch(batchId, persistedJobId, record, cursor, cursorEnd).run
+              _ <- if record.streamName == "wireless.sensor.heartbeat" then
+                IngestionSql.upsertHeartbeat(record, observedAt.orNull)
+              else ().pure[ConnectionIO]
+              _ <- if loadEligible then
+                for
+                  _ <- IngestionSql.insertJob(jobId, record.streamName, record.dedupeKey).run
+                  persistedJobId <- IngestionSql.jobId(record.streamName, record.dedupeKey).unique
+                  cursor <- IngestionSql.cursor(record.streamName).option.map(_.getOrElse("0"))
+                  cursorEnd = if record.streamName == "wireless.audit" then
+                    observedAt.fold(record.dedupeKey)(_.toInstant.getEpochSecond.toString)
+                  else record.dedupeKey
+                  _ <- IngestionSql.insertBatch(batchId, persistedJobId, record, cursor, cursorEnd).run
+                yield ()
+              else ().pure[ConnectionIO]
               disposition = if existed then IngestionDisposition.Deduplicated else IngestionDisposition.Processed
               decision <- decisionWithPersistedIds(disposition)
             yield decision
@@ -541,7 +553,7 @@ class PostgresRepository(
       persistedDedupeKey != dedupeKey
     then
       FC.raiseError(
-        IllegalStateException(
+        IngestionInvariantViolation(
           s"broker coordinate ${metadata.consumerGroup}/${metadata.topic}/${metadata.partition}/${metadata.offset} changed after ingestion"
         )
       )

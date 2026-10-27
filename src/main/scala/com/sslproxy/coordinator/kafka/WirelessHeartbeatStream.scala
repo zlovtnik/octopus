@@ -3,10 +3,9 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.domain.{IngestionDisposition, ResolvedScanRequestRecord, ScanRequestRecord}
-import com.sslproxy.coordinator.observability.{CoordinatorMetrics, StructuredLogger}
+import com.sslproxy.coordinator.domain.{ResolvedScanRequestRecord, ScanRequestRecord}
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.persistence.IngestionStore
-import com.sslproxy.coordinator.postgres.PostgresErrorClass
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.KafkaProducer
@@ -16,10 +15,9 @@ import io.circe.parser.parse
 import java.nio.charset.StandardCharsets
 
 object WirelessHeartbeatStream:
-  private val log = StructuredLogger(getClass)
   private val Topic = "wireless.sensor.heartbeat"
 
-  private final case class Decoded(record: ResolvedScanRequestRecord)
+  private[kafka] final case class Decoded(record: ResolvedScanRequestRecord)
 
   def run(
     cfg: KafkaCfg,
@@ -30,52 +28,56 @@ object WirelessHeartbeatStream:
     LockedTopicConsumer.stream(cfg, cfg.wirelessHeartbeatConsumer, Topic, 1, IO.unit, metrics, producer, decode) {
       lockedRecords =>
         lockedRecords.traverse_ { locked =>
-          store.recordScanRequestWithEvidence(locked.decoded.record, locked.metadata).value.flatMap {
-            case Right(decision) =>
-              IO.whenA(decision.disposition == IngestionDisposition.Processed)(
-                IO(metrics.recordSyncEventHydrated())
-              ) *>
-                IO.whenA(decision.disposition == IngestionDisposition.Deduplicated)(
-                  IO(metrics.recordIngestDeduplicated())
-                ) *> IO(
-                  log.info(
-                    "wireless_sensor_heartbeat",
-                    "status" -> decision.disposition.databaseValue,
-                    "group" -> locked.metadata.consumerGroup,
-                    "partition" -> locked.metadata.partition.toString,
-                    "offset" -> locked.metadata.offset.toString
-                  )
-                )
-            case Left(error) if PostgresErrorClass.classify(error.cause) == PostgresErrorClass.Permanent =>
+          DurableIngestion.persist(
+            locked.decoded.record,
+            locked.metadata,
+            store.recordScanRequestWithEvidence(locked.decoded.record, locked.metadata).value,
+            metrics,
+            error =>
               LockedTopicConsumer.parkNonRetriable(
                 producer,
                 Topic + cfg.dlqSuffix,
                 cfg.wirelessHeartbeatConsumer,
                 locked.record,
-                error.cause
+                error
               )
-            case Left(error) => IO.raiseError(RuntimeException(error.message, error.cause))
-          }
+          )
         }
     }
 
-  private def decode(raw: String): Either[Throwable, Decoded] =
+  private[kafka] def decode(raw: String): Either[Throwable, Decoded] =
     for
       json <- parse(raw).left.map(identity[Throwable])
       obj <- json.asObject.toRight(IllegalArgumentException("heartbeat payload must be a JSON object"))
       observedAt <- json.hcursor.get[String]("observed_at").left.map(identity[Throwable])
       sensorId <- json.hcursor.get[String]("sensor_id").left.map(identity[Throwable])
+      _ <- Either.cond(
+        !sensorId.isBlank && sensorId.length <= 64,
+        (),
+        IllegalArgumentException("heartbeat sensor_id must contain 1 to 64 characters")
+      )
+      producedAt <- json.hcursor.getOrElse[String]("produced_at")(observedAt).left.map(identity[Throwable])
+      schemaVersion <- json.hcursor.getOrElse[Int]("schema_version")(1).left.map(identity[Throwable])
+      _ <- Either.cond(schemaVersion > 0, (), IllegalArgumentException("heartbeat schema_version must be positive"))
       _ <- Either
         .catchOnly[java.time.format.DateTimeParseException](java.time.OffsetDateTime.parse(observedAt))
         .leftMap(identity[Throwable])
+      _ <- Either
+        .catchOnly[java.time.format.DateTimeParseException](java.time.OffsetDateTime.parse(producedAt))
+        .leftMap(identity[Throwable])
       rawSha = Sha256Utils.sha256Hex(raw.getBytes(StandardCharsets.UTF_8))
-      eventId = json.hcursor.get[String]("event_id").toOption.filter(_.nonEmpty).getOrElse(rawSha)
+      eventId <- json.hcursor.getOrElse[String]("event_id")(rawSha).left.map(identity[Throwable])
+      _ <- Either.cond(
+        !eventId.isBlank && eventId.length <= 255,
+        (),
+        IllegalArgumentException("heartbeat event_id must contain 1 to 255 characters")
+      )
       enriched = Json
         .fromJsonObject(
           obj
             .add("event_id", Json.fromString(eventId))
-            .add("schema_version", obj("schema_version").getOrElse(Json.fromInt(1)))
-            .add("produced_at", obj("produced_at").getOrElse(Json.fromString(observedAt)))
+            .add("schema_version", Json.fromInt(schemaVersion))
+            .add("produced_at", Json.fromString(producedAt))
             .add("source_identity", obj("source_identity").getOrElse(Json.fromString(sensorId)))
             .add("correlation_id", obj("correlation_id").getOrElse(Json.fromString(eventId)))
             .add("causation_id", obj("causation_id").getOrElse(Json.fromString(eventId)))

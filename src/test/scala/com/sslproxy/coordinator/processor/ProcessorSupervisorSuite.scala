@@ -104,6 +104,27 @@ class ProcessorSupervisorSuite extends CatsEffectSuite:
     }
   }
 
+  test("processor failure state redacts secrets before persistence and health reporting") {
+    val id = ProcessorId.SyncScanIngestion
+    val config = ProcessorConfig(List(id.value), 1L, 10L)
+    ProcessorSupervisor.create(config).flatMap { supervisor =>
+      val workload = ProcessorWorkload(
+        id,
+        Stream.raiseError[IO](TerminalProcessorError("password=private authorization: Bearer opaque-token"))
+      )
+      supervisor.run(List(workload)).compile.drain.start.flatMap { fiber =>
+        awaitLifecycle(supervisor, id, ProcessorLifecycle.FailedTerminal)
+          .map { statuses =>
+            val message = statuses(id).lastError.getOrElse("")
+            assert(!message.contains("private"), message)
+            assert(!message.contains("opaque-token"), message)
+            assert(message.contains("[REDACTED]"), message)
+          }
+          .guarantee(fiber.cancel)
+      }
+    }
+  }
+
   test("retryable dependency startup failure recovers without terminating other workloads") {
     val recoveringId = ProcessorId.SyncScanIngestion
     val healthyId = ProcessorId.WirelessHeartbeatIngestion

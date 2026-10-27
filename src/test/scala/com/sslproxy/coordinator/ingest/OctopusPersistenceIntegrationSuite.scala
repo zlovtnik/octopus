@@ -40,7 +40,6 @@ import com.sslproxy.coordinator.util.Sha256Utils
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
-import fs2.kafka.ConsumerRecord
 import io.circe.{Decoder, Printer, parser as circeParser}
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
@@ -117,6 +116,72 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     )
 
   private lazy val repository = new PostgresRepository(xa)
+
+  test("unfamiliar stream types persist raw evidence without unsupported load jobs") {
+    requireDocker()
+    val payload = """{"event_type":"future_event","arbitrary":{"value":42}}"""
+    val source = ScanRequestRecord("future-source", Sha256Utils.sha256Hex("future-source"),
+      "future.telemetry", "future-raw-event", "2026-10-25T10:00:00Z", inlineRef(payload))
+    val record = ResolvedScanRequestRecord.from(source, payload).fold(throw _, identity)
+    val metadata = BrokerRecordMetadata("sync.scan.request", 0, 13001L, "generic-intake-v1", 1,
+      ArtifactSha256, None, source.sourceRecordSha256)
+    for
+      first <- repository.recordScanRequestWithEvidence(record, metadata).map(requireRight)
+      replay <- repository.recordScanRequestWithEvidence(record, metadata).map(requireRight)
+      stored <- sql"""SELECT payload::text, status FROM sync_events
+                       WHERE stream_name = ${record.streamName} AND dedupe_key = ${record.dedupeKey}"""
+        .query[(String, String)].unique.transact(xa)
+      jobs <- sql"SELECT count(*) FROM sync_jobs WHERE dedupe_key = ${record.dedupeKey}".query[Long].unique.transact(xa)
+      evidence <- sql"SELECT count(*) FROM ingestion_evidence WHERE group_id = 'generic-intake-v1'"
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(first.disposition, IngestionDisposition.Processed)
+      assertEquals(replay.disposition, IngestionDisposition.Deduplicated)
+      assertEquals(circeParser.parse(stored._1), circeParser.parse(payload))
+      assertEquals(stored._2, "completed")
+      assertEquals(jobs, 0L)
+      assertEquals(evidence, 1L)
+  }
+
+  test("heartbeat intake updates sensor state monotonically without load jobs") {
+    requireDocker()
+    def heartbeat(id: String, time: String, location: String, offset: Long) =
+      val payload = s"""{"event_id":"$id","event_type":"sensor_heartbeat","sensor_id":"intake-sensor","observed_at":"$time","location_id":"$location","capabilities":{"band":"5ghz"}}"""
+      val source = ScanRequestRecord(payload, Sha256Utils.sha256Hex(payload),
+        "wireless.sensor.heartbeat", id, time, s"inline://heartbeat/$id")
+      val record = ResolvedScanRequestRecord.from(source, payload).fold(throw _, identity)
+      val metadata = BrokerRecordMetadata("wireless.sensor.heartbeat", 0, offset, "heartbeat-intake-v1", 1,
+        ArtifactSha256, None, source.sourceRecordSha256)
+      repository.recordScanRequestWithEvidence(record, metadata).map(requireRight)
+    for
+      _ <- heartbeat("heartbeat-new", "2026-10-25T10:00:00Z", "current", 13002L)
+      _ <- heartbeat("heartbeat-old", "2026-10-24T10:00:00Z", "previous", 13003L)
+      replay <- heartbeat("heartbeat-new", "2026-10-25T10:00:00Z", "current", 13002L)
+      stored <- sql"""SELECT location_id, first_seen_at, last_seen_at, last_heartbeat_at, status
+                       FROM sensors WHERE sensor_id = 'intake-sensor'"""
+        .query[(String, java.sql.Timestamp, java.sql.Timestamp, java.sql.Timestamp, String)].unique.transact(xa)
+      jobs <- sql"SELECT count(*) FROM sync_jobs WHERE stream_name = 'wireless.sensor.heartbeat'"
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(replay.disposition, IngestionDisposition.Deduplicated)
+      assertEquals(stored._1, "current")
+      assertEquals(stored._2.toInstant.toString, "2026-10-24T10:00:00Z")
+      assertEquals(stored._3.toInstant.toString, "2026-10-25T10:00:00Z")
+      assertEquals(stored._4, stored._3)
+      assertEquals(stored._5, "online")
+      assertEquals(jobs, 0L)
+  }
+
+  test("reusing an event identity with a different payload fails closed") {
+    requireDocker()
+    val source = ScanRequestRecord("identity-source", Sha256Utils.sha256Hex("identity-source"),
+      "proxy.events", "identity-conflict-event", "2026-10-25T10:00:00Z", inlineRef("{}"))
+    def resolved(payload: String) = ResolvedScanRequestRecord.from(source, payload).fold(throw _, identity)
+    for
+      _ <- repository.recordScanRequests(List(resolved("{}"))).map(requireRight)
+      conflict <- repository.recordScanRequests(List(resolved("{\"changed\":true}")))
+    yield assert(conflict.isLeft, "a changed event identity must not be silently deduplicated")
+  }
 
   test("stream wireless projection deduplicates replays without raw rows and expires only weekly evidence") {
     requireDocker()
@@ -1524,6 +1589,39 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         .transact(xa)
     yield assertEquals(state, ("published", "dispatched", 1, "running", 1L))
 
+  test("a fast retryable result cannot be overwritten by late load publication acknowledgement") {
+    requireDocker()
+    val record = translatedAudit("""{"observed_at":"2026-10-25T10:00:00Z","host":"fast-result.example"}""", 13010L)
+    def metadata(topic: String, offset: Long, key: String) = BrokerRecordMetadata(
+      topic, 0, offset, "fast-result-v1", 1, ArtifactSha256, Some(key), "d" * 64)
+    for
+      _ <- parkPendingLoadOutboxes()
+      decision <- persist(record, 13010L)
+      claimed <- repository.claimOutbox("fast-result", List("sync.oracle.load"), 60)
+        .map(result => requireRight(result).getOrElse(fail("expected load outbox")))
+      load <- IO.fromEither(circeParser.decode[PostgresLoad](claimed.payload))
+      failed = PostgresResult.failure(decision.jobId, decision.batchId,
+        com.sslproxy.coordinator.postgres.PostgresErrorClass.Retryable, "temporary", "2026-10-25T10:00:01Z")
+      _ <- repository.recordLoadResultWithEvidence(load, failed,
+        metadata("sync.oracle.load", 13011L, claimed.messageKey)).map(requireRight)
+      _ <- repository.recordResultWithEvidence(failed,
+        metadata("sync.oracle.result", 13012L, claimed.messageKey)).map(requireRight)
+      queued <- sql"""SELECT status, message_key FROM outbox_events
+                       WHERE source_type = 'sync_batch_retry' AND source_id = ${s"${decision.batchId}:2"}"""
+        .query[(String, String)].unique.transact(xa)
+      acknowledged <- repository.acknowledgeOutbox(claimed).map(requireRight)
+      state <- sql"SELECT status, attempt_count FROM sync_batches WHERE batch_id = ${decision.batchId}"
+        .query[(String, Int)].unique.transact(xa)
+      dispatch <- sql"""SELECT status, message_key FROM outbox_events
+                        WHERE source_type = 'sync_batch_retry' AND source_id = ${s"${decision.batchId}:2"}"""
+        .query[(String, String)].unique.transact(xa)
+    yield
+      assert(!acknowledged)
+      assertEquals(state, "pending" -> 1)
+      assertEquals(queued, "pending" -> s"${decision.batchId}:2")
+      assertEquals(dispatch, "pending" -> s"${decision.batchId}:2")
+  }
+
   test(
     "broker loads and results require an exact durable coordinator dispatch and outcome"
   ):
@@ -2340,20 +2438,18 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     rawJson: String,
     offset: Long
   ): ResolvedScanRequestRecord =
-    PayloadAuditConsumer
-      .translateRecord(
-        ConsumerRecord[String, String](
-          "proxy.payload_audit",
-          0,
-          offset,
-          null,
-          rawJson
-        )
-      )
-      .fold(
-        error => fail(s"expected valid payload audit, found $error"),
-        identity
-      )
+    require(offset >= 0L, "fixture offset must be non-negative")
+    val observedAt = circeParser.parse(rawJson).flatMap(_.hcursor.get[String]("observed_at")).fold(throw _, identity)
+    val hash = Sha256Utils.sha256Hex(rawJson)
+    val dedupeKey = Sha256Utils.sha256Hex(s"proxy.payload_audit:$hash")
+    val request = io.circe.Json.obj(
+      "stream_name" -> io.circe.Json.fromString("proxy.payload_audit"),
+      "dedupe_key" -> io.circe.Json.fromString(dedupeKey),
+      "payload_ref" -> io.circe.Json.fromString(s"sha256://$hash"),
+      "observed_at" -> io.circe.Json.fromString(observedAt)
+    ).noSpaces
+    val source = ScanRequestRecord(request, hash, "proxy.payload_audit", dedupeKey, observedAt, s"sha256://$hash")
+    ResolvedScanRequestRecord.from(source, rawJson).fold(throw _, identity)
 
   private def persist(
     record: ResolvedScanRequestRecord,

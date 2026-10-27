@@ -8,6 +8,9 @@ Feature: Sync processor contracts
   Successful results complete the matching ingestion event only after its job
   and all batches succeed. Backlog recovery repairs historical batched events
   in bounded, checkpointed pages without changing search documents or vectors.
+  Scan ingestion accepts every event stream; typed load configuration controls
+  downstream jobs and never serves as an intake allowlist. Raw events and broker
+  evidence are durable before offsets commit, including unknown event types.
 
   Scenario Outline: An Octopus sync processor has its declared durable contract
     Given processor "<processor>" belongs to "sync"

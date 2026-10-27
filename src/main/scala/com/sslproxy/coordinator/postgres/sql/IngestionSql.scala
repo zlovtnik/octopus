@@ -117,18 +117,53 @@ object IngestionSql:
   def insertSyncEvent(
     record: ResolvedScanRequestRecord,
     observedAt: java.sql.Timestamp,
-    eventKind: Option[String]
+    eventKind: Option[String],
+    loadEligible: Boolean = true
   ): Update0 =
     val payload = Option(record.payloadJson)
+    val status = if loadEligible then "batched" else "completed"
     sql"""INSERT INTO sync_events (
              dedupe_key, stream_name, observed_at, payload_ref, payload,
              payload_sha256, status, attempt_count, last_error,
              producer, event_kind, created_at, updated_at
            ) VALUES (
              ${record.dedupeKey}, ${record.streamName}, $observedAt, ${record.payloadRef}, $payload,
-             ${record.eventPayloadSha256}, 'batched', 1, NULL,
+             ${record.eventPayloadSha256}, $status, 1, NULL,
              'ssl-proxy', $eventKind, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
            ) ON CONFLICT (dedupe_key, stream_name) DO UPDATE SET dedupe_key = sync_events.dedupe_key""".update
+
+  def eventPayloadHash(streamName: String, dedupeKey: String): Query0[Option[String]] =
+    sql"""SELECT payload_sha256 FROM sync_events
+           WHERE stream_name = $streamName AND dedupe_key = $dedupeKey
+           FOR UPDATE""".query[Option[String]]
+
+  def upsertHeartbeat(record: ResolvedScanRequestRecord, observedAt: java.sql.Timestamp): ConnectionIO[Unit] =
+    for
+      payload <- io.circe.parser.parse(record.payloadJson).liftTo[ConnectionIO]
+      sensorId <- payload.hcursor.get[String]("sensor_id").liftTo[ConnectionIO]
+      _ <- if sensorId.isBlank || sensorId.length > 64 then
+        doobie.free.connection.raiseError(IllegalArgumentException("sensor_id must contain 1 to 64 characters"))
+      else ().pure[ConnectionIO]
+      location = payload.hcursor.get[String]("location_id").toOption
+      capabilities = payload.hcursor.downField("capabilities").focus.filter(_.isObject).getOrElse(io.circe.Json.obj())
+      _ <- sql"""INSERT INTO sensors (
+                   sensor_id, location_id, capabilities, metadata,
+                   first_seen_at, last_seen_at, last_heartbeat_at, status, updated_at
+                 ) VALUES (
+                   $sensorId, $location, CAST(${capabilities.noSpaces} AS jsonb), '{}'::jsonb,
+                   $observedAt, $observedAt, $observedAt, 'online', CURRENT_TIMESTAMP
+                 ) ON CONFLICT (sensor_id) DO UPDATE SET
+                   location_id = CASE WHEN EXCLUDED.last_seen_at >= sensors.last_seen_at
+                     THEN COALESCE(EXCLUDED.location_id, sensors.location_id) ELSE sensors.location_id END,
+                   capabilities = CASE WHEN EXCLUDED.last_seen_at >= sensors.last_seen_at
+                     AND EXCLUDED.capabilities <> '{}'::jsonb
+                     THEN EXCLUDED.capabilities ELSE sensors.capabilities END,
+                   first_seen_at = LEAST(sensors.first_seen_at, EXCLUDED.first_seen_at),
+                   last_seen_at = GREATEST(sensors.last_seen_at, EXCLUDED.last_seen_at),
+                   last_heartbeat_at = GREATEST(sensors.last_heartbeat_at, EXCLUDED.last_heartbeat_at),
+                   status = CASE WHEN sensors.status = 'disabled' THEN 'disabled' ELSE 'online' END,
+                   updated_at = CURRENT_TIMESTAMP""".update.run
+    yield ()
 
   def insertJob(jobId: String, streamName: String, dedupeKey: String): Update0 =
     sql"""INSERT INTO sync_jobs (

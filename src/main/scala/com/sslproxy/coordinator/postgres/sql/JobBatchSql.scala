@@ -128,6 +128,12 @@ object JobBatchSql:
              FROM sync_batches b
              WHERE b.status = 'pending'
                AND b.stream_name IN (""" ++ streams ++ fr""" )
+               AND NOT EXISTS (
+                 SELECT 1 FROM outbox_events retry
+                 WHERE retry.source_type = 'sync_batch_retry'
+                   AND retry.source_id = CONCAT(b.batch_id, ':', b.attempt_count + 1)
+                   AND retry.event_type = 'sync.load.requested'
+               )
              ORDER BY b.created_at, b.batch_id
              LIMIT $batchLimit
              ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET

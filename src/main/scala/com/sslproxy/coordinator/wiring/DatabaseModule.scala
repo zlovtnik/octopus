@@ -51,7 +51,7 @@ private[coordinator] object DatabaseModule:
       val repository = new PostgresRepository(doobieTx, Some(dbSemaphore), projection, metrics)
       val payloadResolver = new PostgresPayloadResolver(outboxDir)
       val payloadLookup: String => IO[Option[String]] = sha =>
-        IngestionSql.payloadBySha256(sha).unique.transact(doobieTx).attempt.map(_.toOption)
+        IngestionSql.payloadBySha256(sha).option.transact(doobieTx)
       val loadHandler = new PostgresLoadHandler(
         payloadResolver,
         PostgresTransformService,

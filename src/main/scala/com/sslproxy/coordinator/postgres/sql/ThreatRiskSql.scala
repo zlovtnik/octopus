@@ -30,18 +30,22 @@ object ThreatRiskSql:
            FROM stale WHERE signal.source_key = stale.source_key""".update.run
 
   def dnsCandidates(limit: Int): Query0[DnsThreatCandidate] =
-    sql"""SELECT host,
-                  COUNT(*),
-                  COALESCE(SUM(bytes_up + bytes_down), 0),
-                  SUM(CASE WHEN event_time >= (CURRENT_TIMESTAMP + (-1) * INTERVAL '1 day') THEN 1 ELSE 0 END),
-                  MAX(event_time)
-           FROM proxy_events
-           WHERE blocked = true
-             AND event_time >= (CURRENT_TIMESTAMP + (-7) * INTERVAL '1 day')
-             AND event_time <= CURRENT_TIMESTAMP
-           GROUP BY host
-           HAVING COUNT(*) > 1
-           ORDER BY MAX(event_time) DESC, host
+    sql"""WITH hosts AS (
+             SELECT host, COUNT(*) AS blocked_count,
+                    COALESCE(SUM(bytes_up + bytes_down), 0) AS attempted_bytes,
+                    SUM(CASE WHEN event_time >= CURRENT_TIMESTAMP - INTERVAL '1 day' THEN 1 ELSE 0 END) AS recent_count,
+                    MAX(event_time) AS last_seen
+             FROM proxy_events
+             WHERE blocked = true
+               AND event_time >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+               AND event_time <= CURRENT_TIMESTAMP
+             GROUP BY host
+             HAVING COUNT(*) > 1
+           )
+           SELECT hosts.host, hosts.blocked_count, hosts.attempted_bytes, hosts.recent_count, hosts.last_seen
+           FROM hosts
+           LEFT JOIN atheros_search.threat_signals signal ON signal.source_key = 'dns:' || hosts.host
+           ORDER BY signal.updated_at ASC NULLS FIRST, hosts.last_seen DESC, hosts.host
            LIMIT ${limit.max(1)}""".query[DnsThreatCandidate]
 
   def persistDnsThreat(value: DnsThreatProjection): ConnectionIO[Int] =
@@ -72,9 +76,10 @@ object ThreatRiskSql:
     sql"""WITH bssids AS (
              SELECT frame.bssid
              FROM wireless_frames frame
+             LEFT JOIN atheros_search.ap_risk_scores risk ON risk.bssid = frame.bssid
              WHERE frame.bssid IS NOT NULL
-             GROUP BY frame.bssid
-             ORDER BY MAX(frame.observed_at) DESC, frame.bssid
+             GROUP BY frame.bssid, risk.measured_at
+             ORDER BY risk.measured_at ASC NULLS FIRST, MAX(frame.observed_at) DESC, frame.bssid
              LIMIT ${limit.max(1)}
            ),
            alert_scores AS (

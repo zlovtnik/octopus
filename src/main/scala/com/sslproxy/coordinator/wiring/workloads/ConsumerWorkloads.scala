@@ -24,7 +24,6 @@ private[coordinator] object ConsumerWorkloads:
   ): List[ProcessorWorkload] =
     val scanStream = ScanRequestStream.run(
       cfg.kafka,
-      cfg.ingest,
       db.ingestionStore,
       db.payloadResolver,
       metrics,

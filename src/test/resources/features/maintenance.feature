@@ -3,6 +3,8 @@ Feature: Maintenance processor contracts
 
   Event retention selects only completed ingestion events and keeps archive,
   dependent-work and maintenance-fence checks before deleting source rows.
+  Search retention removes unified and per-kind vectors, similarity pairs and
+  vector-kind-specific scan progress together with terminal search documents.
 
   Scenario Outline: An Octopus maintenance processor has its declared durable contract
     Given processor "<processor>" belongs to "maintenance"

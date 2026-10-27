@@ -261,7 +261,7 @@ final class ProcessorSupervisor private (
     }
 
   private def safeMessage(error: Throwable): String =
-    Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+    com.sslproxy.coordinator.util.ErrorSanitizer.message(error)
 
 object ProcessorSupervisor:
   private val log = StructuredLogger(getClass)

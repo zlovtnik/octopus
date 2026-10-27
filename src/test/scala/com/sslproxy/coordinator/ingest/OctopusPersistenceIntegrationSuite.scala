@@ -17,6 +17,7 @@ import com.sslproxy.coordinator.postgres.sql.{
   IdentityGraphSql,
   IngestionSql,
   MaintenanceSql,
+  OutboxSql,
   ProjectionSql,
   ResultSql
 }
@@ -1597,6 +1598,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     for
       _ <- parkPendingLoadOutboxes()
       decision <- persist(record, 13010L)
+      _ <- sql"UPDATE sync_batches SET max_attempts = 2 WHERE batch_id = ${decision.batchId}".update.run.transact(xa)
       claimed <- repository.claimOutbox("fast-result", List("sync.oracle.load"), 60)
         .map(result => requireRight(result).getOrElse(fail("expected load outbox")))
       load <- IO.fromEither(circeParser.decode[PostgresLoad](claimed.payload))
@@ -1609,17 +1611,60 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       queued <- sql"""SELECT status, message_key FROM outbox_events
                        WHERE source_type = 'sync_batch_retry' AND source_id = ${s"${decision.batchId}:2"}"""
         .query[(String, String)].unique.transact(xa)
+      _ <- repository.recordResultWithEvidence(failed,
+        metadata("sync.oracle.result", 13013L, claimed.messageKey)).map(requireRight)
+      next <- repository.claimOutbox("fast-result-retry", List("sync.oracle.load"), 60)
+        .map(result => requireRight(result).getOrElse(fail("expected distinct retry outbox")))
+      nextLoad <- IO.fromEither(circeParser.decode[PostgresLoad](next.payload))
+      _ <- DispatchAuthorizationSql.authorizeLoad(nextLoad).transact(xa)
       acknowledged <- repository.acknowledgeOutbox(claimed).map(requireRight)
       state <- sql"SELECT status, attempt_count FROM sync_batches WHERE batch_id = ${decision.batchId}"
         .query[(String, Int)].unique.transact(xa)
-      dispatch <- sql"""SELECT status, message_key FROM outbox_events
-                        WHERE source_type = 'sync_batch_retry' AND source_id = ${s"${decision.batchId}:2"}"""
-        .query[(String, String)].unique.transact(xa)
+      _ <- repository.recordLoadResultWithEvidence(nextLoad, failed,
+        metadata("sync.oracle.load", 13014L, next.messageKey)).map(requireRight)
+      outcomes <- sql"""SELECT message_key FROM outbox_events
+                        WHERE event_type = 'sync.load.result'
+                          AND split_part(source_id, ':', 1) = ${decision.batchId}
+                        ORDER BY message_key""".query[String].to[List].transact(xa)
+      _ <- repository.recordResultWithEvidence(failed,
+        metadata("sync.oracle.result", 13015L, next.messageKey)).map(requireRight)
+      retryAcknowledged <- repository.acknowledgeOutbox(next).map(requireRight)
+      terminal <- sql"SELECT status FROM sync_batches WHERE batch_id = ${decision.batchId}"
+        .query[String].unique.transact(xa)
+      extraAttempts <- sql"""SELECT COUNT(*) FROM outbox_events
+                             WHERE source_type = 'sync_batch_retry' AND source_id = ${s"${decision.batchId}:3"}"""
+        .query[Long].unique.transact(xa)
     yield
       assert(!acknowledged)
       assertEquals(state, "pending" -> 1)
       assertEquals(queued, "pending" -> s"${decision.batchId}:2")
-      assertEquals(dispatch, "pending" -> s"${decision.batchId}:2")
+      assertNotEquals(next.outboxId, claimed.outboxId)
+      assertEquals(nextLoad.attempt, 2)
+      assertEquals(outcomes, List(s"${decision.batchId}:1", s"${decision.batchId}:2"))
+      assert(!retryAcknowledged)
+      assertEquals(terminal, "failed")
+      assertEquals(extraAttempts, 0L)
+  }
+
+  test("load acknowledgement rejects attempt keys without the exact batch prefix") {
+    requireDocker()
+    val record = translatedAudit("""{"observed_at":"2026-10-25T10:01:00Z","host":"invalid-attempt.example"}""", 13020L)
+    for
+      _ <- parkPendingLoadOutboxes()
+      decision <- persist(record, 13020L)
+      claimed <- repository.claimOutbox("invalid-attempt", List("sync.oracle.load"), 60)
+        .map(result => requireRight(result).getOrElse(fail("expected load outbox")))
+      rejected <- List("1", "other-batch:1", s"${decision.batchId}1", s"${decision.batchId}:0").traverse { key =>
+        OutboxSql.acknowledge(claimed.copy(messageKey = key), Some(decision.batchId)).transact(xa).attempt
+      }
+      state <- sql"""SELECT o.status, b.status, b.attempt_count FROM outbox_events o
+                       CROSS JOIN sync_batches b
+                       WHERE b.batch_id = ${decision.batchId} AND o.outbox_id = ${claimed.outboxId}""".query[(String, String, Int)].unique.transact(xa)
+      acknowledged <- repository.acknowledgeOutbox(claimed).map(requireRight)
+    yield
+      assert(rejected.forall(_.left.toOption.exists(_.isInstanceOf[IllegalArgumentException])))
+      assertEquals(state, ("leased", "pending", 0))
+      assert(acknowledged)
   }
 
   test(
@@ -2089,7 +2134,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
                                       payload ->> 'row_count', COUNT(*) OVER ()
                                FROM outbox_events
                                WHERE destination_topic = 'sync.oracle.result'
-                                 AND source_id = $resultBatchId"""
+                                 AND source_id = ${s"$resultBatchId:2"}"""
         .query[(String, String, String, String, Long)]
         .unique
         .transact(xa)
@@ -2104,7 +2149,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(
         secondAttempt,
         (
-          "44444444-4444-4444-4444-444444444444",
+          "77777777-7777-7777-7777-777777777777",
           s"$resultBatchId:2",
           "pending",
           "4",

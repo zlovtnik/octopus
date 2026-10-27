@@ -496,7 +496,7 @@ class PostgresRepository(
       existingBrokerEvidence(metadata).flatMap {
         case Some(existing) => verifyBrokerEvidence(metadata, dedupeKey, existing)
         case None =>
-          applyResultTransition(result) *>
+          applyResultTransition(result, attempt) *>
             persistBrokerEvidence(metadata, dedupeKey, IngestionDisposition.Processed)
       }
 
@@ -505,7 +505,7 @@ class PostgresRepository(
     val outboxId = stableUuid("outbox:sync.oracle.result", result.batchId, safeAttempt.toString)
     ResultSql.enqueue(result, safeAttempt, outboxId)
 
-  private def applyResultTransition(result: PostgresResult): ConnectionIO[Unit] =
+  private def applyResultTransition(result: PostgresResult, attempt: Int): ConnectionIO[Unit] =
     for
       batch <- ResultSql.batchForUpdate(result.batchId).option
       row <- batch match
@@ -517,9 +517,14 @@ class PostgresRepository(
             )
           )
         case None => FC.raiseError(IllegalStateException(s"unknown result batch ${result.batchId}"))
+      expectedAttempt = row.attemptCount + (if row.status == "pending" then 1 else 0)
       _ <-
-        if result.status == "success" then completeSuccessfulResult(result, row.streamName, row.cursorEnd)
-        else completeFailedResult(result, row)
+        if Set("completed", "failed", "cancelled").contains(row.status) || attempt < expectedAttempt then
+          ().pure[ConnectionIO]
+        else if attempt > expectedAttempt then
+          FC.raiseError(IllegalStateException("result attempt is ahead of its batch"))
+        else if result.status == "success" then completeSuccessfulResult(result, row.streamName, row.cursorEnd)
+        else completeFailedResult(result, row, attempt)
     yield ()
 
   private def completeSuccessfulResult(
@@ -531,9 +536,10 @@ class PostgresRepository(
 
   private def completeFailedResult(
     result: PostgresResult,
-    batch: ResultSql.BatchState
+    batch: ResultSql.BatchState,
+    attempt: Int
   ): ConnectionIO[Unit] =
-    val retry = result.retryable && batch.attemptCount < batch.maxAttempts
+    val retry = result.retryable && attempt < batch.maxAttempts
 
     if retry then ResultSql.scheduleRetry(result, batch)
     else ResultSql.completeFailed(result, batch)

@@ -3,14 +3,14 @@ package com.sslproxy.coordinator.domain
 import io.circe.{Decoder, Encoder, HCursor, Json}
 
 final case class SyncLoad(
-  jobId: String,
-  batchId: String,
-  batchNo: Option[Int],
-  streamName: String,
-  payloadRef: String,
-  cursorStart: String,
-  cursorEnd: String,
-  attempt: Int
+    jobId: String,
+    batchId: String,
+    batchNo: Option[Int],
+    streamName: String,
+    payloadRef: String,
+    cursorStart: String,
+    cursorEnd: String,
+    attempt: Int
 )
 
 object SyncLoad:
@@ -24,7 +24,16 @@ object SyncLoad:
       cursorStart <- c.downField("cursor_start").as[String]
       cursorEnd <- c.downField("cursor_end").as[String]
       attempt <- c.downField("attempt").as[Option[Int]].map(_.getOrElse(0))
-    yield SyncLoad(jobId, batchId, batchNo, streamName, payloadRef, cursorStart, cursorEnd, attempt)
+    yield SyncLoad(
+      jobId,
+      batchId,
+      batchNo,
+      streamName,
+      payloadRef,
+      cursorStart,
+      cursorEnd,
+      attempt
+    )
 
   given Encoder[SyncLoad] = (load: SyncLoad) =>
     Json.obj(

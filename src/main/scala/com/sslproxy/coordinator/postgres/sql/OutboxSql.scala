@@ -191,9 +191,8 @@ object OutboxSql:
                updated_at = CURRENT_TIMESTAMP
            WHERE batch_id = $batchId
              AND status = 'pending'
-             AND attempt_count = ${attempt - 1}""".update.run.flatMap { updated =>
-      if updated == 1 then true.pure[ConnectionIO] else false.pure[ConnectionIO]
-    }.flatTap {
+             AND attempt_count = ${attempt - 1}""".update.run.map(_ == 1)
+      .flatTap {
       case true =>
         sql"""UPDATE sync_jobs AS j
                SET status = 'running',

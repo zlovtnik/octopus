@@ -13,17 +13,13 @@ class ResultSqlSuite extends FunSuite:
     source.substring(source.indexOf("  def enqueue("), source.indexOf("  def batchForUpdate("))
 
   test("result enqueue reopens only terminally failed messages"):
-    assert(
-      implementation.contains(
-        "ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET"
-      )
-    )
-    assert(implementation.contains("message_key = EXCLUDED.message_key"))
-    assert(implementation.contains("WHERE outbox_events.status IN ('failed', 'cancelled')"))
-    assert(implementation.contains("outbox_events.message_key <> EXCLUDED.message_key"))
+    assert(implementation.contains("ON CONFLICT DO NOTHING"))
+    assert(implementation.contains("UPDATE outbox_events SET"))
+    assert(implementation.contains("AND message_key = $messageKey"))
+    assert(implementation.contains("AND status IN ('failed', 'cancelled')"))
+    assert(implementation.contains("sync_batch_result"))
     assert(implementation.contains("status = 'pending'"))
     assert(implementation.contains("published_at = NULL"))
-    assert(!implementation.contains("DO NOTHING"))
 
   test("result enqueue never reopens an in-flight or published message"):
     assert(!implementation.contains("status = CASE WHEN outbox_events.status IN"))

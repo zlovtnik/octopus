@@ -4,6 +4,7 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.postgres.PostgresResult
 import doobie.implicits.*
 import doobie.{ConnectionIO, Query0}
+import io.circe.Json
 import io.circe.syntax.*
 
 object ResultSql:
@@ -22,19 +23,22 @@ object ResultSql:
   def enqueue(result: PostgresResult, attempt: Int, outboxId: String): ConnectionIO[Unit] =
     val safeAttempt = attempt.max(1)
     val messageKey = s"${result.batchId}:$safeAttempt"
-    sql"""INSERT INTO outbox_events (
+    val sourceType =
+      if safeAttempt == 1 then "sync_batch" else "sync_batch_result"
+    val sourceId = if safeAttempt == 1 then result.batchId else messageKey
+    val insert = sql"""INSERT INTO outbox_events (
              outbox_id, source_type, source_id, event_type,
              destination_topic, message_key, payload, status,
              attempt_count, max_attempts, next_attempt_at, created_at, updated_at
            ) VALUES (
-             $outboxId, 'sync_batch', ${result.batchId}, 'sync.load.result',
+             $outboxId, $sourceType, $sourceId, 'sync.load.result',
              'sync.oracle.result', $messageKey, ${result.asJson.noSpaces}, 'pending',
              0, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-           ) ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO UPDATE SET
-             message_key = EXCLUDED.message_key,
-             payload = EXCLUDED.payload,
+           ) ON CONFLICT DO NOTHING""".update.run
+    insert *> sql"""UPDATE outbox_events SET
+             payload = ${result.asJson.noSpaces},
              attempt_count = 0,
-             max_attempts = EXCLUDED.max_attempts,
+             max_attempts = 5,
              next_attempt_at = CURRENT_TIMESTAMP,
              status = 'pending',
              owner_id = NULL,
@@ -43,9 +47,9 @@ object ResultSql:
              published_at = NULL,
              last_error = NULL,
              updated_at = CURRENT_TIMESTAMP
-           WHERE outbox_events.status IN ('failed', 'cancelled')
-              OR (outbox_events.status = 'published'
-                  AND outbox_events.message_key <> EXCLUDED.message_key)""".update.run.void
+           WHERE destination_topic = 'sync.oracle.result'
+             AND message_key = $messageKey
+             AND status IN ('failed', 'cancelled')""".update.run.void
 
   def batchForUpdate(batchId: String): Query0[BatchState] =
     sql"""SELECT b.job_id, b.stream_name, b.payload_ref,
@@ -172,18 +176,25 @@ object ResultSql:
 
   private def enqueueLoadRetry(batchId: String, batch: BatchState, attempt: Int): ConnectionIO[Unit] =
     val sourceId = s"$batchId:$attempt"
+    val payload = Json
+      .obj(
+        "job_id" -> Json.fromString(batch.jobId),
+        "batch_id" -> Json.fromString(batchId),
+        "batch_no" -> Json.fromInt(batch.batchNo),
+        "stream_name" -> Json.fromString(batch.streamName),
+        "payload_ref" -> Json.fromString(batch.payloadRef),
+        "cursor_start" -> Json.fromString(batch.cursorStart),
+        "cursor_end" -> Json.fromString(batch.cursorEnd),
+        "attempt" -> Json.fromInt(attempt)
+      )
+      .noSpaces
     sql"""INSERT INTO outbox_events (
              outbox_id, source_type, source_id, event_type,
              destination_topic, message_key, payload, status,
              attempt_count, max_attempts, next_attempt_at, created_at, updated_at
            ) VALUES (
              gen_random_uuid(), 'sync_batch_retry', $sourceId, 'sync.load.requested',
-             'sync.oracle.load', $sourceId,
-             jsonb_build_object(
-               'job_id', ${batch.jobId}, 'batch_id', $batchId, 'batch_no', ${batch.batchNo},
-               'stream_name', ${batch.streamName}, 'payload_ref', ${batch.payloadRef},
-               'cursor_start', ${batch.cursorStart}, 'cursor_end', ${batch.cursorEnd}, 'attempt', $attempt
-             ),
+             'sync.oracle.load', $sourceId, CAST($payload AS jsonb),
              'pending', 0, ${batch.maxAttempts}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
            ) ON CONFLICT ON CONSTRAINT outbox_events_source_event_uq DO NOTHING""".update.run.void
 

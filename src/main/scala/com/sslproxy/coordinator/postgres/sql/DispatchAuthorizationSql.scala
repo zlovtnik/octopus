@@ -12,7 +12,7 @@ import io.circe.parser.decode
 object DispatchAuthorizationSql:
   def authorizeLoad(load: PostgresLoad): ConnectionIO[Unit] =
     sql"""SELECT o.payload::text
-           FROM outbox_events o JOIN sync_batches b ON b.batch_id = split_part(o.source_id, ':', 1)::uuid
+           FROM outbox_events o JOIN sync_batches b ON b.batch_id = split_part(o.source_id, ':', 1)
            WHERE o.source_type IN ('sync_batch', 'sync_batch_retry')
              AND split_part(o.source_id, ':', 1) = ${load.batchId}
              AND o.event_type = 'sync.load.requested' AND o.destination_topic = 'sync.oracle.load'
@@ -36,12 +36,13 @@ object DispatchAuthorizationSql:
     messageKey: Option[String]
   ): ConnectionIO[Unit] =
     sql"""SELECT o.payload::text
-           FROM outbox_events o JOIN sync_batches b ON b.batch_id = o.source_id
+           FROM outbox_events o JOIN sync_batches b ON b.batch_id = split_part(o.source_id, ':', 1)
            JOIN outbox_events dispatch ON split_part(dispatch.source_id, ':', 1) = b.batch_id::text
              AND dispatch.source_type IN ('sync_batch', 'sync_batch_retry')
              AND dispatch.event_type = 'sync.load.requested'
              AND dispatch.destination_topic = 'sync.oracle.load' AND dispatch.message_key = o.message_key
-           WHERE o.source_type = 'sync_batch' AND o.source_id = ${result.batchId}
+           WHERE o.source_type IN ('sync_batch', 'sync_batch_result')
+             AND split_part(o.source_id, ':', 1) = ${result.batchId}
              AND o.event_type = 'sync.load.result' AND o.destination_topic = 'sync.oracle.result'
              AND o.message_key = ${messageKey.getOrElse("")}
              AND b.job_id = ${result.jobId}

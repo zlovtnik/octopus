@@ -302,8 +302,13 @@ final class DqRuntime(
     }
 
 object DqRuntime:
-  private final case class Health(maintenance: Boolean, reports: Boolean, failedPartitions: Set[Int]):
-    def ready: Boolean = maintenance && reports && failedPartitions.isEmpty
+  private final case class Health(
+    maintenance: Boolean,
+    reports: Boolean,
+    hasAssignments: Boolean,
+    failedPartitions: Set[Int]
+  ):
+    def ready: Boolean = maintenance && reports && hasAssignments && failedPartitions.isEmpty
 
   private[dq] final class Readiness private (
     state: Ref[IO, Health],
@@ -323,12 +328,16 @@ object DqRuntime:
         if healthy then value.failedPartitions - id else value.failedPartitions + id
       ))
     def assignments(partitions: Set[Int]): IO[Unit] =
-      update(value => value.copy(failedPartitions = value.failedPartitions.intersect(partitions)))
+      update(value => value.copy(
+        reports = value.reports && partitions.nonEmpty,
+        hasAssignments = partitions.nonEmpty,
+        failedPartitions = value.failedPartitions.intersect(partitions)
+      ))
 
   private[dq] object Readiness:
     def create(output: Ref[IO, Boolean]): IO[Readiness] =
       for
-        state <- Ref.of[IO, Health](Health(false, false, Set.empty))
+        state <- Ref.of[IO, Health](Health(false, false, false, Set.empty))
         gate <- Semaphore[IO](1)
         _ <- output.set(false)
       yield new Readiness(state, gate, output)

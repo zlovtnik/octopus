@@ -9,16 +9,16 @@ import java.nio.charset.StandardCharsets
 /** Locked source record for a `sync.scan.request`-shaped ingest request.
   *
   * `sourceRecordSha256` hashes the broker record whose coordinates are written
-  * to ingestion evidence. It is deliberately distinct from the referenced
-  * event payload hash.
+  * to ingestion evidence. It is deliberately distinct from the referenced event
+  * payload hash.
   */
 final case class ScanRequestRecord(
-  requestJson: String,
-  sourceRecordSha256: String,
-  streamName: String,
-  dedupeKey: String,
-  observedAt: String,
-  payloadRef: String
+    requestJson: String,
+    sourceRecordSha256: String,
+    streamName: String,
+    dedupeKey: String,
+    observedAt: String,
+    payloadRef: String
 )
 
 object ScanRequestRecord:
@@ -27,10 +27,10 @@ object ScanRequestRecord:
   private[domain] val PayloadRefMaxBytes = 16_777_215
 
   private final case class Wire(
-    streamName: String,
-    dedupeKey: String,
-    payloadRef: String,
-    observedAt: String
+      streamName: String,
+      dedupeKey: String,
+      payloadRef: String,
+      observedAt: String
   )
 
   private given Decoder[Wire] = (cursor: HCursor) =>
@@ -43,19 +43,46 @@ object ScanRequestRecord:
 
   def decodeWire(rawJson: String): Either[Throwable, ScanRequestRecord] =
     decode[Wire](rawJson).flatMap { wire =>
-      if wire.streamName.isBlank then Left(IllegalArgumentException("scan request stream_name must not be empty"))
+      if wire.streamName.isBlank then
+        Left(
+          IllegalArgumentException("scan request stream_name must not be empty")
+        )
       else if wire.streamName.length > StreamNameMaxLength then
-        Left(IllegalArgumentException(s"scan request stream_name must not exceed $StreamNameMaxLength characters"))
-      else if wire.dedupeKey.isBlank then Left(IllegalArgumentException("scan request dedupe_key must not be empty"))
+        Left(
+          IllegalArgumentException(
+            s"scan request stream_name must not exceed $StreamNameMaxLength characters"
+          )
+        )
+      else if wire.dedupeKey.isBlank then
+        Left(
+          IllegalArgumentException("scan request dedupe_key must not be empty")
+        )
       else if wire.dedupeKey.length > DedupeKeyMaxLength then
-        Left(IllegalArgumentException(s"scan request dedupe_key must not exceed $DedupeKeyMaxLength characters"))
-      else if wire.payloadRef.isBlank then Left(IllegalArgumentException("scan request payload_ref must not be empty"))
-      else if wire.payloadRef.getBytes(StandardCharsets.UTF_8).length > PayloadRefMaxBytes then
-        Left(IllegalArgumentException(s"scan request payload_ref must not exceed $PayloadRefMaxBytes UTF-8 bytes"))
+        Left(
+          IllegalArgumentException(
+            s"scan request dedupe_key must not exceed $DedupeKeyMaxLength characters"
+          )
+        )
+      else if wire.payloadRef.isBlank then
+        Left(
+          IllegalArgumentException("scan request payload_ref must not be empty")
+        )
+      else if wire.payloadRef
+          .getBytes(StandardCharsets.UTF_8)
+          .length > PayloadRefMaxBytes
+      then
+        Left(
+          IllegalArgumentException(
+            s"scan request payload_ref must not exceed $PayloadRefMaxBytes UTF-8 bytes"
+          )
+        )
       else if !isRfc3339(wire.observedAt) then
-        Left(IllegalArgumentException("scan request observed_at must be RFC3339"))
+        Left(
+          IllegalArgumentException("scan request observed_at must be RFC3339")
+        )
       else
-        val sourceRecordSha256 = Sha256Utils.sha256Hex(rawJson.getBytes(StandardCharsets.UTF_8))
+        val sourceRecordSha256 =
+          Sha256Utils.sha256Hex(rawJson.getBytes(StandardCharsets.UTF_8))
         Right(
           ScanRequestRecord(
             requestJson = rawJson,
@@ -78,23 +105,32 @@ object ScanRequestRecord:
   * validated as non-null JSON.
   */
 final case class ResolvedScanRequestRecord(
-  source: ScanRequestRecord,
-  payloadJson: String,
-  eventPayloadSha256: String
+    source: ScanRequestRecord,
+    payloadJson: String,
+    eventPayloadSha256: String
 ):
-  export source.{requestJson, sourceRecordSha256, streamName, dedupeKey, observedAt, payloadRef}
+  export source.{
+    requestJson,
+    sourceRecordSha256,
+    streamName,
+    dedupeKey,
+    observedAt,
+    payloadRef
+  }
 
-  private[coordinator] lazy val inspection: Either[Throwable, PayloadJsonInspection.Metadata] =
+  private[coordinator] lazy val inspection
+      : Either[Throwable, PayloadJsonInspection.Metadata] =
     PayloadJsonInspection.inspect(payloadJson)
 
 object ResolvedScanRequestRecord:
   def from(
-    source: ScanRequestRecord,
-    payloadJson: String
+      source: ScanRequestRecord,
+      payloadJson: String
   ): Either[Throwable, ResolvedScanRequestRecord] =
     val record = ResolvedScanRequestRecord(
       source = source,
       payloadJson = payloadJson,
-      eventPayloadSha256 = Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
+      eventPayloadSha256 =
+        Sha256Utils.sha256Hex(payloadJson.getBytes(StandardCharsets.UTF_8))
     )
     record.inspection.map(_ => record)

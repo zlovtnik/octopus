@@ -168,7 +168,7 @@ in [ProcessorCatalog](src/main/scala/com/sslproxy/coordinator/processor/Processo
 | Durable processor lifecycle/runs, dependency readiness and bounded restart backoff | Selected consumer/processor workloads | [ProcessorSupervisor](src/main/scala/com/sslproxy/coordinator/processor/ProcessorSupervisor.scala) |
 | Structured logs, Micrometer/Prometheus, Kafka lag observations and OTLP spans | Process resources and active workload boundaries | [ObservabilityModule](src/main/scala/com/sslproxy/coordinator/wiring/ObservabilityModule.scala), [CoordinatorMetrics](src/main/scala/com/sslproxy/coordinator/observability/CoordinatorMetrics.scala) |
 | Local payload-file reads | Compatibility `outbox://` resolution during intake/load/historical hydration | [PostgresPayloadResolver](src/main/scala/com/sslproxy/coordinator/postgres/PostgresPayloadResolver.scala) |
-| MinIO archive reads/writes | Selected event retention | [MinioPayloadArchive](src/main/scala/com/sslproxy/coordinator/archive/MinioPayloadArchive.scala) |
+| MinIO archive reads/writes | Selected event retention | [MinioPayloadArchive](src/main/scala/com/sslproxy/coordinator/archive/PayloadArchive.scala) |
 | DQ policy reconciliation | Startup, including when DQ is disabled | [CoordinatorApplication](src/main/scala/com/sslproxy/coordinator/wiring/CoordinatorApplication.scala) |
 
 ## Optional DQ subsystem
@@ -239,8 +239,9 @@ are not deleted by removing unreachable consumer code.
   record after the batch fails; retryable, invariant, and DLQ-publication
   failures still stop offset commits.
 - A load outbox acknowledgement is fenced to its load attempt. A fast retry
-  result reserves the next attempt, so an older acknowledgement cannot change
-  it back to dispatched.
+  result queues a distinct next-attempt load row before an older acknowledgement
+  can publish its row. Retry outcomes also have separate rows; duplicate results
+  cannot advance attempts, and early results respect the retry limit.
 - Temporary payload lookup failures now remain retryable. They are no longer
   converted to a missing-payload permanent failure.
 - Search retention removes unified embeddings, similarity pairs and scan state;
@@ -258,11 +259,13 @@ are not deleted by removing unreachable consumer code.
 
 ### Verification
 
-- `sbt test` — 576 passed, 1 skipped (`LiveHydrationProbeSuite`, an existing
+- `sbt test` — 577 passed, 1 skipped (`LiveHydrationProbeSuite`, an existing
   opt-in live probe).
 - `sbt "testOnly com.sslproxy.coordinator.ingest.OctopusPersistenceIntegrationSuite"`
-  — 56 passed.
-- `python3 scripts/check-docs.py` — passed.
+  — 57 passed.
+- Working-tree documentation links and Kubernetes delivery policy — passed.
+  `python3 scripts/check-docs.py` reads committed submodule snapshots and still
+  reports the old archive link until this submodule change is committed.
 - `make dependency-boundaries` — passed.
 - `git diff --check` — passed.
 

@@ -4,6 +4,22 @@ import cats.effect.{IO, Ref}
 import munit.CatsEffectSuite
 
 class DqRuntimeSuite extends CatsEffectSuite:
+  test("a report after all assignments are revoked cannot restore readiness") {
+    for
+      ready <- Ref.of[IO, Boolean](false)
+      health <- DqRuntime.Readiness.create(ready)
+      _ <- health.maintenance(true)
+      _ <- health.assignments(Set(0))
+      _ <- health.reports(true)
+      assigned <- ready.get
+      _ = assert(assigned)
+      _ <- health.assignments(Set.empty)
+      _ <- health.reports(true)
+      unassigned <- ready.get
+      _ = assert(!unassigned)
+    yield ()
+  }
+
   test("maintenance recovery cannot mask a disconnected report consumer or failed report partition") {
     for
       ready <- Ref.of[IO, Boolean](false)
@@ -11,6 +27,7 @@ class DqRuntimeSuite extends CatsEffectSuite:
       _ <- health.maintenance(true)
       disconnected <- ready.get
       _ = assert(!disconnected)
+      _ <- health.assignments(Set(0, 1))
       _ <- health.reports(true)
       healthy <- ready.get
       _ = assert(healthy)
@@ -32,6 +49,19 @@ class DqRuntimeSuite extends CatsEffectSuite:
       _ <- health.assignments(Set(1))
       revoked <- ready.get
       _ = assert(revoked)
+      _ <- health.assignments(Set.empty)
+      unassigned <- ready.get
+      _ = assert(!unassigned)
+      _ <- health.assignments(Set(1))
+      awaitingConsumption <- ready.get
+      _ = assert(!awaitingConsumption)
+      _ <- health.reports(true)
+      consumed <- ready.get
+      _ = assert(consumed)
+      _ <- health.partition(1, false)
+      _ <- health.reports(true)
+      stillFailed <- ready.get
+      _ = assert(!stillFailed)
     yield ()
   }
 

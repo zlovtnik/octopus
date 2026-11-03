@@ -653,6 +653,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       laterDelivery <- ingestAndLoad(1000)
       afterLaterDelivery <- durableState
       laterEvidence <- evidence
+      _ <- if sys.env.get("OCTOPUS_PROXY_REPLAY_E2E").contains("true") then
+        verifyRetainedProxyRecovery(ingestAndLoad(0).void)
+      else IO.unit
     yield
       assertEquals(first.map(_.disposition), retained.map { (_, _, delta) =>
         if delta == 1 then IngestionDisposition.Processed else IngestionDisposition.Deduplicated
@@ -685,6 +688,140 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(laterEvidence, expectedEvidence ++ retained.map { (record, metadata, _) =>
         (metadata.offset + 1000L, record.dedupeKey, record.sourceRecordSha256, "duplicate")
       })
+
+  private def verifyRetainedProxyRecovery(replay: IO[Unit]): IO[Unit] =
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    import com.sslproxy.coordinator.processor.ProxyEvidence
+    val model = "nomic-embed-text-v2-moe"
+    val obsoleteSource = "00000000-0000-4000-8000-000000000007"
+    val wireless = "00000000-0000-4000-8000-000000000200"
+    val wirelessText = "wireless replay canary"
+    val wirelessChecksum = Sha256Utils.sha256Hex(wirelessText)
+    val scope = "00000000-0000-4000-8000-00000000000_"
+    def prepare(lease: com.sslproxy.coordinator.processor.Lease): IO[Unit] =
+      (1 to 4).toList.traverse_ { _ =>
+        (sql"SET LOCAL ROLE proxy_replay_octopus".update.run *>
+          ProxyPreparationSql.tick(lease, 16, model, "legacy_unknown", 32)).transact(xa).void
+      }
+    def ingestionCounts = (
+      sql"SELECT count(*) FROM octopus_core.proxy_events WHERE event_id LIKE $scope".query[Long].unique,
+      sql"SELECT count(*) FROM octopus_core.ingestion_evidence WHERE group_id = 'retained-proxy-corpus'".query[Long].unique,
+      sql"""SELECT count(*) FROM octopus_core.sync_events e WHERE e.stream_name='proxy.events' AND EXISTS
+             (SELECT 1 FROM octopus_core.ingestion_evidence i
+              WHERE i.group_id='retained-proxy-corpus' AND i.dedupe_key=e.dedupe_key)""".query[Long].unique
+    ).tupled.transact(xa)
+    def documents = sql"""SELECT d.source_kind, d.status, j.status, d.document_id::text, j.job_id::text,
+      d.normalized_sha256,
+      COALESCE(j.content_sha256=d.normalized_sha256 AND u.content_sha256=d.normalized_sha256
+        AND v.content_sha256=d.normalized_sha256 AND u.embedding::text=v.embedding::text
+        AND d.normalized_sha256=encode(sha256(convert_to(d.normalized_text, 'UTF8')), 'hex'), false)
+      FROM atheros_search.search_documents d JOIN atheros_search.embedding_jobs j USING (document_id)
+      LEFT JOIN atheros_search.embeddings u ON u.document_id=d.document_id AND u.embedding_kind=j.embedding_kind
+        AND u.embedding_model=j.embedding_model AND u.input_revision=j.input_revision
+      LEFT JOIN atheros_search.search_vectors_event v ON v.document_id=d.document_id
+        AND v.embedding_model=j.embedding_model AND v.input_revision=j.input_revision
+      WHERE j.embedding_model=$model AND j.input_revision='legacy_unknown'
+        AND d.source_kind IN ('proxy_event','proxy_blocked_host_window') ORDER BY d.document_id"""
+      .query[(String, String, String, String, String, String, Boolean)].to[List].transact(xa)
+    // Republishing evidence refreshes its timestamp, and re-queuing a window
+    // advances the window notification revision even for identical members.
+    // Keep source revisions for events and the member watermark for windows.
+    def currentProjections = (
+      sql"""SELECT (to_jsonb(e) - 'updated_at')::text
+        FROM atheros_search.proxy_event_evidence e WHERE event_id LIKE $scope ORDER BY event_id"""
+        .query[String].to[List],
+      sql"""SELECT (CASE WHEN s.source_key LIKE 'proxy-window:%'
+                    THEN to_jsonb(s) - 'updated_at' - 'source_revision'
+                    ELSE to_jsonb(s) - 'updated_at' END)::text
+        FROM atheros_search.proxy_document_state s WHERE source_table='proxy_events'
+          AND (source_key LIKE $scope OR source_key LIKE 'proxy-window:%') ORDER BY source_key"""
+        .query[String].to[List],
+      sql"""SELECT jsonb_build_object(
+          'document', CASE WHEN d.source_kind='proxy_blocked_host_window'
+            THEN (to_jsonb(d) - 'updated_at' - 'evidence_revision') #- '{detail_json,source_evidence_revision}'
+            ELSE to_jsonb(d) - 'updated_at' END,
+          'jobs', (SELECT jsonb_agg(to_jsonb(j) ORDER BY j.job_id)
+            FROM atheros_search.embedding_jobs j WHERE j.document_id=d.document_id),
+          'unified', (SELECT jsonb_agg(to_jsonb(u) ORDER BY u.embedding_id)
+            FROM atheros_search.embeddings u WHERE u.document_id=d.document_id),
+          'per_kind', (SELECT jsonb_agg(to_jsonb(v) ORDER BY v.embedding_model, v.input_revision)
+            FROM atheros_search.search_vectors_event v WHERE v.document_id=d.document_id))::text
+        FROM atheros_search.search_documents d WHERE source_table='proxy_events'
+          AND (source_key LIKE $scope OR source_kind='proxy_blocked_host_window') ORDER BY document_id"""
+        .query[String].to[List]
+    ).tupled.transact(xa)
+    for
+      baseline <- ingestionCounts
+      _ <- sql"""CREATE ROLE proxy_replay_octopus; CREATE ROLE proxy_replay_search LOGIN PASSWORD 'replay-fixture';
+        ALTER ROLE proxy_replay_search SET search_path TO atheros_search, public;
+        ALTER ROLE proxy_replay_search SET timezone TO 'UTC'""".update.run.transact(xa)
+      _ <- List(schemaRoot, schemaRoot.resolveSibling("atheros_search")).traverse_ { root =>
+        val grants = Files.readString(root.resolve("grants/least_privilege.sql.tmpl"))
+          .replace("{{OCTOPUS_ACCOUNT}}", "proxy_replay_octopus")
+          .replace("{{ATHEROS_SEARCH_ACCOUNT}}", "proxy_replay_search")
+        doobie.Fragment.const(grants).update.run.transact(xa).void
+      }
+      _ <- (sql"""INSERT INTO atheros_search.search_documents
+        (document_id, source_id, source_table, source_key, source_kind, normalized_text, normalized_sha256)
+        VALUES ($wireless::uuid, $wireless, 'wireless_frames', $wireless, 'event', $wirelessText, $wirelessChecksum)""".update.run *>
+        sql"""INSERT INTO atheros_search.embedding_jobs(job_id, document_id, embedding_kind, embedding_model, content_sha256)
+        VALUES ($wireless::uuid, $wireless::uuid, 'event', $model, $wirelessChecksum)""".update.run).transact(xa)
+      lease <- proxyLease
+      old <- sql"""SELECT observation_revision, event_time, payload::text FROM octopus_core.proxy_events
+        WHERE event_id=$obsoleteSource""".query[(Long, java.sql.Timestamp, String)].unique.transact(xa)
+      stale = ProxyEvidence.source(circeParser.parse(old._3).fold(throw _, identity), obsoleteSource, old._1 - 1, old._2).get
+      _ <- ProxyPreparationSql.persist(lease, stale.copy(searchText = "obsolete proxy event fixture"), model).transact(xa)
+      _ <- prepare(lease)
+      pending <- documents
+      _ <- IO {
+        assertEquals(pending.filter(_._2 == "active").groupMapReduce(_._1)(_ => 1)(_ + _),
+          Map("proxy_event" -> 8, "proxy_blocked_host_window" -> 1))
+        assert(pending.filter(_._2 == "active").forall(_._3 == "pending"))
+        assertEquals(pending.filter(_._2 == "superseded").map(_._3), List("cancelled"))
+      }
+      _ <- runProxyReplayWorker(9)
+      completed <- documents
+      firstProjections <- currentProjections
+      afterFirstPass <- ingestionCounts
+      _ <- replay
+      // Revisit the frozen source slice after the historical checkpoint has passed it.
+      _ <- sql"""INSERT INTO octopus_core.proxy_preparation_dirty(event_id, source_revision)
+        SELECT event_id, observation_revision FROM octopus_core.proxy_events WHERE event_id LIKE $scope
+        ON CONFLICT(event_id) DO UPDATE SET source_revision = EXCLUDED.source_revision""".update.run.transact(xa)
+      nextLease <- proxyLease
+      _ <- prepare(nextLease)
+      _ <- runProxyReplayWorker(0)
+      repeated <- documents
+      replayedProjections <- currentProjections
+      afterReplay <- ingestionCounts
+      wirelessState <- sql"""SELECT status, attempt_count FROM atheros_search.embedding_jobs
+        WHERE job_id=$wireless::uuid""".query[(String, Int)].unique.transact(xa)
+    yield
+      assertEquals(completed.count(row => row._2 == "active" && row._3 == "completed" && row._7), 9)
+      assertEquals(repeated, completed)
+      assertEquals(firstProjections._1.size, 8)
+      assertEquals(firstProjections._2.size, 9)
+      assertEquals(firstProjections._3.size, 10)
+      assertEquals(replayedProjections, firstProjections)
+      assertEquals(afterFirstPass, baseline)
+      assertEquals(afterReplay, baseline)
+      assertEquals(wirelessState, "pending" -> 0)
+
+  private def runProxyReplayWorker(expectedJobs: Int): IO[Unit] =
+    IO.interruptibleMany {
+      val search = schemaRoot.resolve("../../..").resolve("apps/integration-console/atheros-search").normalize
+      val builder = new ProcessBuilder("go", "test", "-tags=dbcontract", "-count=1", "-timeout=1m",
+        "-run", "^TestRetainedProxyReplayWorker$", "./internal/worker").directory(search.toFile).inheritIO()
+      builder.environment().put("ATHSEARCH_REPORT_TEST_DSN",
+        s"postgres://proxy_replay_search:replay-fixture@${postgres.getHost}:${postgres.getMappedPort(5432)}/sync?sslmode=disable")
+      builder.environment().put("ATHSEARCH_REPLAY_EXPECTED_JOBS", expectedJobs.toString)
+      val process = builder.start()
+      try
+        assertEquals(process.waitFor(), 0, "scoped Go embedding worker contract")
+      finally
+        if process.isAlive then
+          val _ = process.destroyForcibly()
+    }
 
   test("repository entry points reject directly constructed and copied invalid payloads before replay"):
     requireDocker()
@@ -3551,6 +3688,84 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
     yield
       assert(result <= 10)
       assertEquals(limited, 0)
+  }
+
+  test("proxy historical recovery resumes across rollback and restart while serving delayed and removed sources") {
+    requireDocker()
+    import com.sslproxy.coordinator.postgres.sql.ProxyPreparationSql
+    val model = "nomic-embed-text-v2-moe"
+    val input = "legacy_unknown"
+    val ids = List("recovery-history-1", "recovery-history-2", "recovery-history-3")
+    def source(id: String, revision: Long, observedAt: String) =
+      sql"""INSERT INTO octopus_core.proxy_events(event_id,event_time,event_type,host,payload,observation_revision)
+        VALUES ($id,$observedAt::timestamptz,'http_proxied','recovery.example',
+          '{"type":"http_proxied","host":"recovery.example"}'::jsonb,$revision)""".update.run
+    val allocateRevision =
+      sql"""SELECT nextval(pg_get_serial_sequence('octopus_core.proxy_events','observation_revision'))""".query[Long].unique
+    def notifySource(id: String, revision: Long) =
+      sql"""INSERT INTO octopus_core.proxy_preparation_dirty(event_id,source_revision)
+        VALUES ($id,$revision)""".update.run
+    val checkpoint = sql"""SELECT after_revision,after_key FROM octopus_core.proxy_preparation_progress
+      WHERE scope='proxy-event-v2'""".query[(Long,String)].option.transact(xa)
+    val pending = sql"""SELECT count(*) FROM atheros_search.embedding_jobs
+      WHERE status IN ('pending','leased')""".query[Long].unique.transact(xa)
+    def tick(repo: PostgresRepository, lease: com.sslproxy.coordinator.processor.Lease, highWater: Int) =
+      repo.prepareProxySearch(lease, 1, model, input, highWater).map(requireRight)
+    for
+      _ <- sql"""TRUNCATE atheros_search.search_documents, atheros_search.embedding_jobs,
+        atheros_search.proxy_document_state, atheros_search.proxy_event_evidence,
+        octopus_core.proxy_events, octopus_core.proxy_preparation_dirty, octopus_core.proxy_window_dirty,
+        octopus_core.proxy_preparation_progress CASCADE""".update.run.transact(xa)
+      lease <- proxyLease
+      delayedRevision <- allocateRevision.transact(xa)
+      revisions <- ids.traverse { id =>
+        allocateRevision.flatTap(source(id, _, "1987-01-01T00:00Z")).transact(xa)
+      }
+      rolledBack <- (ProxyPreparationSql.tick(lease, 1, model, input, 1) *>
+        doobie.free.connection.raiseError[Unit](IllegalStateException("fixture rollback"))).transact(xa).attempt
+      afterRollback <- checkpoint
+      pendingAfterRollback <- pending
+      first <- tick(repository, lease, 1)
+      firstCursor <- checkpoint
+      capped <- tick(repository, lease, 1)
+      cappedCursor <- checkpoint
+      cappedPending <- pending
+      _ <- (source("recovery-delayed", delayedRevision, "1986-01-01T00:00Z") *>
+        notifySource("recovery-delayed", delayedRevision)).transact(xa)
+      _ <- (for
+        revision <- allocateRevision
+        _ <- source("recovery-removed", revision, "1987-01-01T00:00Z")
+        _ <- notifySource("recovery-removed", revision)
+        _ <- sql"DELETE FROM octopus_core.proxy_events WHERE event_id='recovery-removed'".update.run
+      yield ()).transact(xa)
+      resumedLease <- proxyLease
+      resumed = new PostgresRepository(xa)
+      resumedWork <- tick(resumed, resumedLease, 10)
+      resumedCursor <- checkpoint
+      resumedStates <- sql"SELECT source_key FROM atheros_search.proxy_document_state ORDER BY source_key"
+        .query[String].to[List].transact(xa)
+      remaining <- (1 to 3).toList.traverse(_ => tick(resumed, resumedLease, 10))
+      finalCursor <- checkpoint
+      states <- sql"SELECT source_key,disposition FROM atheros_search.proxy_document_state ORDER BY source_key"
+        .query[(String,String)].to[List].transact(xa)
+      dirtyCount <- sql"SELECT count(*) FROM octopus_core.proxy_preparation_dirty".query[Long].unique.transact(xa)
+    yield
+      assertEquals(rolledBack.left.toOption.map(_.getMessage), Some("fixture rollback"))
+      assertEquals(afterRollback, None)
+      assertEquals(pendingAfterRollback, 0L)
+      assertEquals(first, 1)
+      assertEquals(firstCursor, Some((revisions.head,"dirty")))
+      assertEquals(capped, 0)
+      assertEquals(cappedCursor, firstCursor)
+      assertEquals(cappedPending, 1L)
+      assertEquals(resumedWork, 1)
+      assertEquals(resumedCursor, Some((revisions.head,"history")))
+      assertEquals(resumedStates, List("recovery-delayed", ids.head))
+      assertEquals(remaining, List(1, 1, 1))
+      assertEquals(finalCursor.map(_._1), Some(revisions.last))
+      assertEquals(states.toMap, (ids :+ "recovery-delayed").map(_ -> "prepared").toMap +
+        ("recovery-removed" -> "source_missing"))
+      assertEquals(dirtyCount, 0L)
   }
 
   test("full proxy queues validate beyond valid pending windows and revisit them without publishing") {

@@ -16,6 +16,9 @@ Feature: Embedding preparation processor contracts
   Source revision remains monotonic when current text returns to an earlier
   value: an older preparation cannot reactivate intermediate content or alter
   its jobs. A live lease requires the current owner, token and fence together.
+  Historical recovery resumes by arrival revision. Single-slot ticks alternate
+  history and dirty notifications across lease changes; processing a delayed or
+  removed source does not advance the historical checkpoint.
 
   Scenario Outline: An Octopus embedding processor has its declared durable contract
     Given processor "<processor>" belongs to "embedding"

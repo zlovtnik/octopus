@@ -88,8 +88,8 @@ object ProxyPreparationSql:
         sql"""INSERT INTO octopus_core.proxy_preparation_progress(scope) VALUES ($Scope)
         ON CONFLICT(scope) DO NOTHING""".update.run
       after <-
-        sql"""SELECT after_revision FROM octopus_core.proxy_preparation_progress
-        WHERE scope = $Scope FOR UPDATE""".query[Long].unique
+        sql"""SELECT after_revision, after_key FROM octopus_core.proxy_preparation_progress
+        WHERE scope = $Scope FOR UPDATE""".query[(Long, String)].unique
       // Old-revision jobs cannot be claimed by the replacement worker fleet.
       // Retire a bounded page before headroom checks so a full old queue drains.
       cancelled <- cancelObsoleteInputJobs(limit, inputRevision)
@@ -130,60 +130,80 @@ object ProxyPreparationSql:
         if budget == 0 then 0.pure[ConnectionIO]
         else
           for
-            sourceBudget <- (budget - 2).max(1).pure[ConnectionIO]
-            // A half-page is reserved for history; dirty notifications cover
-            // commits below that cursor and late/corrected event-time records.
-            history <-
-              sql"""SELECT event_id, observation_revision FROM octopus_core.proxy_events
-            WHERE observation_revision > $after ORDER BY observation_revision LIMIT ${(sourceBudget + 1) / 2}"""
-                .query[(String, Long)]
-                .to[List]
-            dirty <-
-              sql"""SELECT event_id, source_revision FROM octopus_core.proxy_preparation_dirty
-            ORDER BY source_revision, event_id LIMIT ${sourceBudget - history.size} FOR UPDATE"""
-                .query[(String, Long)]
-                .to[List]
-            _ <- (history ++ dirty)
-              .groupMapReduce(_._1)(_._2)(_.max(_))
-              .toList
-              .sortBy(_._2)
-              .traverse_ { case (id, revision) =>
-                prepareEvent(lease, id, revision, model, inputRevision)
-              }
-            _ <- history.lastOption.traverse_ { case (_, cursor) =>
-              if cursor <= after then
-                FC.raiseError[Unit](
-                  IllegalStateException("nonadvancing proxy cursor")
-                )
-              else
-                sql"UPDATE octopus_core.proxy_preparation_progress SET after_revision = $cursor, updated_at = clock_timestamp() WHERE scope = $Scope".update.run.void
-            }
+            sourceWork <- prepareSources(lease, (budget - 2).max(1), after, model, inputRevision)
             // Remaining budget is shared across events/windows/jobs, never LIMIT
             // multiplied independently by every source kind.
             windows <- prepareWindows(
               lease,
-              (budget - (history ++ dirty).map(_._1).distinct.size)
+              (budget - sourceWork)
                 .max(0)
                 .min(1),
               model,
               inputRevision
             )
             migrated <- migrateInputRevisions(
-              (budget - (history ++ dirty).map(_._1).distinct.size - windows).max(0),
+              (budget - sourceWork - windows).max(0),
               model,
               inputRevision
             )
             repaired <- reconcile(
               lease,
-              (budget - (history ++ dirty).map(_._1).distinct.size - windows - migrated)
+              (budget - sourceWork - windows - migrated)
                 .max(0),
               model,
               inputRevision
             )
             _ <- guard(lease)
-          yield (history ++ dirty).map(_._1).distinct.size + windows + migrated + repaired
+          yield sourceWork + windows + migrated + repaired
       _ <- guard(lease)
     yield changed + cancelled + retiredWindows + validatedEvents
+
+  private def prepareSources(
+      lease: Lease,
+      limit: Int,
+      progress: (Long, String),
+      model: String,
+      inputRevision: String
+  ): ConnectionIO[Int] =
+    val (afterRevision, nextLane) = progress
+    def historyPage(size: Int) =
+      sql"""SELECT event_id, observation_revision FROM octopus_core.proxy_events
+        WHERE observation_revision > $afterRevision ORDER BY observation_revision LIMIT $size"""
+        .query[(String, Long)].to[List]
+    def dirtyPage(size: Int) =
+      sql"""SELECT event_id, source_revision FROM octopus_core.proxy_preparation_dirty
+        ORDER BY source_revision, event_id LIMIT $size FOR UPDATE"""
+        .query[(String, Long)].to[List]
+
+    // Dirty notifications cover commits below the historical cursor. With a
+    // single slot, persist the next lane so a restart cannot starve either lane.
+    val page =
+      if limit == 1 && nextLane == "dirty" then
+        dirtyPage(1).flatMap(dirty => historyPage(1 - dirty.size).map(history => (history, dirty)))
+      else
+        historyPage((limit + 1) / 2).flatMap(history => dirtyPage(limit - history.size).map(dirty => (history, dirty)))
+
+    for
+      selected <- page
+      (history, dirty) = selected
+      sources = (history ++ dirty).groupMapReduce(_._1)(_._2)(_.max(_)).toList
+        .sortBy { case (id, revision) => (revision, id) }
+      _ <- sources.traverse_ { case (id, revision) =>
+        prepareEvent(lease, id, revision, model, inputRevision)
+      }
+      cursor = history.lastOption.fold(afterRevision)(_._2)
+      _ <- if history.nonEmpty && cursor <= afterRevision then
+        FC.raiseError[Unit](IllegalStateException("nonadvancing proxy cursor"))
+      else if sources.isEmpty then FC.unit
+      else
+        val followingLane =
+          if limit != 1 then nextLane
+          else if history.nonEmpty then "dirty"
+          else "history"
+        sql"""UPDATE octopus_core.proxy_preparation_progress
+          SET after_revision = $cursor, after_key = $followingLane, updated_at = clock_timestamp()
+          WHERE scope = $Scope""".update.run.void
+    yield sources.size
 
   private def validateDirtyEvents(
       lease: Lease,

@@ -2747,6 +2747,352 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
            WHERE destination_topic = 'sync.oracle.load'
              AND status = 'pending'""".update.run.void.transact(xa)
 
+  private val behaviorNow = java.time.Instant.parse("2031-01-02T12:30:00Z")
+  private val behaviorCorrelation = "c0000000-0000-4000-8000-000000000001"
+
+  private def behaviorPolicy: IO[Unit] =
+    val start = java.sql.Timestamp.from(behaviorNow.minusSeconds(172800))
+    val end = java.sql.Timestamp.from(behaviorNow.plusSeconds(172800))
+    sql"""INSERT INTO atheros_search.proxy_behavior_policy(singleton, deployment_scope, policy_version,
+      coverage_start, coverage_end, coverage_attested, conflicts_attested, expires_at,
+      pairing_horizon_seconds, window_seconds, lookback_seconds, max_source_rows, max_windows)
+      VALUES(TRUE,'behavior-contract','reviewed-v1',$start,$end,TRUE,TRUE,$end,60,3600,86400,100,100)
+      ON CONFLICT(singleton) DO UPDATE SET deployment_scope=EXCLUDED.deployment_scope,
+        policy_version=EXCLUDED.policy_version,coverage_start=EXCLUDED.coverage_start,
+        coverage_end=EXCLUDED.coverage_end,coverage_attested=TRUE,conflicts_attested=TRUE,
+        expires_at=EXCLUDED.expires_at,pairing_horizon_seconds=60,window_seconds=3600,
+        lookback_seconds=86400,max_source_rows=100,max_windows=100""".update.run.void.transact(xa)
+
+  private def behaviorPair(status: String = "measured_terminal"): IO[Unit] =
+    def payload(id: String, event: String, at: String, sequence: Int) =
+      circeParser.parse(s"""{"event_id":"$id","type":"$event","time":"$at",
+        "event_sequence":$sequence,"correlation_id":"$behaviorCorrelation","host":"behavior.example",
+        "authority_raw":"behavior.example:443","authority_source":"connect_authority",
+        "evidence_version":"proxy-evidence-v1","blocked":false,"bytes_up":5,"bytes_down":7,
+        "duration_ms":1000,"measurement":{"version":"proxy-measurement-v1","bytes_status":"$status",
+        "source":"successful_socket_writes","termination":"$status","byte_unit":"bytes",
+        "up_direction":"client_to_destination","down_direction":"destination_to_client",
+        "duration_status":"connection_elapsed"}}""").toOption.get
+    val rows = PostgresTransformService.transform(
+      com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,
+      List(payload("c0000000-0000-4000-8000-000000000002","tunnel_open","2031-01-02T12:00:00Z",1),
+        payload("c0000000-0000-4000-8000-000000000003","tunnel_close","2031-01-02T12:00:01Z",2)))
+    schemaTransactor.insertProxyEvents("behavior-contract",rows.proxyEvents,rows.blockedEvents).void
+
+  private def clearBehaviorPolicy: IO[Unit] =
+    sql"DELETE FROM atheros_search.proxy_behavior_policy".update.run.void.transact(xa)
+
+  private def clearBehaviorFixtures: IO[Unit] =
+    clearBehaviorPolicy *>
+      sql"DELETE FROM atheros_search.proxy_behavior_status WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM octopus_core.proxy_preparation_progress WHERE scope='proxy-behavior-output'".update.run.void.transact(xa) *>
+      sql"""DELETE FROM atheros_search.embedding_jobs WHERE document_id IN
+        (SELECT document_id FROM atheros_search.search_documents WHERE source_kind='proxy_flow')""".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.search_document_tokens WHERE document_id IN (SELECT document_id FROM atheros_search.search_documents WHERE source_kind='proxy_flow')".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.search_document_tags WHERE document_id IN (SELECT document_id FROM atheros_search.search_documents WHERE source_kind='proxy_flow')".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.search_documents WHERE source_kind='proxy_flow'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_document_state WHERE source_table='proxy_flows'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_host_current WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM octopus_core.proxy_events WHERE host='behavior.example'".update.run.void.transact(xa)
+
+  private def behaviorTick(lease: com.sslproxy.coordinator.processor.Lease, headroom: Int = 100): IO[Int] =
+    com.sslproxy.coordinator.postgres.sql.ProxyBehaviorSql
+      .tick(lease,100,"nomic-embed-text-v2-moe","legacy_unknown",headroom,behaviorNow).transact(xa)
+
+  test("behavior preparation keeps replay projection revisions and document identities stable") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      first <- sql"""SELECT projection_revision,evidence::text FROM atheros_search.proxy_flow
+        WHERE deployment_scope='behavior-contract' AND correlation_id=$behaviorCorrelation"""
+        .query[(Long,String)].unique.transact(xa)
+      docs <- sql"SELECT document_id::text FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active' ORDER BY document_id"
+        .query[String].to[List].transact(xa)
+      _ <- behaviorTick(lease)
+      second <- sql"""SELECT projection_revision,evidence::text FROM atheros_search.proxy_flow
+        WHERE deployment_scope='behavior-contract' AND correlation_id=$behaviorCorrelation"""
+        .query[(Long,String)].unique.transact(xa)
+      replayDocs <- sql"SELECT document_id::text FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active' ORDER BY document_id"
+        .query[String].to[List].transact(xa)
+    yield
+      assertEquals(second,first)
+      assertEquals(replayDocs,docs)
+      assert(docs.nonEmpty)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("a structured flow correction resumes its existing job after queue saturation") {
+    requireDocker()
+    def job = sql"""SELECT job.job_id::text,job.status FROM atheros_search.embedding_jobs job
+      JOIN atheros_search.search_documents document ON document.document_id=job.document_id
+      WHERE document.source_kind='proxy_flow' ORDER BY job.job_id""".query[(String,String)].unique.transact(xa)
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      original <- job
+      _ <- sql"""UPDATE octopus_core.proxy_events SET bytes_up=6,
+        payload=jsonb_set(payload,'{bytes_up}','6'::jsonb),observation_revision=DEFAULT
+        WHERE event_id='c0000000-0000-4000-8000-000000000003'""".update.run.transact(xa)
+      _ <- behaviorTick(lease,0)
+      parked <- job
+      active <- sql"SELECT count(*) FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active'"
+        .query[Long].unique.transact(xa)
+      _ <- behaviorTick(lease)
+      resumed <- job
+      bytes <- sql"SELECT evidence->>'bytes_up' FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'"
+        .query[String].unique.transact(xa)
+    yield
+      assertEquals(parked,(original._1,"cancelled"))
+      assertEquals(active,0L)
+      assertEquals(resumed,(original._1,"pending"))
+      assertEquals(bytes,"6")
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("single-output behavior ticks advance across windows despite repeated historical corrections") {
+    requireDocker()
+    val id = "c0000000-0000-4000-8000-000000000004"
+    val payload = circeParser.parse(s"""{"event_id":"$id","type":"http_proxied",
+      "time":"2031-01-02T11:30:00Z","host":"behavior.example","blocked":false,
+      "authority_raw":"behavior.example:443","authority_source":"connect_authority",
+      "evidence_version":"proxy-evidence-v1"}""").toOption.get
+    val rows = PostgresTransformService.transform(
+      com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,List(payload))
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- schemaTransactor.insertProxyEvents("behavior-cursor",rows.proxyEvents,rows.blockedEvents)
+      _ <- behaviorTick(lease)
+      original <- sql"""SELECT calculated_at FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T12:00Z'::timestamptz"""
+        .query[java.sql.Timestamp].unique.transact(xa)
+      // The retained day contains 25 windows plus one flow. This finite bound
+      // permits a full output cycle while every tick dirties the earlier window.
+      _ <- (1 to 32).toList.traverse_ { iteration =>
+        sql"UPDATE octopus_core.proxy_events SET observation_revision=DEFAULT WHERE event_id=$id"
+          .update.run.transact(xa) *>
+          com.sslproxy.coordinator.postgres.sql.ProxyBehaviorSql
+            .tick(lease,1,"nomic-embed-text-v2-moe","legacy_unknown",100,
+              behaviorNow.plusSeconds(iteration.toLong)).transact(xa).void
+      }
+      refreshed <- sql"""SELECT calculated_at FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T12:00Z'::timestamptz"""
+        .query[java.sql.Timestamp].unique.transact(xa)
+      historical <- sql"""SELECT source_watermark FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T11:00Z'::timestamptz"""
+        .query[Long].unique.transact(xa)
+    yield
+      assert(refreshed.after(original))
+      assert(historical > 0L)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("removing the final observations retires flow documents and host pointers") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      _ <- sql"DELETE FROM octopus_core.proxy_events WHERE host='behavior.example'".update.run.transact(xa)
+      _ <- behaviorTick(lease)
+      windows <- sql"SELECT count(*) FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'"
+        .query[Long].unique.transact(xa)
+      pointers <- sql"SELECT count(*) FROM atheros_search.proxy_host_current WHERE deployment_scope='behavior-contract'"
+        .query[Long].unique.transact(xa)
+      docs <- sql"SELECT count(*) FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active'"
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(windows,0L)
+      assertEquals(pointers,0L)
+      assertEquals(docs,0L)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  List("input_overflow","policy_expired").foreach { reason =>
+    test(s"behavior preparation retires previously published evidence on $reason") {
+      requireDocker()
+      val invalidate = if reason == "input_overflow" then
+        sql"UPDATE atheros_search.proxy_behavior_policy SET max_source_rows=1".update.run.void.transact(xa)
+      else
+        val expired = java.sql.Timestamp.from(behaviorNow.minusSeconds(1))
+        sql"UPDATE atheros_search.proxy_behavior_policy SET expires_at=$expired".update.run.void.transact(xa)
+      (for
+        _ <- clearBehaviorFixtures
+        lease <- proxyLease
+        _ <- behaviorPolicy
+        _ <- behaviorPair()
+        _ <- behaviorTick(lease)
+        published <- sql"SELECT count(*) FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active'"
+          .query[Long].unique.transact(xa)
+        _ = assertEquals(published,1L)
+        _ <- invalidate
+        _ <- behaviorTick(lease)
+        status <- sql"SELECT status FROM atheros_search.proxy_behavior_status WHERE deployment_scope='behavior-contract'"
+          .query[String].unique.transact(xa)
+        remaining <- sql"""SELECT
+          (SELECT count(*) FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'),
+          (SELECT count(*) FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'),
+          (SELECT count(*) FROM atheros_search.proxy_host_current WHERE deployment_scope='behavior-contract'),
+          (SELECT count(*) FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active'),
+          (SELECT count(*) FROM atheros_search.embedding_jobs job
+             JOIN atheros_search.search_documents document ON document.document_id=job.document_id
+             WHERE document.source_kind='proxy_flow' AND job.status IN ('pending','leased'))"""
+          .query[(Long,Long,Long,Long,Long)].unique.transact(xa)
+      yield
+        assertEquals(status,reason)
+        assertEquals(remaining,(0L,0L,0L,0L,0L))
+      ).guarantee(clearBehaviorFixtures)
+    }
+  }
+
+  test("behavior preparation counts terminal measured bytes once") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      flow <- sql"""SELECT disposition,evidence->>'bytes_up',evidence->>'bytes_down'
+        FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'"""
+        .query[(String,Option[String],Option[String])].unique.transact(xa)
+      window <- sql"""SELECT evidence->>'validated_flows',evidence->>'bytes_up',evidence->>'bytes_down'
+        FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'
+          AND window_start='2031-01-02T12:00Z'::timestamptz"""
+        .query[(String,Option[String],Option[String])].unique.transact(xa)
+    yield
+      assertEquals(flow,("validated",Some("5"),Some("7")))
+      assertEquals(window,("1",Some("5"),Some("7")))
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("behavior preparation excludes partial byte counts from confirmed transfer totals") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair("partial")
+      _ <- behaviorTick(lease)
+      flow <- sql"""SELECT evidence->>'bytes_status',evidence->>'bytes_up',evidence->>'partial_bytes_up'
+        FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'"""
+        .query[(String,Option[String],Option[String])].unique.transact(xa)
+    yield assertEquals(flow,("partial",None,Some("5")))
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("behavior preparation invalidates a previously validated flow on a trusted source conflict") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      _ <- sql"""UPDATE octopus_core.proxy_events SET
+        source_conflicts=jsonb_build_object(repeat('a',64),$behaviorCorrelation::text)
+        WHERE event_id='c0000000-0000-4000-8000-000000000003'""".update.run.transact(xa)
+      _ <- behaviorTick(lease)
+      flow <- sql"""SELECT disposition,evidence->>'bytes_up' FROM atheros_search.proxy_flow
+        WHERE deployment_scope='behavior-contract'""".query[(String,Option[String])].unique.transact(xa)
+    yield assertEquals(flow,("ambiguous",None))
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("a late historical correction cannot replace the current host window pointer") {
+    requireDocker()
+    val id = "c0000000-0000-4000-8000-000000000004"
+    val payload = circeParser.parse(s"""{"event_id":"$id","type":"http_proxied",
+      "time":"2031-01-02T11:30:00Z","host":"behavior.example","blocked":false,
+      "authority_raw":"behavior.example:443","authority_source":"connect_authority",
+      "evidence_version":"proxy-evidence-v1"}""").toOption.get
+    val rows = PostgresTransformService.transform(
+      com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,List(payload))
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- schemaTransactor.insertProxyEvents("behavior-old-window",rows.proxyEvents,rows.blockedEvents)
+      _ <- behaviorTick(lease)
+      before <- sql"""SELECT latest_window_start FROM atheros_search.proxy_host_current
+        WHERE deployment_scope='behavior-contract'""".query[java.sql.Timestamp].unique.transact(xa)
+      revision <- sql"""SELECT projection_revision FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T11:00Z'::timestamptz"""
+        .query[Long].unique.transact(xa)
+      _ <- sql"""UPDATE octopus_core.proxy_events SET blocked=TRUE,
+        payload=jsonb_set(payload,'{blocked}','true'::jsonb),observation_revision=DEFAULT
+        WHERE event_id=$id""".update.run.transact(xa)
+      _ <- behaviorTick(lease)
+      after <- sql"""SELECT latest_window_start FROM atheros_search.proxy_host_current
+        WHERE deployment_scope='behavior-contract'""".query[java.sql.Timestamp].unique.transact(xa)
+      correction <- sql"""SELECT projection_revision,evidence->>'blocked_observations'
+        FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'
+          AND window_start='2031-01-02T11:00Z'::timestamptz""".query[(Long,String)].unique.transact(xa)
+    yield
+      assertEquals(before.toInstant,java.time.Instant.parse("2031-01-02T12:00:00Z"))
+      assertEquals(after,before)
+      assert(correction._1 > revision)
+      assertEquals(correction._2,"1")
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("behavior preparation leaves projections absent when policy is absent") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      changed <- behaviorTick(lease)
+    yield assertEquals(changed,0)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("behavior preparation does not publish work beyond available queue headroom") {
+    requireDocker()
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease,0)
+      docs <- sql"SELECT count(*) FROM atheros_search.search_documents WHERE source_kind='proxy_flow' AND status='active'"
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(docs,0L)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test("behavior preparation refuses an expired attestation policy") {
+    requireDocker()
+    val expired = java.sql.Timestamp.from(behaviorNow.minusSeconds(1))
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- sql"UPDATE atheros_search.proxy_behavior_policy SET expires_at=$expired".update.run.transact(xa)
+      changed <- behaviorTick(lease)
+      rows <- sql"SELECT count(*) FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'"
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(changed,0)
+      assertEquals(rows,0L)
+    ).guarantee(clearBehaviorFixtures)
+  }
+
   private def proxyLease: IO[com.sslproxy.coordinator.processor.Lease] =
     sql"DELETE FROM octopus_core.work_leases WHERE resource_type = 'processor' AND resource_id = 'proxy-search-preparer'".update.run
       .transact(xa) *>
@@ -2863,6 +3209,38 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(row._15, "latest-asn")
       assertEquals(row._16.toInstant, olderAt.toInstant)
       assertEquals(row._17.toInstant, latestAt.toInstant)
+  }
+
+  test("equal-time legacy rollup metadata follows event ID order including absent winning fields") {
+    requireDocker()
+    val at = java.time.OffsetDateTime.parse("2026-10-24T11:00:00Z")
+    val metadata = BlockedEventInsert(0L,"",30L,Some(2.0d),Some(0.9d),Some("ads_tracker"),
+      "LOSER",7L,Some(20L),Some(4L),Some("LOSER"),Some("TLS1.3"),Some("h2"),
+      Some("loser"),Some("192.0.2.2"),Some("loser-asn"))
+    val winner = metadata.copy(verdict="WINNER",tlsVer=None,alpn=None,ja3Lite=None,
+      resolvedIp=None,asnOrg=None)
+    List(false,true).zipWithIndex.traverse_ { (winnerFirst,index) =>
+      val host = s"equal-time-rollup-$index.invalid"
+      val event = ProxyEventInsert(
+        eventId=s"44229101-31c3-43e2-9f3a-9e236b829b${index}1",eventTime=at,
+        eventType="blocked",host=host,peerIp=None,wgPubkey=None,deviceId=None,
+        identitySource="unknown",peerHostname=None,clientUa=None,bytesUp=10L,bytesDown=20L,
+        statusCode=Some(403L),blocked=true,classification="ads_tracker",obfuscationProfile=None,
+        correlationId=None,parentEventId=None,eventSequence=None,durationMs=None,reason=None,rawJson="{}")
+      val high = event.copy(eventId=s"44229101-31c3-43e2-9f3a-9e236b829b${index}2")
+      val ordered = if winnerFirst then List(high -> winner,event -> metadata)
+        else List(event -> metadata,high -> winner)
+      for
+        _ <- ordered.zipWithIndex.traverse_ { case ((row,blocked),ordinal) =>
+          schemaTransactor.insertProxyEvents(s"equal-rollup-$index-$ordinal",List(row),
+            List(blocked.copy(host=host)),0L)
+        }
+        stored <- sql"""SELECT verdict,tls_ver,alpn,ja3_lite,resolved_ip,asn_org
+          FROM octopus_core.proxy_blocked_host_rollups WHERE host=$host"""
+          .query[(String,Option[String],Option[String],Option[String],Option[String],Option[String])]
+          .unique.transact(xa)
+      yield assertEquals(stored,("WINNER",None,None,None,None,None))
+    }
   }
 
   test("proxy DNS signals resolve expired or corrected sources and reopen only on eligible observations") {
@@ -3750,6 +4128,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <-
         sql"GRANT SELECT ON atheros_search.embeddings, atheros_search.search_vectors_event TO proxy_preparation_contract".update.run
           .transact(xa)
+      _ <- sql"GRANT SELECT ON atheros_search.proxy_behavior_policy TO proxy_preparation_contract".update.run.transact(xa)
+      _ <- sql"""GRANT SELECT, INSERT, UPDATE, DELETE ON atheros_search.proxy_flow,
+        atheros_search.proxy_host_window, atheros_search.proxy_host_current,
+        atheros_search.proxy_behavior_status TO proxy_preparation_contract""".update.run.transact(xa)
+      _ <- sql"GRANT USAGE, SELECT ON SEQUENCE atheros_search.proxy_behavior_revision_seq TO proxy_preparation_contract".update.run.transact(xa)
       _ <-
         sql"GRANT USAGE, SELECT ON SEQUENCE octopus_core.proxy_window_revision_seq TO proxy_preparation_contract".update.run
           .transact(xa)
@@ -4048,7 +4431,7 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       unsupportedId = java.util.UUID.randomUUID().toString
       unsupported <- sql"""INSERT INTO atheros_search.search_documents
         (document_id,source_id,source_table,source_key,source_kind,normalized_text,normalized_sha256)
-        VALUES ($unsupportedId::uuid,'src12-future','src12_contract','src12-future','proxy_flow','src12 synthetic text',$checksum)""".update.run.transact(xa).attempt
+        VALUES ($unsupportedId::uuid,'src12-future','src12_contract','src12-future','proxy_future_kind','src12 synthetic text',$checksum)""".update.run.transact(xa).attempt
     yield
       assertEquals(unsupported.left.toOption.collect { case error: java.sql.SQLException => error.getSQLState }, Some("23514"))
   }

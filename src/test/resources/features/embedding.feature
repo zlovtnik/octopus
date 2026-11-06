@@ -19,6 +19,12 @@ Feature: Embedding preparation processor contracts
   Historical recovery resumes by arrival revision. Single-slot ticks alternate
   history and dirty notifications across lease changes; processing a delayed or
   removed source does not advance the historical checkpoint.
+  An expiring behavioral policy admits bounded lifecycle and host-window
+  projections. Only validated terminal measurements contribute transfer totals.
+  Flow documents share event embedding jobs. Corrections preserve current-window
+  ordering, and durable output checkpoints advance even with one-item budgets.
+  Deferred structured corrections resume eligible cancelled jobs when headroom
+  returns. Missing sources retire their flow documents and window pointers.
 
   Scenario Outline: An Octopus embedding processor has its declared durable contract
     Given processor "<processor>" belongs to "embedding"

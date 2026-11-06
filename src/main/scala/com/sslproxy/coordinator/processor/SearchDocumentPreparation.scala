@@ -16,6 +16,7 @@ enum SearchDocumentKind(
   case Behaviour extends SearchDocumentKind("behaviour_snapshots", "behaviour_window", "behaviour")
   case Sequence extends SearchDocumentKind("frame_sequences", "frame_sequence", "sequence")
   case ProxyEvent extends SearchDocumentKind("proxy_events", "proxy_event", "event")
+  case ProxyFlow extends SearchDocumentKind("proxy_flows", "proxy_flow", "event")
   case ProxyBlockedHostWindow extends SearchDocumentKind("proxy_events", "proxy_blocked_host_window", "event")
   case DeviceProfile extends SearchDocumentKind("wireless_topology_nodes", "device_profile", "device")
   case ApProfile extends SearchDocumentKind("wireless_topology_nodes", "ap_profile", "device")

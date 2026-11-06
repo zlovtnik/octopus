@@ -77,7 +77,9 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("AND NOT jsonb_exists(proxy_events.source_conflicts,"))
     assert(statement.contains("WHERE ? AND source_conflicts = '{}'::jsonb"))
     assert(statement.contains("FROM inserted_event"))
-    assertEquals(statement.count(_ == '?'), 48)
+    assertEquals(statement.count(_ == '?'), 49)
+    assert(statement.contains("(EXCLUDED.updated_at, EXCLUDED.last_event_id) >"))
+    assert(statement.contains("THEN EXCLUDED.tls_ver ELSE proxy_blocked_host_rollups.tls_ver END"))
 
   test("blocked host rollup conflict expressions qualify the target table"):
     val statement = BatchSinkSql.InsertProxyEvents

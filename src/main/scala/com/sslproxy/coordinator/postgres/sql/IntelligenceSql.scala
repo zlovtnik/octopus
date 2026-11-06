@@ -218,8 +218,8 @@ object IntelligenceSql:
              AND document.normalization_version = $normVersion
              AND vector.input_revision = document.input_revision AND vector.input_revision = $inputRevision
              AND document.normalized_sha256 = encode(sha256(convert_to(document.normalized_text, 'UTF8')), 'hex')
-             AND (CASE WHEN $scope = 'proxy' THEN document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
-                       WHEN $scope = 'wireless' THEN document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window') ELSE FALSE END)
+             AND (CASE WHEN $scope = 'proxy' THEN document.source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
+                       WHEN $scope = 'wireless' THEN document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow') ELSE FALSE END)
            ORDER BY vector.vector_id
            LIMIT $batchLimit""").query[(Long, String, String, String, java.sql.Timestamp)]
 
@@ -347,10 +347,10 @@ object IntelligenceSql:
                  WHERE anchor_document.document_id = CAST($anchorDocumentId AS uuid) AND anchor_document.status = 'active'
                    AND anchor_document.input_revision = $inputRevision
                    AND anchor_document.normalization_version = candidate_document.normalization_version
-                   AND (CASE WHEN $scope = 'proxy' THEN anchor_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
-                             AND candidate_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
-                             WHEN $scope = 'wireless' THEN anchor_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window')
-                             AND candidate_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window') ELSE FALSE END))
+                   AND (CASE WHEN $scope = 'proxy' THEN anchor_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
+                             AND candidate_document.source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
+                             WHEN $scope = 'wireless' THEN anchor_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
+                             AND candidate_document.source_kind NOT IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow') ELSE FALSE END))
                AND NOT EXISTS (
                  SELECT 1 FROM atheros_search.similarity_pairs pair
                  WHERE pair.pair_kind = $pairKind

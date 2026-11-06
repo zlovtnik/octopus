@@ -375,6 +375,7 @@ final class PostgresTransactor private (
               optStr(value.asnOrg),
               ts(r.eventTime),
               ts(r.eventTime),
+              r.eventId,
               true
             )
           case None =>
@@ -397,6 +398,7 @@ final class PostgresTransactor private (
               null,
               ts(r.eventTime),
               ts(r.eventTime),
+              r.eventId,
               false
             )
         eventParams ++ rollupParams

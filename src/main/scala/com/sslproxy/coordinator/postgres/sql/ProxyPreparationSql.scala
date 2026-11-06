@@ -97,12 +97,16 @@ object ProxyPreparationSql:
       pending <- sql"""SELECT count(*) FROM (
         SELECT job.job_id FROM atheros_search.embedding_jobs job
         JOIN atheros_search.search_documents doc ON doc.document_id = job.document_id
-        WHERE doc.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+        WHERE doc.source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
           AND job.status IN ('pending', 'leased')
         LIMIT ${highWater.max(1)}
       ) bounded""".query[Long].unique
+      behaviorWork <- ProxyBehaviorSql.tick(lease,((limit-cancelled)/2).max(1).min((limit-cancelled).max(0)),
+        model,inputRevision,(highWater.toLong-pending).max(0L).min(Int.MaxValue.toLong).toInt,
+        java.time.Instant.now())
+      available = (limit-cancelled-behaviorWork).max(0)
       eventValidationFirst <-
-        if pending >= highWater.max(1) && limit - cancelled == 1 then
+        if pending >= highWater.max(1) && available == 1 then
           // A one-item budget still alternates both validation lanes. Neither
           // valid windows nor valid dirty events may starve the other lane.
           sql"""INSERT INTO octopus_core.proxy_preparation_progress(scope,after_revision)
@@ -114,18 +118,18 @@ object ProxyPreparationSql:
       // searchable. This bounded validation pass never publishes/enqueues.
       firstWindowWork <-
         if pending >= highWater.max(1) && !eventValidationFirst then
-          prepareWindows(lease, (limit - cancelled).max(0).min(1), model, inputRevision, allowPublish = false)
+          prepareWindows(lease, available.min(1), model, inputRevision, allowPublish = false)
         else 0.pure[ConnectionIO]
       validatedEvents <-
         if pending >= highWater.max(1) then
-          validateDirtyEvents(lease, (limit - cancelled - firstWindowWork).max(0).min(1), model, inputRevision)
+          validateDirtyEvents(lease, (available - firstWindowWork).max(0).min(1), model, inputRevision)
         else 0.pure[ConnectionIO]
       fallbackWindowWork <-
         if eventValidationFirst && validatedEvents == 0 then
-          prepareWindows(lease, (limit - cancelled).max(0).min(1), model, inputRevision, allowPublish = false)
+          prepareWindows(lease, available.min(1), model, inputRevision, allowPublish = false)
         else 0.pure[ConnectionIO]
       retiredWindows = firstWindowWork + fallbackWindowWork
-      budget = (highWater.toLong - pending).max(0L).min((limit - cancelled - retiredWindows - validatedEvents).toLong).toInt
+      budget = (highWater.toLong - pending - behaviorWork).max(0L).min((available - retiredWindows - validatedEvents).toLong).toInt
       changed <-
         if budget == 0 then 0.pure[ConnectionIO]
         else
@@ -156,7 +160,7 @@ object ProxyPreparationSql:
             _ <- guard(lease)
           yield sourceWork + windows + migrated + repaired
       _ <- guard(lease)
-    yield changed + cancelled + retiredWindows + validatedEvents
+    yield changed + cancelled + retiredWindows + validatedEvents + behaviorWork
 
   private def prepareSources(
       lease: Lease,
@@ -367,7 +371,7 @@ object ProxyPreparationSql:
     sql"""SELECT job.job_id::text, doc.source_table, doc.source_key
       FROM atheros_search.embedding_jobs job
       JOIN atheros_search.search_documents doc ON doc.document_id = job.document_id
-      WHERE doc.source_kind IN ('proxy_event', 'proxy_blocked_host_window')
+      WHERE doc.source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow')
         AND job.input_revision <> $inputRevision AND job.status IN ('pending', 'leased')
       ORDER BY job.job_id LIMIT $limit""".query[(String, String, String)].to[List].flatMap { jobs =>
       jobs.traverse { case (id, table, key) =>
@@ -508,7 +512,7 @@ object ProxyPreparationSql:
     if budget <= 0 then 0.pure[ConnectionIO]
     else
       sql"""SELECT document_id::text, source_table, source_key FROM atheros_search.search_documents
-        WHERE source_kind IN ('proxy_event', 'proxy_blocked_host_window') AND status = 'active'
+        WHERE source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow') AND status = 'active'
           AND input_revision <> $inputRevision
         ORDER BY document_id LIMIT $budget""".query[(String, String, String)].to[List].flatMap { documents =>
         documents.traverse { case (id, table, key) =>
@@ -565,7 +569,7 @@ object ProxyPreparationSql:
             .unique
         documents <-
           (fr"""SELECT document_id::text, normalized_sha256 FROM atheros_search.search_documents
-          WHERE source_kind IN ('proxy_event', 'proxy_blocked_host_window') AND status = 'active'
+          WHERE source_kind IN ('proxy_event', 'proxy_blocked_host_window', 'proxy_flow') AND status = 'active'
             AND input_revision = $inputRevision""" ++
             (if after.isEmpty then Fragment.empty
              else fr" AND document_id > $after::uuid") ++

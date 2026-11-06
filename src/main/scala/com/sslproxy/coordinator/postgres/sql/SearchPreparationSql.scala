@@ -11,7 +11,7 @@ object SearchPreparationSql:
   private[sql] val SupersededDocumentError = "search document superseded; embedding job cancelled"
 
   val supportedKinds: List[SearchDocumentKind] =
-    SearchDocumentKind.values.toList.filterNot(_.sourceTable == "proxy_events")
+    SearchDocumentKind.values.toList.filterNot(_.sourceKind.startsWith("proxy_"))
 
   def candidates(kind: SearchDocumentKind, limit: Int): Query0[SearchDocumentSource] =
     kind match
@@ -19,7 +19,7 @@ object SearchPreparationSql:
       case SearchDocumentKind.Device => deviceCandidates(limit)
       case SearchDocumentKind.Behaviour => behaviourCandidates(limit)
       case SearchDocumentKind.Sequence => sequenceCandidates(limit)
-      case SearchDocumentKind.ProxyEvent | SearchDocumentKind.ProxyBlockedHostWindow =>
+      case SearchDocumentKind.ProxyEvent | SearchDocumentKind.ProxyBlockedHostWindow | SearchDocumentKind.ProxyFlow =>
         throw IllegalArgumentException("proxy candidates require bounded proxy-search-preparer")
       case SearchDocumentKind.DeviceProfile | SearchDocumentKind.ApProfile | SearchDocumentKind.IdentitySummary |
           SearchDocumentKind.ObservationWindow =>

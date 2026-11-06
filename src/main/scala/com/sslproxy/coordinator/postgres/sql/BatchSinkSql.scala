@@ -17,8 +17,15 @@ object BatchSinkSql:
       |  wg_pubkey, device_id, identity_source, peer_hostname, client_ua,
       |  obfuscation_profile, event_sequence, duration_ms, reason, raw_json, evidence
       |) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS uuid), ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-      |  ON CONFLICT (event_id) DO NOTHING
-      |  RETURNING event_id, observation_revision
+      |  ON CONFLICT (event_id) DO UPDATE SET
+      |    source_conflicts = proxy_events.source_conflicts || jsonb_build_object(
+      |      encode(sha256(convert_to(proxy_events.payload::text, 'UTF8')), 'hex'), proxy_events.correlation_id,
+      |      encode(sha256(convert_to(EXCLUDED.payload::text, 'UTF8')), 'hex'), EXCLUDED.correlation_id),
+      |    observation_revision = nextval('octopus_core.proxy_events_observation_revision_seq')
+      |  WHERE proxy_events.payload IS DISTINCT FROM EXCLUDED.payload
+      |    AND NOT jsonb_exists(proxy_events.source_conflicts,
+      |      encode(sha256(convert_to(EXCLUDED.payload::text, 'UTF8')), 'hex'))
+      |  RETURNING event_id, observation_revision, source_conflicts
       |), dirty AS (
       | INSERT INTO proxy_preparation_dirty(event_id, source_revision)
       | SELECT event_id, observation_revision FROM inserted_event
@@ -31,7 +38,7 @@ object BatchSinkSql:
       |)
       |SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       |FROM inserted_event
-      |WHERE ?
+      |WHERE ? AND source_conflicts = '{}'::jsonb
       |ON CONFLICT (host) DO UPDATE SET
       |  blocked_attempts = proxy_blocked_host_rollups.blocked_attempts + 1,
       |  blocked_bytes = proxy_blocked_host_rollups.blocked_bytes + EXCLUDED.blocked_bytes,

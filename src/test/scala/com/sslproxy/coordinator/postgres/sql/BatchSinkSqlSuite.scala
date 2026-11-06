@@ -71,7 +71,11 @@ class BatchSinkSqlSuite extends FunSuite:
     assert(statement.contains("wireguard_pubkey"))
     assert(statement.contains("classification"))
     assert(statement.contains("CAST(? AS jsonb)"))
-    assert(statement.contains("ON CONFLICT (event_id) DO NOTHING"))
+    assert(statement.contains("ON CONFLICT (event_id) DO UPDATE SET"))
+    assert(statement.contains("source_conflicts = proxy_events.source_conflicts || jsonb_build_object("))
+    assert(statement.contains("WHERE proxy_events.payload IS DISTINCT FROM EXCLUDED.payload"))
+    assert(statement.contains("AND NOT jsonb_exists(proxy_events.source_conflicts,"))
+    assert(statement.contains("WHERE ? AND source_conflicts = '{}'::jsonb"))
     assert(statement.contains("FROM inserted_event"))
     assertEquals(statement.count(_ == '?'), 48)
 

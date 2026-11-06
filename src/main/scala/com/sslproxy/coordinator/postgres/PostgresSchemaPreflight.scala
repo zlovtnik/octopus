@@ -23,7 +23,8 @@ class PostgresSchemaPreflight(transactor: PostgresTransactor, config: PostgresCo
 
   private val requiredColumnTypes: List[((String, String), String)] = List(
     ("sync_events" -> "payload_ref") -> "text",
-    ("sync_batches" -> "payload_ref") -> "text"
+    ("sync_batches" -> "payload_ref") -> "text",
+    ("proxy_events" -> "source_conflicts") -> "jsonb"
   )
 
   def validate(): IO[Unit] =

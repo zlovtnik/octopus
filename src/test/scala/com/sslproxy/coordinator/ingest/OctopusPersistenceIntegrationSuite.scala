@@ -3375,6 +3375,78 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(accepted, (1L, "prepared"))
   }
 
+  test("proxy source conflicts survive replay, concurrent arrivals and evidence preparation") {
+    requireDocker()
+    val id = "812d9705-2c5a-421e-a977-fb35250101ed"
+    val firstCorrelation = "00000000-0000-4000-8000-000000000101"
+    val otherCorrelation = "00000000-0000-4000-8000-000000000102"
+    val host = "source-conflict.example"
+    val original = circeParser.parse(s"""{"event_id":"$id","time":"2026-10-19T12:30:00Z",
+      "type":"block","host":"$host","blocked":true,"classification":"ads_tracker",
+      "correlation_id":"$firstCorrelation","bytes_up":10,"bytes_down":20,"blocked_bytes_delta_approx":30}""").toOption.get
+    val changed = original.deepMerge(io.circe.Json.obj("bytes_up" -> io.circe.Json.fromInt(11)))
+    val moved = changed.deepMerge(io.circe.Json.obj("correlation_id" -> io.circe.Json.fromString(otherCorrelation)))
+    val withoutCorrelation = changed.mapObject(_.remove("correlation_id"))
+    def insert(payload: io.circe.Json, batch: String): IO[Long] =
+      val rows = PostgresTransformService.transform(
+        com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents, List(payload)
+      )
+      schemaTransactor.insertProxyEvents(batch, rows.proxyEvents, rows.blockedEvents)
+    def snapshot: IO[(String, String, String, Long)] =
+      sql"""SELECT payload::text, raw_json, source_conflicts::text, observation_revision
+        FROM octopus_core.proxy_events WHERE event_id=$id"""
+        .query[(String, String, String, Long)].unique.transact(xa)
+    for
+      _ <- insert(original, "proxy-source-conflict-original")
+      first <- snapshot
+      _ <- insert(original, "proxy-source-conflict-original-replay")
+      replay <- snapshot
+      _ <- insert(changed, "proxy-source-conflict-changed")
+      conflicted <- snapshot
+      _ <- insert(changed, "proxy-source-conflict-changed-replay")
+      _ <- insert(original, "proxy-source-conflict-original-after-conflict")
+      conflictReplay <- snapshot
+      _ <- List(moved, withoutCorrelation).zipWithIndex.parTraverse_ { (payload, index) =>
+        insert(payload, s"proxy-source-conflict-concurrent-$index").void
+      }
+      allConflicts <- snapshot
+      dirtyRevision <- sql"SELECT source_revision FROM octopus_core.proxy_preparation_dirty WHERE event_id=$id"
+        .query[Long].unique.transact(xa)
+      hashes <- List(original, changed, moved, withoutCorrelation).traverse { payload =>
+        sql"SELECT encode(sha256(convert_to(${payload.noSpaces}::jsonb::text, 'UTF8')), 'hex')"
+          .query[String].unique.transact(xa)
+      }
+      lease <- proxyLease
+      _ <- repository.prepareProxySearch(lease, 500, "nomic-embed-text-v2-moe", "legacy_unknown", 10000)
+        .map(requireRight)
+      prepared <- snapshot
+      published <- sql"SELECT evidence::text FROM atheros_search.proxy_event_evidence WHERE event_id=$id"
+        .query[String].unique.transact(xa)
+      rollup <- sql"SELECT blocked_attempts, blocked_bytes FROM octopus_core.proxy_blocked_host_rollups WHERE host=$host"
+        .query[(Long, Long)].unique.transact(xa)
+    yield
+      assertEquals(circeParser.parse(first._3).toOption.get, io.circe.Json.obj())
+      assertEquals(replay, first)
+      assertEquals(conflicted._1, first._1)
+      assertEquals(conflicted._2, first._2)
+      assert(conflicted._4 > first._4)
+      assertEquals(conflictReplay, conflicted)
+      assertEquals(allConflicts._1, first._1)
+      assertEquals(allConflicts._2, first._2)
+      assert(allConflicts._4 > conflicted._4)
+      assertEquals(dirtyRevision, allConflicts._4)
+      val expected = io.circe.Json.obj(
+        hashes(0) -> io.circe.Json.fromString(firstCorrelation),
+        hashes(1) -> io.circe.Json.fromString(firstCorrelation),
+        hashes(2) -> io.circe.Json.fromString(otherCorrelation),
+        hashes(3) -> io.circe.Json.Null
+      )
+      assertEquals(circeParser.parse(allConflicts._3).toOption.get, expected)
+      assertEquals(prepared, allConflicts)
+      assert(!published.contains("source_conflicts"))
+      assertEquals(rollup, 1L -> 30L)
+  }
+
   test("proxy preparation preserves replay identity, private evidence boundaries and newer corrections") {
     requireDocker()
     import com.sslproxy.coordinator.processor.*

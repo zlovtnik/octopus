@@ -38,19 +38,29 @@ class ProxyFlowContractSuite extends FunSuite:
     snapshot: List[(String, Json)],
     covered: Option[(Instant, Instant)] = coverage,
     overflow: Boolean = false,
-    retainedFrom: Option[Instant] = None
+    retainedFrom: Option[Instant] = None,
+    unresolvedConflicts: Map[(String, String), Set[String]] = Map.empty
   ): Map[(String, String), String] =
     val versions = snapshot.distinct
     val conflictingIds = versions.flatMap { (scope, row) => uuid(row, "event_id").map(scope -> _) }
-      .groupBy(identity).collect { case (id, occurrences) if occurrences.size > 1 => id }.toSet
-    versions.flatMap { (scope, row) =>
+      .groupBy(identity).collect { case (id, occurrences) if occurrences.size > 1 => id }.toSet ++
+      unresolvedConflicts.keySet
+    // Decoded from the separate, attested source_conflicts column, never raw payload fields.
+    val conflictingFlows = unresolvedConflicts.toList.flatMap { case ((scope, _), correlations) =>
+      correlations.map(scope -> _)
+    }.toSet
+    val grouped = versions.flatMap { (scope, row) =>
       uuid(row, "correlation_id")
         .filter(_ => scope.nonEmpty && text(row, "type").exists(Set(Open, Close)))
         .map(correlation => (scope, correlation) -> row)
-    }.groupMap(_._1)(_._2).map { case (flowKey @ (scope, _), candidates) =>
+    }.groupMap(_._1)(_._2)
+    (grouped.keySet ++ conflictingFlows).map { flowKey =>
+      val (scope, _) = flowKey
+      val candidates = grouped.getOrElse(flowKey, Nil)
       val (opens, closes) = candidates.partition(text(_, "type").contains(Open))
       val disposition =
-        if candidates.exists(row => uuid(row, "event_id").exists(id => conflictingIds(scope -> id))) ||
+        if conflictingFlows(flowKey) ||
+          candidates.exists(row => uuid(row, "event_id").exists(id => conflictingIds(scope -> id))) ||
           opens.size > 1 || closes.size > 1 then "ambiguous"
         else if candidates.exists { row =>
           val expected = if text(row, "type").contains(Open) then 1 else 2
@@ -75,7 +85,7 @@ class ProxyFlowContractSuite extends FunSuite:
             case (_, Nil) => "missing_terminal"
             case _ => "validated"
       flowKey -> disposition
-    }
+    }.toMap
 
   private def scoped(observations: Json*): List[(String, Json)] =
     observations.toList.map("deployment-a" -> _)
@@ -109,10 +119,47 @@ class ProxyFlowContractSuite extends FunSuite:
     assertEquals(dispositions(scoped(open, withTime(close, openAt.minusMillis(1))))(key), "inconsistent")
     assertEquals(dispositions(scoped(open, withTime(close, openAt)))(key), "validated")
 
+  test("persisted conflicts keep every affected correlation ambiguous after first-payload ingestion"):
+    val otherCorrelation = "00000000-0000-4000-8000-000000000200"
+    val otherKey = ("deployment-a", otherCorrelation)
+    val otherOpen = open.deepMerge(Json.obj(
+      "event_id" -> "00000000-0000-4000-8000-000000000201".asJson,
+      "correlation_id" -> otherCorrelation.asJson))
+    val otherClose = close.deepMerge(Json.obj(
+      "event_id" -> "00000000-0000-4000-8000-000000000202".asJson,
+      "correlation_id" -> otherCorrelation.asJson))
+    val conflictId = text(close, "event_id").get
+    val conflicts = Map(("deployment-a", conflictId) -> Set(correlation, otherCorrelation))
+    assertEquals(dispositions(scoped(open, close, otherOpen, otherClose), unresolvedConflicts = conflicts),
+      Map(key -> "ambiguous", otherKey -> "ambiguous"))
+    assertEquals(dispositions(scoped(open, close), unresolvedConflicts = conflicts),
+      Map(key -> "ambiguous", otherKey -> "ambiguous"))
+    assertEquals(dispositions(Nil, unresolvedConflicts = conflicts),
+      Map(key -> "ambiguous", otherKey -> "ambiguous"))
+    assertEquals(dispositions(List("deployment-b" -> open, "deployment-b" -> close),
+      unresolvedConflicts = conflicts),
+      Map(("deployment-b", correlation) -> "validated", key -> "ambiguous", otherKey -> "ambiguous"))
+    assertEquals(dispositions(scoped(open, close)), Map(key -> "validated"))
+
+  test("an unresolved source ID prevents validation even without a usable conflicting correlation"):
+    val conflicts = Map(("deployment-a", text(close, "event_id").get) -> Set.empty[String])
+    assertEquals(dispositions(scoped(open, close), unresolvedConflicts = conflicts), Map(key -> "ambiguous"))
+
+  test("payload fields cannot supply trusted ingestion conflict markers"):
+    val spoofed = close.deepMerge(Json.obj("source_conflicts" -> Json.obj("untrusted" -> correlation.asJson)))
+    assertEquals(dispositions(scoped(open, spoofed)), Map(key -> "validated"))
+
   test("a pairing horizon includes its endpoint but half-open source coverage must extend past it"):
     val last = openAt.plus(Horizon)
     assertEquals(dispositions(scoped(open, withTime(close, last)))(key), "validated")
-    assertEquals(dispositions(scoped(open, withTime(close, last.plusMillis(1))))(key), "outside_horizon")
+    assertEquals(dispositions(scoped(open, withTime(close, last.plusNanos(1))))(key), "outside_horizon")
+    assertEquals(dispositions(scoped(open, withTime(close, last)), covered = Some((openAt, last)))(key),
+      "coverage_limited")
+    // These are distinct attested bounds in the reference's Instant domain, not an endpoint conversion.
+    assertEquals(dispositions(scoped(open, withTime(close, last)),
+      covered = Some((openAt, last.plusNanos(1))))(key), "validated")
+    assertEquals(dispositions(scoped(open, withTime(close, last)),
+      covered = Some((openAt.plusNanos(1), last.plusNanos(1))))(key), "coverage_limited")
     assertEquals(dispositions(scoped(open), covered = Some((openAt, last)))(key), "coverage_limited")
     assertEquals(dispositions(scoped(close), covered = Some((openAt, last)))(key), "coverage_limited")
     assertEquals(dispositions(scoped(close), covered = Some((openAt, last)), retainedFrom = Some(openAt))(key),

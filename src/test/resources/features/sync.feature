@@ -11,6 +11,9 @@ Feature: Sync processor contracts
   Scan ingestion accepts every event stream; typed load configuration controls
   downstream jobs and never serves as an intake allowlist. Raw events and broker
   evidence are durable before offsets commit, including unknown event types.
+  Proxy loads preserve the first payload for an event ID and durably mark
+  conflicting payloads and their correlations. Exact replays preserve any marker
+  without incrementing blocked-host rollups or advancing the source revision.
 
   Scenario Outline: An Octopus sync processor has its declared durable contract
     Given processor "<processor>" belongs to "sync"

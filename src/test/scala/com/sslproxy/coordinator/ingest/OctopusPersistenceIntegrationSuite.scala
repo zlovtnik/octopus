@@ -41,7 +41,7 @@ import com.sslproxy.coordinator.util.Sha256Utils
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import doobie.implicits.*
-import io.circe.{Decoder, Printer, parser as circeParser}
+import io.circe.{Decoder, Json, Printer, parser as circeParser}
 import munit.CatsEffectSuite
 import org.testcontainers.DockerClientFactory
 import org.testcontainers.containers.GenericContainer
@@ -2763,21 +2763,70 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
         expires_at=EXCLUDED.expires_at,pairing_horizon_seconds=60,window_seconds=3600,
         lookback_seconds=86400,max_source_rows=100,max_windows=100""".update.run.void.transact(xa)
 
-  private def behaviorPair(status: String = "measured_terminal"): IO[Unit] =
+  private def behaviorPair(
+      status: String = "measured_terminal",
+      attributed: Boolean = false
+  ): IO[Unit] =
     def payload(id: String, event: String, at: String, sequence: Int) =
-      circeParser.parse(s"""{"event_id":"$id","type":"$event","time":"$at",
+      circeParser
+        .parse(s"""{"event_id":"$id","type":"$event","time":"$at",
         "event_sequence":$sequence,"correlation_id":"$behaviorCorrelation","host":"behavior.example",
         "authority_raw":"behavior.example:443","authority_source":"connect_authority",
         "evidence_version":"proxy-evidence-v1","blocked":false,"bytes_up":5,"bytes_down":7,
+        "selected_ip":"192.0.2.10","resolved_ips":["192.0.2.10"],"peer_ip":"10.0.0.99",
+        "tls_evidence":{"source":"client_hello","parser_version":"proxy-clienthello-v2",
+        "parse_status":"parsed","semantics":"offered_not_negotiated",
+        "ja3_lite":"771,4865,0-16,29,0","offered_alpn":"h2"},
         "duration_ms":1000,"measurement":{"version":"proxy-measurement-v1","bytes_status":"$status",
         "source":"successful_socket_writes","termination":"$status","byte_unit":"bytes",
         "up_direction":"client_to_destination","down_direction":"destination_to_client",
-        "duration_status":"connection_elapsed"}}""").toOption.get
+        "duration_status":"connection_elapsed"}}""")
+        .toOption
+        .get
+        .deepMerge(if !attributed then Json.obj()
+        else
+          Json.obj(
+            "device_id" -> Json
+              .fromString("c0000000-0000-4000-8000-000000000100"),
+            "identity_source" -> Json.fromString("registered"),
+            "attribution" -> Json.obj(
+              "version" -> Json.fromString("proxy-attribution-v1"),
+              "method" -> Json.fromString("peer_claim"),
+              "valid_from" -> Json.fromString("2031-01-01T00:00:00Z"),
+              "valid_until" -> Json.fromString("2031-01-04T00:00:00Z"),
+              "mapping_revision" -> Json.fromString("2031-01-01T00:00:00Z"),
+              "peer_reference" -> Json.fromString("a" * 64),
+              "reference_scope" -> Json.fromString("process_wireguard_peer"),
+              "reference_rotation" -> Json
+                .fromString("process_restart_or_key_change"),
+              "reference_expiry" -> Json.fromString("process_lifetime"),
+              "ownership" -> Json.fromString("registration_claim_only")
+            )
+          ))
     val rows = PostgresTransformService.transform(
       com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,
-      List(payload("c0000000-0000-4000-8000-000000000002","tunnel_open","2031-01-02T12:00:00Z",1),
-        payload("c0000000-0000-4000-8000-000000000003","tunnel_close","2031-01-02T12:00:01Z",2)))
-    schemaTransactor.insertProxyEvents("behavior-contract",rows.proxyEvents,rows.blockedEvents).void
+      List(
+        payload(
+          "c0000000-0000-4000-8000-000000000002",
+          "tunnel_open",
+          "2031-01-02T12:00:00Z",
+          1
+        ),
+        payload(
+          "c0000000-0000-4000-8000-000000000003",
+          "tunnel_close",
+          "2031-01-02T12:00:01Z",
+          2
+        )
+      )
+    )
+    schemaTransactor
+      .insertProxyEvents(
+        "behavior-contract",
+        rows.proxyEvents,
+        rows.blockedEvents
+      )
+      .void
 
   private def clearBehaviorPolicy: IO[Unit] =
     sql"DELETE FROM atheros_search.proxy_behavior_policy".update.run.void.transact(xa)
@@ -2793,6 +2842,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       sql"DELETE FROM atheros_search.search_documents WHERE source_kind='proxy_flow'".update.run.void.transact(xa) *>
       sql"DELETE FROM atheros_search.proxy_document_state WHERE source_table='proxy_flows'".update.run.void.transact(xa) *>
       sql"DELETE FROM atheros_search.proxy_host_current WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_destination_history WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_device_window WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
+      sql"DELETE FROM atheros_search.proxy_attribution_window WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
       sql"DELETE FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
       sql"DELETE FROM atheros_search.proxy_flow WHERE deployment_scope='behavior-contract'".update.run.void.transact(xa) *>
       sql"DELETE FROM octopus_core.proxy_events WHERE host='behavior.example'".update.run.void.transact(xa)
@@ -2800,6 +2852,72 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
   private def behaviorTick(lease: com.sslproxy.coordinator.processor.Lease, headroom: Int = 100): IO[Int] =
     com.sslproxy.coordinator.postgres.sql.ProxyBehaviorSql
       .tick(lease,100,"nomic-embed-text-v2-moe","legacy_unknown",headroom,behaviorNow).transact(xa)
+
+  test("scoped behavior history corrects late first sightings and retires on policy expiry") {
+    requireDocker()
+    def destination = sql"""SELECT first_observed_at,projection_revision,evidence::text
+      FROM atheros_search.proxy_destination_history
+      WHERE deployment_scope='behavior-contract' AND scope_kind='deployment'"""
+      .query[(java.sql.Timestamp,Long,String)].unique.transact(xa)
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair(attributed = true)
+      _ <- behaviorTick(lease)
+      original <- destination
+      _ <- behaviorTick(lease)
+      replay <- destination
+      scopes <- sql"""SELECT scope_kind,count(*) FROM atheros_search.proxy_destination_history
+        WHERE deployment_scope='behavior-contract' GROUP BY scope_kind ORDER BY scope_kind"""
+        .query[(String,Long)].to[List].transact(xa)
+      covered <- sql"""SELECT evidence::text FROM atheros_search.proxy_attribution_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T12:00:00Z'::timestamptz"""
+        .query[String].unique.transact(xa)
+      devices <- sql"""SELECT count(*) FROM atheros_search.proxy_device_window
+        WHERE deployment_scope='behavior-contract' AND evidence->>'ownership'='registration_claim_only'"""
+        .query[Long].unique.transact(xa)
+      intelligence <- sql"""SELECT evidence::text FROM atheros_search.proxy_device_window
+        WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T12:00:00Z'::timestamptz"""
+        .query[String].unique.transact(xa)
+      late = circeParser.parse("""{"event_id":"c0000000-0000-4000-8000-000000000004",
+        "type":"http_blocked","time":"2031-01-02T11:59:00Z","host":"behavior.example",
+        "authority_raw":"behavior.example:443","authority_source":"connect_authority",
+        "evidence_version":"proxy-evidence-v1","blocked":true}""").toOption.get
+      transformed = PostgresTransformService.transform(com.sslproxy.coordinator.postgres.PostgresSinkTarget.ProxyEvents,List(late))
+      _ <- schemaTransactor.insertProxyEvents("behavior-late",transformed.proxyEvents,transformed.blockedEvents)
+      _ <- behaviorTick(lease)
+      corrected <- destination
+      _ <- behaviorTick(lease)
+      correctedReplay <- destination
+      expired = java.sql.Timestamp.from(behaviorNow.minusSeconds(1))
+      _ <- sql"UPDATE atheros_search.proxy_behavior_policy SET expires_at=$expired".update.run.transact(xa)
+      _ <- behaviorTick(lease)
+      remaining <- sql"""SELECT
+        (SELECT count(*) FROM atheros_search.proxy_destination_history WHERE deployment_scope='behavior-contract') +
+        (SELECT count(*) FROM atheros_search.proxy_device_window WHERE deployment_scope='behavior-contract') +
+        (SELECT count(*) FROM atheros_search.proxy_attribution_window WHERE deployment_scope='behavior-contract')"""
+        .query[Long].unique.transact(xa)
+    yield
+      assertEquals(replay,original)
+      assertEquals(scopes,List("deployment" -> 1L,"peer" -> 1L,"registration" -> 1L))
+      assert(devices > 0)
+      val followOn = circeParser.parse(intelligence).toOption.get.hcursor
+      assertEquals(followOn.get[String]("calculation_version"),Right(com.sslproxy.coordinator.processor.ProxyBehavior.CalculationVersion))
+      assertEquals(followOn.downField("clienthello_drift").get[Int]("current_available_count"),Right(1))
+      assertEquals(followOn.downField("destination_infrastructure").downField("current")
+        .get[Int]("selected_ip_observations"),Right(1))
+      assertEquals(followOn.downField("domain_lexical").get[String]("disposition"),Right("descriptive_features_only"))
+      assert(!intelligence.contains("10.0.0.99"))
+      val coverage = circeParser.parse(covered).toOption.get.hcursor
+      assertEquals(coverage.get[Int]("denominator"),Right(2))
+      assertEquals(coverage.get[Int]("supported_registration"),Right(2))
+      assertEquals(corrected._1.toInstant,java.time.Instant.parse("2031-01-02T11:59:00Z"))
+      assert(corrected._2 > original._2)
+      assertEquals(correctedReplay,corrected)
+      assertEquals(remaining,0L)
+    ).guarantee(clearBehaviorFixtures)
+  }
 
   test("behavior preparation keeps replay projection revisions and document identities stable") {
     requireDocker()
@@ -2877,9 +2995,9 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       original <- sql"""SELECT calculated_at FROM atheros_search.proxy_host_window
         WHERE deployment_scope='behavior-contract' AND window_start='2031-01-02T12:00Z'::timestamptz"""
         .query[java.sql.Timestamp].unique.transact(xa)
-      // The retained day contains 25 windows plus one flow. This finite bound
+      // The day contains 25 host and 25 attribution windows, a destination and a flow. This bound
       // permits a full output cycle while every tick dirties the earlier window.
-      _ <- (1 to 32).toList.traverse_ { iteration =>
+      _ <- (1 to 64).toList.traverse_ { iteration =>
         sql"UPDATE octopus_core.proxy_events SET observation_revision=DEFAULT WHERE event_id=$id"
           .update.run.transact(xa) *>
           com.sslproxy.coordinator.postgres.sql.ProxyBehaviorSql
@@ -4131,7 +4249,11 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       _ <- sql"GRANT SELECT ON atheros_search.proxy_behavior_policy TO proxy_preparation_contract".update.run.transact(xa)
       _ <- sql"""GRANT SELECT, INSERT, UPDATE, DELETE ON atheros_search.proxy_flow,
         atheros_search.proxy_host_window, atheros_search.proxy_host_current,
+        atheros_search.proxy_destination_history, atheros_search.proxy_device_window,
+        atheros_search.proxy_attribution_window,
+        atheros_search.proxy_signal_state,
         atheros_search.proxy_behavior_status TO proxy_preparation_contract""".update.run.transact(xa)
+      _ <- sql"GRANT SELECT, INSERT ON atheros_search.proxy_feed_snapshot_binding TO proxy_preparation_contract".update.run.transact(xa)
       _ <- sql"GRANT USAGE, SELECT ON SEQUENCE atheros_search.proxy_behavior_revision_seq TO proxy_preparation_contract".update.run.transact(xa)
       _ <-
         sql"GRANT USAGE, SELECT ON SEQUENCE octopus_core.proxy_window_revision_seq TO proxy_preparation_contract".update.run

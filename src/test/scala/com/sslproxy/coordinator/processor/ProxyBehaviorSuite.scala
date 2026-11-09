@@ -98,6 +98,37 @@ class ProxyBehaviorSuite extends FunSuite:
     val unattested = policy.copy(conflictsAttested = false)
     assertEquals(ProxyBehavior.build(unattested, List(open, close)).toOption.get.flows.head.disposition, "conflict_coverage_unavailable")
 
+  test("flow-start polling stays censored until the window has full pairing context"):
+    val start = Instant.parse("2026-11-01T12:00:00Z")
+    val end = start.plusSeconds(3600)
+    val sources = (0 until 6).toList.flatMap { index =>
+      val opened = start.plusSeconds(index * 600L)
+      val id = 10 + 2 * index
+      val flowId = f"00000000-0000-4000-8000-${100 + index}%012d"
+      List(
+        ProxyBehavior.Source(event(id, "tunnel_open", opened, 1)
+          .deepMerge(Json.obj("correlation_id" -> flowId.asJson)), id.toLong),
+        ProxyBehavior.Source(event(id + 1, "tunnel_close", opened.plusSeconds(1), 2)
+          .deepMerge(Json.obj("correlation_id" -> flowId.asJson)), id.toLong + 1)
+      )
+    }
+    def polling(settings: ProxyBehavior.Policy) =
+      ProxyBehavior.build(settings, sources).toOption.get.windows.head.evidence.hcursor.downField("polling")
+
+    val before = polling(policy.copy(asOf = end))
+    assertEquals(before.downField("observations").get[Boolean]("collection_censored"), Right(false))
+    assertEquals(before.downField("validated_flow_starts").get[Int]("sample_size"), Right(6))
+    assertEquals(before.downField("validated_flow_starts").get[String]("disposition"), Right("collection_censored"))
+    assertEquals(before.get[Boolean]("candidate"), Right(false))
+
+    val after = polling(policy.copy(asOf = end.plus(policy.pairingHorizon)))
+    assertEquals(after.downField("validated_flow_starts").get[Boolean]("collection_censored"), Right(false))
+    assertEquals(after.get[Boolean]("candidate"), Right(true))
+
+    val truncated = polling(policy.copy(coverageStart = start))
+    assertEquals(truncated.downField("observations").get[Boolean]("collection_censored"), Right(false))
+    assertEquals(truncated.downField("validated_flow_starts").get[Boolean]("collection_censored"), Right(true))
+
   test("HTTP observations have no invented flow and blocked observations use observed row counts"):
     val http = close.copy(row = event(10, "http_proxied", closedAt, 0), revision = 10)
     val block = close.copy(row = event(11, "http_blocked", closedAt, 0).deepMerge(Json.obj("blocked" -> true.asJson)), revision = 11)

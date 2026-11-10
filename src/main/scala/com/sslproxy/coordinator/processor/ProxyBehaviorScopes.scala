@@ -166,21 +166,33 @@ object ProxyBehaviorScopes:
       )
     val blocks = ordered.count(blocked)
     val errors = ordered.count(row => text(row, "type").contains("http_error"))
-    val frictionRows = ordered.filter(row => blocked(row) || text(row, "type").contains("http_error"))
-    val allowedRows = ordered.filterNot(row => blocked(row) || text(row, "type").contains("http_error"))
-    val selectedFriction = frictionRows.take(24)
-    val timeline = (selectedFriction ++ allowedRows.take(32 - selectedFriction.size))
-      .sortBy(row => (text(row, "time").flatMap(instant).getOrElse(Instant.MIN), text(row, "event_id").getOrElse(""))).map { row =>
-      Json.obj(
-        "event_id" -> text(row, "event_id").asJson,
-        "time" -> text(row, "time").asJson,
-        "event_type" -> text(row, "type").asJson,
-        "outcome" -> (if blocked(row) then "blocked"
-                      else if text(row, "type").contains("http_error") then
-                        "error"
-                      else "allowed") .asJson
-      )
-    }
+    val frictionRows = ordered.filter(row =>
+      blocked(row) || text(row, "type").contains("http_error")
+    )
+    val allowedRows = ordered.filterNot(row =>
+      blocked(row) || text(row, "type").contains("http_error")
+    )
+    val selectedFriction =
+      frictionRows.take(math.max(24, 32 - allowedRows.size))
+    val timeline =
+      (selectedFriction ++ allowedRows.take(32 - selectedFriction.size))
+        .sortBy(row =>
+          (
+            text(row, "time").flatMap(instant).getOrElse(Instant.MIN),
+            text(row, "event_id").getOrElse("")
+          )
+        )
+        .map { row =>
+          Json.obj(
+            "event_id" -> text(row, "event_id").asJson,
+            "time" -> text(row, "time").asJson,
+            "event_type" -> text(row, "type").asJson,
+            "outcome" -> (if blocked(row) then "blocked"
+                          else if text(row, "type").contains("http_error") then
+                            "error"
+                          else "allowed") .asJson
+          )
+        }
     Json.obj(
       "disposition" -> (if blocks >= 2 || errors >= 2 then
                           "repeated_policy_friction_observations"

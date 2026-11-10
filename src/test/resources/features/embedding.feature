@@ -21,6 +21,11 @@ Feature: Embedding preparation processor contracts
   removed source does not advance the historical checkpoint.
   An expiring behavioral policy admits bounded lifecycle and host-window
   projections. Only validated terminal measurements contribute transfer totals.
+  Registration window budgets count the epoch and window intersections emitted.
+  A paged publication retains its evaluation time for at most one hour while
+  the policy fingerprint matches. Expired or future cutoffs start a fresh generation.
+  Published host and device windows omit transient threat-feed state and signals;
+  signal IDs refer readers to the expiry-aware signal read surface.
   Flow-start polling candidates require coverage across the pairing horizon
   outside the observation window.
   Flow documents share event embedding jobs. Corrections preserve current-window
@@ -32,7 +37,8 @@ Feature: Embedding preparation processor contracts
   shared addresses, overlapping claims and key rotation cannot establish
   physical ownership. Polling and measured-transfer deviations remain
   provisional candidates. Friction timelines preserve temporal evidence without
-  assigning retry counts or application-failure causality.
+  assigning retry counts or application-failure causality. They reserve space
+  for allowed observations and fill unused slots with additional friction.
   Follow-on evidence partitions ClientHello drift by parser and registration
   epoch, separates selected destination sockets from resolver candidates, and
   describes DNS lexical features with scoped retained subdomain novelty.

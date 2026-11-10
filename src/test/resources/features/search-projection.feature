@@ -8,6 +8,8 @@ Feature: Search projection processor contracts
   per-kind vectors on both sides within the selected scope and input revision.
   Bounded DNS and AP risk passes prioritize never-projected and oldest-projected
   candidates so recent sources cannot permanently starve the retained backlog.
+  Proxy behavioral cohorts require attested conflict coverage before publishing
+  positive matches, even when observation coverage and registration are complete.
 
   Scenario Outline: An Octopus search projection processor has its declared durable contract
     Given processor "<processor>" belongs to "search_projection"

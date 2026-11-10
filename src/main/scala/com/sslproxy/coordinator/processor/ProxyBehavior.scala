@@ -26,7 +26,8 @@ object ProxyBehavior:
       lookbackStart: Instant,
       maxSourceRows: Int,
       maxWindows: Int,
-      intelligencePolicy: Json = Json.obj()
+      intelligencePolicy: Json = Json.obj(),
+      evaluationTime: Option[Instant] = None
   )
   final case class Source(
       row: Json,
@@ -251,9 +252,18 @@ object ProxyBehavior:
           })
       val destinationCount =
         scopes.map(_._3.flatMap(_.endpoint).distinct.size).sum
-      val outputWindows = BigInt(starts.size) * BigInt(
-        endpointGroups.size + registrationGroups.size + 1
-      )
+      val registrationWindows = registrationGroups.map { case (scope, rows) =>
+        val overlapping = starts.filter(start =>
+          rows.head.attribution.from.exists(
+            _.isBefore(start.plusSeconds(policy.windowSeconds.toLong))
+          ) &&
+            rows.head.attribution.until.exists(_.isAfter(start))
+        )
+        (scope, rows, overlapping)
+      }
+      val outputWindows =
+        BigInt(starts.size) * BigInt(endpointGroups.size + 1) +
+          registrationWindows.map(group => BigInt(group._3.size)).sum
       if outputWindows + destinationCount > policy.maxWindows then
         Left("proxy behavior window row bound exceeded")
       else
@@ -278,18 +288,22 @@ object ProxyBehavior:
             )
           }
         }
-        val deviceWindows = registrationGroups.flatMap {
-          case ((key, endpoint), rows) =>
-            val ids = observations.filter(o => !conflictingIds(o.id) && o.attribution.kind == "registration" &&
-              o.attribution.key.contains(key)).map(_.id).toSet
+        val deviceWindows = registrationWindows.flatMap {
+          case ((key, endpoint), rows, overlapping) =>
+            val ids = observations
+              .filter(o =>
+                !conflictingIds(o.id) && o.attribution.kind == "registration" &&
+                  o.attribution.key.contains(key)
+              )
+              .map(_.id)
+              .toSet
             val scopedFlows = flows.filter(p =>
               p.evidence.hcursor
                 .get[List[String]]("source_event_ids")
                 .toOption
                 .exists(refs => refs.size == 2 && refs.forall(ids))
             )
-            starts.filter(start => rows.head.attribution.from.exists(_.isBefore(start.plusSeconds(policy.windowSeconds.toLong))) &&
-              rows.head.attribution.until.exists(_.isAfter(start))).map { start =>
+            overlapping.map { start =>
               val base = hostWindow(
                 policy,
                 endpoint,
@@ -298,17 +312,25 @@ object ProxyBehavior:
                 scopedFlows,
                 Set.empty
               )
-              val scopeFull = rows.head.attribution.from.exists(at => !at.isAfter(start)) &&
-                rows.head.attribution.until.exists(at => !at.isBefore(start.plusSeconds(policy.windowSeconds.toLong)))
-              val disposition = if scopeFull then base.disposition else "attribution_interval_limited"
+              val scopeFull =
+                rows.head.attribution.from.exists(at => !at.isAfter(start)) &&
+                  rows.head.attribution.until.exists(at =>
+                    !at.isBefore(start.plusSeconds(policy.windowSeconds.toLong))
+                  )
+              val disposition = if scopeFull then base.disposition
+              else "attribution_interval_limited"
               val evidence = base.evidence.deepMerge(
                 Json.obj(
                   "scope_kind" -> "registration".asJson,
                   "scope_key" -> key.asJson,
                   "ownership" -> "registration_claim_only".asJson,
                   "mapping_revision" -> rows.head.attribution.mapping.asJson,
-                  "valid_from" -> rows.head.attribution.from.map(_.toString).asJson,
-                  "valid_until" -> rows.head.attribution.until.map(_.toString).asJson,
+                  "valid_from" -> rows.head.attribution.from
+                    .map(_.toString)
+                    .asJson,
+                  "valid_until" -> rows.head.attribution.until
+                    .map(_.toString)
+                    .asJson,
                   "disposition" -> disposition.asJson
                 )
               )
@@ -327,8 +349,14 @@ object ProxyBehavior:
                 watermark,
                 start
               )
-              enrichWindow(policy, scoped, rows, scopedFlows, watermark,
-                supported.filter(_.attribution.key.contains(key)))
+              enrichWindow(
+                policy,
+                scoped,
+                rows,
+                scopedFlows,
+                watermark,
+                supported.filter(_.attribution.key.contains(key))
+              )
             }
         }
         val destinations = scopes.flatMap { (kind, key, rows) =>
@@ -408,8 +436,17 @@ object ProxyBehavior:
                 "window_start" -> stamp(start),
                 "window_end" -> stamp(end),
                 "coverage_scope" -> "deployment".asJson,
-                "source_observation_count" -> rows.map(_.id).distinct.size.asJson,
-                "excluded_conflicting_observations" -> rows.filter(o => conflictingIds(o.id)).map(_.id).distinct.size.asJson,
+                "source_observation_count" -> rows
+                  .map(_.id)
+                  .distinct
+                  .size
+                  .asJson,
+                "excluded_conflicting_observations" -> rows
+                  .filter(o => conflictingIds(o.id))
+                  .map(_.id)
+                  .distinct
+                  .size
+                  .asJson,
                 "mapping_change_event_ids" -> changes.asJson,
                 "mapping_change_count" -> changes.size.asJson,
                 "source_event_ids" -> usable.map(_.id).asJson
@@ -426,28 +463,67 @@ object ProxyBehavior:
             start
           )
         }
-        val cohortEvidence = ProxyBehaviorCohorts.evidence(deviceWindows,
-          ProxyIntelligencePolicy.component(policy.intelligencePolicy, "cohorts"))
-        val rawSignals = (windows ++ deviceWindows).flatMap(p => p.evidence.hcursor
-          .downField("threat_feed").get[List[Json]]("signals").getOrElse(Nil))
+        val cohortEvidence = ProxyBehaviorCohorts.evidence(
+          deviceWindows,
+          ProxyIntelligencePolicy
+            .component(policy.intelligencePolicy, "cohorts"),
+          policy.conflictsAttested
+        )
+        val rawSignals = (windows ++ deviceWindows).flatMap(p =>
+          p.evidence.hcursor
+            .downField("threat_feed")
+            .get[List[Json]]("signals")
+            .getOrElse(Nil)
+        )
         val signalOverflow = rawSignals.size > 256
         def publish(p: Projection, cohorts: Boolean): Projection =
-          val report = p.evidence.hcursor.downField("threat_feed").focus.getOrElse(Json.obj())
+          val report = p.evidence.hcursor
+            .downField("threat_feed")
+            .focus
+            .getOrElse(Json.obj())
             .mapObject(_.remove("state").remove("signals"))
-            .deepMerge(Json.obj(
-              "signal_ids" -> (if signalOverflow then Nil else p.evidence.hcursor.downField("threat_feed")
-                .get[List[Json]]("signals").getOrElse(Nil).flatMap(s => text(s, "signal_id"))).asJson,
-              "signal_read_surface" -> "atheros_search.proxy_signal".asJson,
-              "publication_disposition" -> (if signalOverflow then "combined_signal_bound_exceeded" else "expiry_aware_state").asJson))
-          val evidence = p.evidence.deepMerge(Json.obj("threat_feed" -> report)).deepMerge(
-            if cohorts then Json.obj("cohort_input_fingerprint" -> p.fingerprint.asJson,
-              "behavioral_cohorts" -> cohortEvidence.getOrElse(p.key, Json.obj())) else Json.obj())
-          projection(policy, p.key, evidence, p.semanticText, p.disposition, p.sourceWatermark, p.observedAt)
+            .deepMerge(
+              Json.obj(
+                "signal_ids" -> (if signalOverflow then Nil
+                                 else
+                                   p.evidence.hcursor
+                                     .downField("threat_feed")
+                                     .get[List[Json]]("signals")
+                                     .getOrElse(Nil)
+                                     .flatMap(s => text(s, "signal_id"))
+                ).asJson,
+                "signal_read_surface" -> "atheros_search.proxy_signal".asJson,
+                "publication_disposition" -> (if signalOverflow then
+                                                "combined_signal_bound_exceeded"
+                                              else "expiry_aware_state").asJson
+              )
+            )
+          val evidence = p.evidence
+            .mapObject(_.add("threat_feed", report))
+            .deepMerge(if cohorts then
+              Json.obj(
+                "cohort_input_fingerprint" -> p.fingerprint.asJson,
+                "behavioral_cohorts" -> cohortEvidence
+                  .getOrElse(p.key, Json.obj())
+              )
+            else Json.obj())
+          projection(
+            policy,
+            p.key,
+            evidence,
+            p.semanticText,
+            p.disposition,
+            p.sourceWatermark,
+            p.observedAt
+          )
         Right(
           Result(
             flows,
             windows.map(publish(_, false)),
-            retained.map(_.id).distinct.size - supported.map(_.id).distinct.size,
+            retained
+              .map(_.id)
+              .distinct
+              .size - supported.map(_.id).distinct.size,
             destinations,
             deviceWindows.map(publish(_, true)),
             attributionWindows,
@@ -463,6 +539,12 @@ object ProxyBehavior:
       !policy.coverageStart.isAfter(policy.lookbackStart) && !policy.coverageEnd
         .isBefore(policy.asOf)).asJson
   )
+
+  private[processor] def collectionComplete(
+      p: Projection,
+      conflictsAttested: Boolean
+  ): Boolean =
+    p.disposition == "available" && conflictsAttested
 
   private def enrichWindow(
       policy: Policy,
@@ -484,29 +566,45 @@ object ProxyBehavior:
     val historical = matching.filter(_.observedAt.isBefore(start))
     val first = rows.headOption
     val novel = first.map(o => !o.at.isBefore(start) && o.at.isBefore(end))
-    val complete = p.disposition == "available" && policy.conflictsAttested
+    val complete = collectionComplete(p, policy.conflictsAttested)
     val prior = rows.filter(_.at.isBefore(start)).map(_.source.row)
     val current = inWindow.map(_.source.row)
     val historyStart = text(p.evidence, "valid_from")
       .flatMap(ProxyBehaviorScopes.instant)
-      .filter(_.isAfter(policy.lookbackStart)).getOrElse(policy.lookbackStart)
+      .filter(_.isAfter(policy.lookbackStart))
+      .getOrElse(policy.lookbackStart)
     val historyComplete = complete && policy.coverageAttested &&
-      !policy.coverageStart.isAfter(historyStart) && !policy.coverageEnd.isBefore(end)
-    val domainCurrent = domainRows.filter(o => !o.at.isBefore(start) && o.at.isBefore(end)).map(_.source.row)
-    val domainHistory = domainRows.filter(_.at.isBefore(start)).map(_.source.row)
-    val infrastructure = ProxyDestinationInfrastructure.evidence(current, prior, historyComplete)
-    val addresses = List("current", "baseline").flatMap { slice =>
-      List("selected_ips", "resolved_ips").flatMap(field => infrastructure.hcursor.downField(slice)
-        .get[List[Json]](field).getOrElse(Nil).flatMap(ip => text(ip, "ip")))
-    }.distinct.sorted
+      !policy.coverageStart.isAfter(historyStart) && !policy.coverageEnd
+        .isBefore(end)
+    val domainCurrent = domainRows
+      .filter(o => !o.at.isBefore(start) && o.at.isBefore(end))
+      .map(_.source.row)
+    val domainHistory =
+      domainRows.filter(_.at.isBefore(start)).map(_.source.row)
+    val infrastructure =
+      ProxyDestinationInfrastructure.evidence(current, prior, historyComplete)
+    val addresses = List("current", "baseline")
+      .flatMap { slice =>
+        List("selected_ips", "resolved_ips").flatMap(field =>
+          infrastructure.hcursor
+            .downField(slice)
+            .get[List[Json]](field)
+            .getOrElse(Nil)
+            .flatMap(ip => text(ip, "ip"))
+        )
+      }
+      .distinct
+      .sorted
     // Flow validation requires pairing context outside the observation window.
     val pairingStart = start.minus(policy.pairingHorizon)
     val pairingEnd = end.plus(policy.pairingHorizon)
-    val flowStartComplete = complete && !pairingStart.isBefore(policy.coverageStart) &&
-      !pairingEnd.isAfter(policy.asOf) &&
-      !pairingEnd.isAfter(policy.coverageEnd) &&
-      text(p.evidence, "valid_until").flatMap(ProxyBehaviorScopes.instant)
-        .forall(until => !pairingEnd.isAfter(until))
+    val flowStartComplete =
+      complete && !pairingStart.isBefore(policy.coverageStart) &&
+        !pairingEnd.isAfter(policy.asOf) &&
+        !pairingEnd.isAfter(policy.coverageEnd) &&
+        text(p.evidence, "valid_until")
+          .flatMap(ProxyBehaviorScopes.instant)
+          .forall(until => !pairingEnd.isAfter(until))
     val evidence = p.evidence
       .deepMerge(
         Json.obj(
@@ -520,22 +618,45 @@ object ProxyBehavior:
             "history_complete_within_bounds" -> historyComplete.asJson,
             "left_censored" -> true.asJson,
             "calibration_status" -> "unvalidated".asJson,
-            "policy_status" -> (if ProxyIntelligencePolicy.valid(policy.intelligencePolicy)
-              then "supported_or_disabled" else "invalid_envelope").asJson
+            "policy_status" -> (if ProxyIntelligencePolicy.valid(
+                                    policy.intelligencePolicy
+                                  )
+                                then "supported_or_disabled"
+                                else "invalid_envelope").asJson
           ),
           "clienthello_drift" -> ProxyClientHelloDrift.evidence(
-            current, prior, historyComplete,
+            current,
+            prior,
+            historyComplete,
             text(p.evidence, "scope_kind").contains("registration")
           ),
-          "destination_infrastructure" -> infrastructure.deepMerge(Json.obj("asn" ->
-            ProxyAsnEnrichment.evidence(addresses,
-              ProxyIntelligencePolicy.component(policy.intelligencePolicy, "asn_cache"), policy.asOf))),
-          "domain_lexical" -> ProxyDomainLexical.evidence(
-            current, prior, historyComplete, domainCurrent, domainHistory,
-            ProxyIntelligencePolicy.component(policy.intelligencePolicy, "lexical")
+          "destination_infrastructure" -> infrastructure.deepMerge(
+            Json.obj(
+              "asn" ->
+                ProxyAsnEnrichment.evidence(
+                  addresses,
+                  ProxyIntelligencePolicy
+                    .component(policy.intelligencePolicy, "asn_cache"),
+                  policy.evaluationTime.getOrElse(policy.asOf)
+                )
+            )
           ),
-          "threat_feed" -> ProxyThreatFeed.evidence(current, p,
-            ProxyIntelligencePolicy.component(policy.intelligencePolicy, "threat_feed"), policy.asOf),
+          "domain_lexical" -> ProxyDomainLexical.evidence(
+            current,
+            prior,
+            historyComplete,
+            domainCurrent,
+            domainHistory,
+            ProxyIntelligencePolicy
+              .component(policy.intelligencePolicy, "lexical")
+          ),
+          "threat_feed" -> ProxyThreatFeed.evidence(
+            current,
+            p,
+            ProxyIntelligencePolicy
+              .component(policy.intelligencePolicy, "threat_feed"),
+            policy.evaluationTime.getOrElse(policy.asOf)
+          ),
           "polling" -> ProxyBehaviorStatistics.polling(
             inWindow.map(_.source.row),
             matching,
@@ -578,17 +699,34 @@ object ProxyBehavior:
       watermark: Long,
       at: Instant
   ): Projection =
-    val stable = evidence.mapObject(_.remove("calculated_at")).deepMerge(
-      Json.obj(
-        "deployment_scope" -> policy.deploymentScope.asJson,
-        "policy_version" -> policy.policyVersion.asJson,
-        "calculation_version" -> CalculationVersion.asJson,
-        "normalization_version" -> ProxyAuthority.Version.asJson,
-        "source_watermark" -> watermark.asJson
+    val stable = evidence
+      .mapObject(_.remove("calculated_at"))
+      .deepMerge(
+        Json.obj(
+          "deployment_scope" -> policy.deploymentScope.asJson,
+          "policy_version" -> policy.policyVersion.asJson,
+          "calculation_version" -> CalculationVersion.asJson,
+          "normalization_version" -> ProxyAuthority.Version.asJson,
+          "source_watermark" -> watermark.asJson
+        )
       )
-    )
+    // These bounds describe the evaluation, rather than the observations. Keep
+    // source timestamps, registration validity, expiry and completeness in the
+    // identity so real changes still invalidate previously published evidence.
+    val content = stable
+      .mapObject(
+        _.remove("retained_history_start").remove("retained_history_end")
+      )
+      .mapObject { obj =>
+        obj("intelligence_context").fold(obj)(context =>
+          obj.add(
+            "intelligence_context",
+            context.mapObject(_.remove("history_start"))
+          )
+        )
+      }
     val fingerprint = Sha256Utils.sha256Hex(
-      CanonicalPrinter.print(stable).getBytes(StandardCharsets.UTF_8)
+      CanonicalPrinter.print(content).getBytes(StandardCharsets.UTF_8)
     )
     Projection(
       key,
@@ -601,16 +739,24 @@ object ProxyBehavior:
     )
 
   private def flow(
-    policy: Policy,
-    correlation: String,
-    sources: List[Source],
-    conflicts: List[Source],
-    conflictingIds: Set[String],
-    conflictCorrelations: Set[String]
+      policy: Policy,
+      correlation: String,
+      sources: List[Source],
+      conflicts: List[Source],
+      conflictingIds: Set[String],
+      conflictCorrelations: Set[String]
   ): Projection =
-    val ordered = sources.sortBy(source => (time(source.row).getOrElse(Instant.MIN), text(source.row, "event_id").getOrElse("")))
-    val opens = ordered.filter(source => text(source.row, "type").contains("tunnel_open"))
-    val terminals = ordered.filter(source => text(source.row, "type").contains("tunnel_close"))
+    val ordered = sources.sortBy(source =>
+      (
+        time(source.row).getOrElse(Instant.MIN),
+        text(source.row, "event_id").getOrElse("")
+      )
+    )
+    val opens =
+      ordered.filter(source => text(source.row, "type").contains("tunnel_open"))
+    val terminals = ordered.filter(source =>
+      text(source.row, "type").contains("tunnel_close")
+    )
     val openedAt = opens.headOption.flatMap(source => time(source.row))
     val closedAt = terminals.headOption.flatMap(source => time(source.row))
     val lower = closedAt.map(_.minus(policy.pairingHorizon)).orElse(openedAt)
@@ -618,111 +764,263 @@ object ProxyBehavior:
     val sourceValid = ordered.forall { source =>
       val row = source.row
       val expected = if text(row, "type").contains("tunnel_open") then 1 else 2
-      uuid(row, "event_id").isDefined && time(row).isDefined && text(row, "host").exists(_.nonEmpty) &&
-        row.hcursor.get[Int]("event_sequence").contains(expected) && row.hcursor.get[Boolean]("blocked").contains(false)
+      uuid(row, "event_id").isDefined && time(row).isDefined && text(
+        row,
+        "host"
+      ).exists(_.nonEmpty) &&
+      row.hcursor.get[Int]("event_sequence").contains(expected) && row.hcursor
+        .get[Boolean]("blocked")
+        .contains(false)
     }
     val disposition =
-      if conflictCorrelations(correlation) || ordered.exists(source => uuid(source.row, "event_id").exists(conflictingIds)) || opens.size > 1 || terminals.size > 1 then "ambiguous"
+      if conflictCorrelations(correlation) || ordered.exists(source =>
+          uuid(source.row, "event_id").exists(conflictingIds)
+        ) || opens.size > 1 || terminals.size > 1
+      then "ambiguous"
       else if !sourceValid then "ineligible"
-      else if openedAt.zip(closedAt).exists((open, close) => close.isBefore(open)) ||
-        opens.headOption.zip(terminals.headOption).exists((open, close) =>
-          text(open.row, "host") != text(close.row, "host") || endpointKey(open.row) != endpointKey(close.row)) then "inconsistent"
-      else if closedAt.zip(upper).exists((close, end) => close.isAfter(end)) then "outside_horizon"
+      else if openedAt
+          .zip(closedAt)
+          .exists((open, close) => close.isBefore(open)) ||
+        opens.headOption
+          .zip(terminals.headOption)
+          .exists((open, close) =>
+            text(open.row, "host") != text(close.row, "host") || endpointKey(
+              open.row
+            ) != endpointKey(close.row)
+          )
+      then "inconsistent"
+      else if closedAt.zip(upper).exists((close, end) => close.isAfter(end))
+      then "outside_horizon"
       else if !policy.conflictsAttested then "conflict_coverage_unavailable"
-      else if policy.coverageAttested && lower.exists(_.isBefore(policy.coverageStart)) then "retention_truncated"
-      else if !policy.coverageAttested || upper.exists(end => !end.isBefore(policy.coverageEnd)) then "coverage_limited"
+      else if policy.coverageAttested && lower.exists(
+          _.isBefore(policy.coverageStart)
+        )
+      then "retention_truncated"
+      else if !policy.coverageAttested || upper.exists(end =>
+          !end.isBefore(policy.coverageEnd)
+        )
+      then "coverage_limited"
       else if opens.isEmpty then "missing_open"
       else if terminals.isEmpty then "missing_terminal"
       else "validated"
     val terminal = Option.when(terminals.size == 1)(terminals.head.row)
-    val measurement = terminal.map(row => transfer(row, disposition == "validated")).getOrElse(unavailableTransfer)
+    val measurement = terminal
+      .map(row => transfer(row, disposition == "validated"))
+      .getOrElse(unavailableTransfer)
     val at = closedAt.orElse(openedAt).getOrElse(policy.lookbackStart)
-    val normalized = ordered.headOption.map(source => ProxyEvidence.normalized(source.row))
+    val normalized =
+      ordered.headOption.map(source => ProxyEvidence.normalized(source.row))
     val host = normalized.flatMap(value => text(value, "host_normalized"))
     val endpoint = ordered.headOption.flatMap(source => endpointKey(source.row))
-    val references = ordered.flatMap(source => uuid(source.row, "event_id").map(id => Json.obj("event_id" -> id.asJson, "revision" -> source.revision.asJson)))
-    val relevantConflicts = conflicts.filter(source => source.conflicts.asObject.exists(_.values.exists(_.asString.contains(correlation))) || uuid(source.row, "correlation_id").contains(correlation))
-    val watermark = (ordered ++ relevantConflicts).map(_.revision).maxOption.getOrElse(0L)
-    val evidence = Json.obj(
-      "correlation_id" -> correlation.asJson, "disposition" -> disposition.asJson,
-      "source_event_ids" -> ordered.flatMap(source => uuid(source.row, "event_id")).distinct.sorted.asJson,
-      "source_references" -> references.asJson, "host_normalized" -> host.asJson, "endpoint_key" -> endpoint.asJson,
-      "opened_at" -> openedAt.map(_.toString).asJson, "closed_at" -> closedAt.map(_.toString).asJson,
-      "pairing_horizon_ms" -> policy.pairingHorizon.toMillis.asJson,
-      "observation_elapsed_ms" -> openedAt.zip(closedAt).filter((open, close) => !close.isBefore(open)).map((open, close) => Duration.between(open, close).toMillis).asJson
-    ).deepMerge(measurement)
+    val references = ordered.flatMap(source =>
+      uuid(source.row, "event_id").map(id =>
+        Json.obj("event_id" -> id.asJson, "revision" -> source.revision.asJson)
+      )
+    )
+    val relevantConflicts = conflicts.filter(source =>
+      source.conflicts.asObject.exists(
+        _.values.exists(_.asString.contains(correlation))
+      ) || uuid(source.row, "correlation_id").contains(correlation)
+    )
+    val watermark =
+      (ordered ++ relevantConflicts).map(_.revision).maxOption.getOrElse(0L)
+    val evidence = Json
+      .obj(
+        "correlation_id" -> correlation.asJson,
+        "disposition" -> disposition.asJson,
+        "source_event_ids" -> ordered
+          .flatMap(source => uuid(source.row, "event_id"))
+          .distinct
+          .sorted
+          .asJson,
+        "source_references" -> references.asJson,
+        "host_normalized" -> host.asJson,
+        "endpoint_key" -> endpoint.asJson,
+        "opened_at" -> openedAt.map(_.toString).asJson,
+        "closed_at" -> closedAt.map(_.toString).asJson,
+        "pairing_horizon_ms" -> policy.pairingHorizon.toMillis.asJson,
+        "observation_elapsed_ms" -> openedAt
+          .zip(closedAt)
+          .filter((open, close) => !close.isBefore(open))
+          .map((open, close) => Duration.between(open, close).toMillis)
+          .asJson
+      )
+      .deepMerge(measurement)
     val bytesStatus = text(measurement, "bytes_status").getOrElse("unavailable")
-    val prose = List("proxy flow", host.getOrElse("host unavailable"), disposition, s"transfer $bytesStatus", "duration scope retained separately").mkString(" ")
-    projection(policy, identity(policy.deploymentScope, correlation), evidence, prose, disposition, watermark, at)
+    val prose = List(
+      "proxy flow",
+      host.getOrElse("host unavailable"),
+      disposition,
+      s"transfer $bytesStatus",
+      "duration scope retained separately"
+    ).mkString(" ")
+    projection(
+      policy,
+      identity(policy.deploymentScope, correlation),
+      evidence,
+      prose,
+      disposition,
+      watermark,
+      at
+    )
 
   private val unavailableTransfer = Json.obj(
-    "bytes_status" -> "unavailable".asJson, "bytes_up" -> Json.Null, "bytes_down" -> Json.Null,
-    "partial_bytes_up" -> Json.Null, "partial_bytes_down" -> Json.Null,
-    "duration_status" -> "unavailable".asJson, "duration_ms" -> Json.Null
+    "bytes_status" -> "unavailable".asJson,
+    "bytes_up" -> Json.Null,
+    "bytes_down" -> Json.Null,
+    "partial_bytes_up" -> Json.Null,
+    "partial_bytes_down" -> Json.Null,
+    "duration_status" -> "unavailable".asJson,
+    "duration_ms" -> Json.Null
   )
 
   private def transfer(row: Json, validated: Boolean): Json =
     val measurement = row.hcursor.downField("measurement")
-    val versioned = text(row, "evidence_version").contains(ProxyEvidence.Version) &&
-      measurement.get[String]("version").contains("proxy-measurement-v1")
-    val provenance = versioned && measurement.get[String]("source").contains("successful_socket_writes") &&
+    val versioned =
+      text(row, "evidence_version").contains(ProxyEvidence.Version) &&
+        measurement.get[String]("version").contains("proxy-measurement-v1")
+    val provenance = versioned && measurement
+      .get[String]("source")
+      .contains("successful_socket_writes") &&
       measurement.get[String]("byte_unit").contains("bytes") &&
-      measurement.get[String]("up_direction").contains("client_to_destination") &&
-      measurement.get[String]("down_direction").contains("destination_to_client")
-    val counters = nonnegative(row, "bytes_up").zip(nonnegative(row, "bytes_down"))
+      measurement
+        .get[String]("up_direction")
+        .contains("client_to_destination") &&
+      measurement
+        .get[String]("down_direction")
+        .contains("destination_to_client")
+    val counters =
+      nonnegative(row, "bytes_up").zip(nonnegative(row, "bytes_down"))
     val declared = measurement.get[String]("bytes_status").toOption
     val destinationKnown = !text(row, "reason").contains("allowed_plaintext")
-    val measured = validated && provenance && destinationKnown && declared.contains("measured_terminal") &&
-      measurement.get[String]("termination").contains("measured_terminal") && counters.isDefined
+    val measured =
+      validated && provenance && destinationKnown && declared.contains(
+        "measured_terminal"
+      ) &&
+        measurement
+          .get[String]("termination")
+          .contains("measured_terminal") && counters.isDefined
     val partial = validated && provenance && declared.contains("partial") &&
-      measurement.get[String]("termination").contains("partial") && counters.isDefined
-    val status = if measured then "measured_terminal" else if partial then "partial" else if !versioned then "legacy_unknown" else "unavailable"
-    val duration = Option.when(validated && versioned && measurement.get[String]("duration_status").contains("connection_elapsed"))(nonnegative(row, "duration_ms")).flatten
+      measurement
+        .get[String]("termination")
+        .contains("partial") && counters.isDefined
+    val status = if measured then "measured_terminal"
+    else if partial then "partial"
+    else if !versioned then "legacy_unknown"
+    else "unavailable"
+    val duration = Option
+      .when(
+        validated && versioned && measurement
+          .get[String]("duration_status")
+          .contains("connection_elapsed")
+      )(nonnegative(row, "duration_ms"))
+      .flatten
     Json.obj(
       "bytes_status" -> status.asJson,
       "bytes_up" -> Option.when(measured)(counters.get._1).asJson,
       "bytes_down" -> Option.when(measured)(counters.get._2).asJson,
       "partial_bytes_up" -> Option.when(partial)(counters.get._1).asJson,
       "partial_bytes_down" -> Option.when(partial)(counters.get._2).asJson,
-      "duration_status" -> (if duration.isDefined then "connection_elapsed" else "unavailable").asJson,
+      "duration_status" -> (if duration.isDefined then "connection_elapsed"
+                            else "unavailable").asJson,
       "duration_ms" -> duration.asJson
     )
 
-  private def hostWindow(policy: Policy, endpoint: String, start: Instant, sources: List[Observation], flows: List[Projection], conflictingIds: Set[String]): Projection =
+  private def hostWindow(
+      policy: Policy,
+      endpoint: String,
+      start: Instant,
+      sources: List[Observation],
+      flows: List[Projection],
+      conflictingIds: Set[String]
+  ): Projection =
     val end = start.plusSeconds(policy.windowSeconds.toLong)
-    val candidates = sources.filter(source => !source.at.isBefore(start) && source.at.isBefore(end))
+    val candidates = sources.filter(source =>
+      !source.at.isBefore(start) && source.at.isBefore(end)
+    )
     val inWindow = candidates.filterNot(source => conflictingIds(source.id))
-    val associatedFlows = flows.filter(flow => text(flow.evidence, "endpoint_key").contains(endpoint) &&
-      !flow.observedAt.isBefore(start) && flow.observedAt.isBefore(end))
+    val associatedFlows = flows.filter(flow =>
+      text(flow.evidence, "endpoint_key").contains(endpoint) &&
+        !flow.observedAt.isBefore(start) && flow.observedAt.isBefore(end)
+    )
     val validated = associatedFlows.filter(_.disposition == "validated")
-    val measured = validated.filter(flow => text(flow.evidence, "bytes_status").contains("measured_terminal"))
-    val blocked = inWindow.count(source => source.source.row.hcursor.get[Boolean]("blocked").getOrElse(BlockedTypes(source.eventType)))
+    val measured = validated.filter(flow =>
+      text(flow.evidence, "bytes_status").contains("measured_terminal")
+    )
+    val blocked = inWindow.count(source =>
+      source.source.row.hcursor
+        .get[Boolean]("blocked")
+        .getOrElse(BlockedTypes(source.eventType))
+    )
     val latest = inWindow.lastOption
-    val watermark = (candidates.map(_.source.revision) ++ associatedFlows.map(_.sourceWatermark)).maxOption.getOrElse(0L)
-    val full = policy.coverageAttested && !start.isBefore(policy.coverageStart) && !end.isAfter(policy.coverageEnd) && !start.isBefore(policy.lookbackStart) && !end.isAfter(policy.asOf)
-    val disposition = if candidates.size != inWindow.size then "ambiguous_source_evidence" else if full then "available" else "coverage_limited"
-    val totalsStatus = if measured.isEmpty then "unavailable" else if measured.size == validated.size then "measured_terminal" else "measured_subset"
-    val coveredStart = if start.isBefore(policy.coverageStart) then policy.coverageStart else start
-    val coveredEnd = if end.isAfter(policy.coverageEnd) then policy.coverageEnd else end
+    val watermark = (candidates.map(_.source.revision) ++ associatedFlows.map(
+      _.sourceWatermark
+    )).maxOption.getOrElse(0L)
+    val full = policy.coverageAttested && !start.isBefore(
+      policy.coverageStart
+    ) && !end.isAfter(policy.coverageEnd) && !start.isBefore(
+      policy.lookbackStart
+    ) && !end.isAfter(policy.asOf)
+    val disposition = if candidates.size != inWindow.size then
+      "ambiguous_source_evidence"
+    else if full then "available"
+    else "coverage_limited"
+    val totalsStatus = if measured.isEmpty then "unavailable"
+    else if measured.size == validated.size then "measured_terminal"
+    else "measured_subset"
+    val coveredStart = if start.isBefore(policy.coverageStart) then
+      policy.coverageStart
+    else start
+    val coveredEnd =
+      if end.isAfter(policy.coverageEnd) then policy.coverageEnd else end
     val overlap = coveredStart.isBefore(coveredEnd)
     val evidence = Json.obj(
-      "endpoint_key" -> endpoint.asJson, "host_normalized" -> sources.head.host.asJson,
-      "window_start" -> stamp(start), "window_end" -> stamp(end),
-      "disposition" -> disposition.asJson, "observed_count" -> inWindow.size.asJson,
+      "endpoint_key" -> endpoint.asJson,
+      "host_normalized" -> sources.head.host.asJson,
+      "window_start" -> stamp(start),
+      "window_end" -> stamp(end),
+      "disposition" -> disposition.asJson,
+      "observed_count" -> inWindow.size.asJson,
       "excluded_observations" -> (candidates.size - inWindow.size).asJson,
-      "allowed_observations" -> (inWindow.size - blocked).asJson, "blocked_observations" -> blocked.asJson,
-      "validated_flows" -> validated.size.asJson, "measured_flows" -> measured.size.asJson,
+      "allowed_observations" -> (inWindow.size - blocked).asJson,
+      "blocked_observations" -> blocked.asJson,
+      "validated_flows" -> validated.size.asJson,
+      "measured_flows" -> measured.size.asJson,
       "unavailable_flows" -> (validated.size - measured.size).asJson,
       "transfer_totals_status" -> totalsStatus.asJson,
-      "bytes_up" -> Option.when(measured.nonEmpty)(measured.map(flow => BigInt(flow.evidence.hcursor.get[Long]("bytes_up").toOption.get)).sum).asJson,
-      "bytes_down" -> Option.when(measured.nonEmpty)(measured.map(flow => BigInt(flow.evidence.hcursor.get[Long]("bytes_down").toOption.get)).sum).asJson,
-      "last_event_id" -> latest.map(_.id).asJson, "last_event_time" -> latest.map(_.at.toString).asJson,
+      "bytes_up" -> Option
+        .when(measured.nonEmpty)(
+          measured
+            .map(flow =>
+              BigInt(flow.evidence.hcursor.get[Long]("bytes_up").toOption.get)
+            )
+            .sum
+        )
+        .asJson,
+      "bytes_down" -> Option
+        .when(measured.nonEmpty)(
+          measured
+            .map(flow =>
+              BigInt(flow.evidence.hcursor.get[Long]("bytes_down").toOption.get)
+            )
+            .sum
+        )
+        .asJson,
+      "last_event_id" -> latest.map(_.id).asJson,
+      "last_event_time" -> latest.map(_.at.toString).asJson,
       "source_event_ids" -> inWindow.map(_.id).distinct.sorted.asJson,
       "flow_keys" -> validated.map(_.key).sorted.asJson,
       "coverage_start" -> Option.when(overlap)(coveredStart.toString).asJson,
       "coverage_end" -> Option.when(overlap)(coveredEnd.toString).asJson,
       "attempt_count" -> Json.Null
     )
-    projection(policy, identity(policy.deploymentScope, endpoint, start.toString), evidence,
-      "proxy host window " + sources.head.host.getOrElse("host unavailable") + " " + disposition,
-      disposition, watermark, start)
+    projection(
+      policy,
+      identity(policy.deploymentScope, endpoint, start.toString),
+      evidence,
+      "proxy host window " + sources.head.host
+        .getOrElse("host unavailable") + " " + disposition,
+      disposition,
+      watermark,
+      start
+    )

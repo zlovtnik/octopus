@@ -3670,8 +3670,6 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       first <- status
       _ <- tick(lease, 1)
       completed <- status
-      remainingWork <- tick(lease, 2)
-      replay <- status
       evaluationTimes <- sql"""SELECT DISTINCT evidence->>'retained_history_end'
         FROM atheros_search.proxy_host_window WHERE deployment_scope='behavior-contract'"""
         .query[String]
@@ -3681,9 +3679,66 @@ class OctopusPersistenceIntegrationSuite extends CatsEffectSuite:
       assertEquals(firstWork, 125)
       assertEquals(first, ("recomputing", Some(behaviorNow.toString)))
       assertEquals(completed, ("ready", Some(behaviorNow.toString)))
-      assertEquals(remainingWork, 0)
-      assertEquals(replay._1, "ready")
       assertEquals(evaluationTimes, List(behaviorNow.toString))
+    ).guarantee(clearBehaviorFixtures)
+  }
+
+  test(
+    "a new behavior generation advances partial window coverage without rewriting completed windows"
+  ) {
+    requireDocker()
+    val currentWindow = java.sql.Timestamp.from(
+      java.time.Instant.parse("2031-01-02T12:00:00Z")
+    )
+    val cutoff = java.sql.Timestamp.from(behaviorNow)
+    def partialWindow =
+      sql"""SELECT projection_revision,evidence->>'coverage_end'
+        FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_start=$currentWindow"""
+        .query[(Long, String)]
+        .unique
+        .transact(xa)
+    def completedWindows =
+      sql"""SELECT window_start,projection_revision,source_fingerprint
+        FROM atheros_search.proxy_host_window
+        WHERE deployment_scope='behavior-contract' AND window_end <= $cutoff
+        ORDER BY window_start"""
+        .query[(java.sql.Timestamp, Long, String)]
+        .to[List]
+        .transact(xa)
+    def nextTick(lease: com.sslproxy.coordinator.processor.Lease) =
+      com.sslproxy.coordinator.postgres.sql.ProxyBehaviorSql
+        .tick(
+          lease,
+          100,
+          "nomic-embed-text-v2-moe",
+          "legacy_unknown",
+          100,
+          behaviorNow.plusSeconds(2)
+        )
+        .transact(xa)
+    (for
+      _ <- clearBehaviorFixtures
+      lease <- proxyLease
+      _ <- behaviorPolicy
+      _ <- behaviorPair()
+      _ <- behaviorTick(lease)
+      originalPartial <- partialWindow
+      originalCompleted <- completedWindows
+      changed <- nextTick(lease)
+      updatedPartial <- partialWindow
+      updatedCompleted <- completedWindows
+      replayWork <- nextTick(lease)
+      replayPartial <- partialWindow
+    yield
+      assertEquals(changed, 1)
+      assertEquals(originalPartial._2, behaviorNow.toString)
+      assertEquals(updatedPartial._2, behaviorNow.plusSeconds(2).toString)
+      assert(updatedPartial._1 > originalPartial._1)
+      assert(originalCompleted.nonEmpty)
+      assertEquals(updatedCompleted, originalCompleted)
+      assertEquals(replayWork, 0)
+      assertEquals(replayPartial, updatedPartial)
     ).guarantee(clearBehaviorFixtures)
   }
 
